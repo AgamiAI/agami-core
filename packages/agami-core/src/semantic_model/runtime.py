@@ -1784,6 +1784,33 @@ def _same_identifier(a: tuple[bool, str], b: tuple[bool, str]) -> bool:
     return a[0] == b[0] and (a[1] == b[1] if a[0] else a[1].lower() == b[1].lower())
 
 
+def _declared_reference(tbl: "exp.Expression", sidx: dict, decls: "dict[tuple, list[Table]]",
+                        dialect: "str | None") -> "tuple[Optional[Table], bool]":
+    """(the declared table a reference reads, whether it read a table the receipt could not resolve).
+
+    Resolved where it is written, once, for every field the `tables` section reports and for its
+    declared filters (#462): a WITH reference (`_cte_binding`) reads no model table; anything else
+    resolves by `_resolve_table`, the scope gate's schema-aware rule, so `staging.orders` gets
+    staging's row and never the first `orders` the model happens to list. A name declared in two
+    schemas with no schema written, a `db..table` read, a name a WITH RECURSIVE sibling or a
+    quoted-apart WITH may bind instead, is a table the receipt cannot pin to one row: it borrows
+    none, and the second value says so for the section's marker.
+    """
+    if not isinstance(tbl, exp.Table) or _cte_binding(tbl) is not None:
+        return None, False
+    if not tbl.db and (_recursive_namesake(tbl) or _folded_namesake(tbl)):
+        # A name a WITH RECURSIVE sibling defined later, or a WITH of the same name told apart only
+        # by quoting, may bind to the step: which relation was read is not established.
+        return None, True
+    found = _resolve_table(sidx, tbl, decls, dialect)
+    if found in ("ambiguous", "default_schema"):
+        return None, True
+    if not isinstance(found, tuple):
+        return None, False
+    hits = [t for t in decls.get(found, []) if _names_declared(tbl, t, dialect)]
+    return (hits[0] if hits else None), False
+
+
 def _cte_references(tree: "exp.Expression") -> set[int]:
     """The `exp.Table` nodes (by id) that name a CTE VISIBLE where they are written.
 
@@ -2763,7 +2790,7 @@ def _aggregate_reports(tree, org: Datasource,
                        ctx: "GuardContext | None" = None,
                        *, visible: Optional[set[str]] = None,
                        tidx: Optional[dict[str, tuple]] = None,
-                       join_statuses: "tuple[list[tuple[str, str, str]], int] | None" = None,
+                       join_statuses: "tuple[list[tuple[frozenset, str, str]], int] | None" = None,
                        ) -> list[AggregateReport]:
     """The analysis half, on an already-parsed tree: one report per aggregate the statement outputs.
 
@@ -2802,20 +2829,23 @@ def _aggregate_reports(tree, org: Datasource,
         tidx = tidx or (ctx.model_table_index if ctx is not None else _model_table_index(org))
         visible = set(tidx) - _cte_names(tree) if visible is None else visible
     reports: list[AggregateReport] = []
+    sidx = ctx.schema_index if ctx is not None and ctx.schema_index is not None else _schema_index(org)
+    smemo: dict = {}                # one step memo for every arm (ACE-178)
     for arm in _output_select_arms(tree):
         for sel in arm:
             reports.extend(_preflight_select(
                 sel, org, ctx=ctx,
                 scope="main" + suffixes.get(id(sel), ""), visible=visible, tidx=tidx,
+                sidx=sidx, smemo=smemo,
             ))
     if join_statuses is None and reports:
         # The pre-flight path (`sm prepare`) holds no joins section, so it settles the joins here —
         # the same ladder the receipt runs — rather than claim numbers clean it never weighed.
-        sites, written = _join_sites(tree, visible, _RECEIPT_MAX_REFS)
+        sites, written = _join_sites(tree, visible, _RECEIPT_MAX_REFS, sidx, smemo)
         declared = ([(rel, _declared_pairs(rel, _dialect_of(org)[0])) for rel in _cardinality_index(org)]
                     if sites else [])
         weighed = _weighed_statuses(sites, [_join_site_status(js, declared) for js in sites], tidx, org)
-        join_statuses = ([(js.scope, status, f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
+        join_statuses = ([(js.feeds, status, f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
                           for js, status in zip(sites, weighed)], written - len(sites))
     return _downgrade_unweighed(reports, *join_statuses) if join_statuses else reports
 
@@ -2845,8 +2875,10 @@ def _weighed_statuses(sites: "list[_JoinSite]", results: "list[tuple[str, Option
              for js, (status, _match) in zip(sites, results)]
     out = []
     for i, (js, (status, _match)) in enumerate(zip(sites, results)):
+        # The joins that can feed the same numbers: its own scope, or a shared output arm (#429). A
+        # join in a step no arm reads feeds nothing, so it cannot hold this one back.
         others = [j for j, other in enumerate(sites) if j != i and (
-            other.scope == js.scope or other.scope.startswith("cte:") or js.scope.startswith("cte:"))]
+            other.scope == js.scope or other.feeds & js.feeds)]
         if keyed[i] and all(keyed[j] or (results[j][0] == DECLARED and results[j][1] is not None
                                          and results[j][1].relationship == "one_to_one")
                             for j in others):
@@ -2889,7 +2921,7 @@ def _keyed_one_to_one(js: "_JoinSite", tidx: dict[str, tuple], several: set[str]
     return True
 
 
-def _downgrade_unweighed(reports: list[AggregateReport], joins: list[tuple[str, str, str]],
+def _downgrade_unweighed(reports: list[AggregateReport], joins: list[tuple[frozenset, str, str]],
                          dropped: int) -> list[AggregateReport]:
     """`not_multiplied` is a positive claim that no join repeated the rows behind a number, and the
     fan detector can only make it about joins whose cardinality it knows. A join no declaration
@@ -2897,8 +2929,9 @@ def _downgrade_unweighed(reports: list[AggregateReport], joins: list[tuple[str, 
     number it could reach says it could not tell, naming the joins: the rule `_multiplication_status`
     states per aggregate.
 
-    Only joins that can feed the number count: its own query branch, or a CTE (which any branch may
-    read). A join in another UNION arm, or inside a `WHERE ... IN (subquery)`, can't repeat its rows.
+    Only joins that can feed the number count: its own query branch, or a WITH step that branch
+    reads (`_JoinSite.feeds`, #429). A join in another UNION arm, in a step this branch never reads,
+    or inside a `WHERE ... IN (subquery)` of its own, can't repeat its rows.
     The one exception is a join past the receipt's cap: it is never read — that is what the cap is
     for, since a caller can write any number of joins — so its branch is unknown, and every number is
     downgraded rather than one cleared that the uncounted join might feed."""
@@ -2907,9 +2940,8 @@ def _downgrade_unweighed(reports: list[AggregateReport], joins: list[tuple[str, 
         if r.status != NOT_MULTIPLIED:
             out.append(r)
             continue
-        unweighed = [label for scope, status, label in joins
-                     if status in (UNDETERMINED, UNDECLARED)
-                     and (scope == r.scope or scope.startswith("cte:"))]
+        unweighed = [label for feeds, status, label in joins
+                     if status in (UNDETERMINED, UNDECLARED) and r.scope in feeds]
         if not unweighed and not dropped:
             out.append(r)
             continue
@@ -2934,7 +2966,9 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
                       ctx: "GuardContext | None" = None,
                       *, scope: str = "main",
                       visible: Optional[set[str]] = None,
-                      tidx: dict[str, tuple]) -> list[AggregateReport]:
+                      tidx: dict[str, tuple],
+                      sidx: "dict | None" = None,
+                      smemo: "dict | None" = None) -> list[AggregateReport]:
     """Fan/chasm + aggregation-semantics analysis of a SINGLE SELECT, read entirely off the tree.
     A top-level SELECT and a set-operation arm are analyzed identically; there is no longer a
     rewrite for one to be eligible for, and no statement text for either to carry.
@@ -2959,28 +2993,37 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
     # tell the difference: `FROM oi` reads `oi` whether `oi` is a table or a WITH. Resolving it is
     # what lets the fan detector see the join the statement actually takes.
     #
-    # The bindings come off this SELECT's LEXICAL ANCESTORS and the alias map does not, and the
-    # asymmetry is the point. A WITH binds its name for every arm below it, so an arm reading `oi`
-    # reads a name declared above it — `_aggregate_reports` computes `visible` on the root for
-    # exactly this reason. Which TABLES an arm reads is the opposite kind of question and stays
-    # strictly per-arm, because one arm's tables deciding another arm's fan is the defect ACE-099
-    # and ACE-043 exist to prevent.
-    #
-    # ANCESTORS rather than the root, because the root holds CTEs that do not bind here. Read off
-    # `root().find_all(exp.CTE)` and keyed by folded name, a same-named CTE in a SIBLING arm won by
-    # being written last, so swapping two arms of a UNION changed the answer for both; and a WITH
-    # nested inside a `WHERE … IN (…)` subquery rebound a real outer table out from under the
-    # statement. Both produced a receipt calling an inflated number sound. The ancestor walk is also
-    # what makes the guard cheap: `_cte_names(tree.root())` was the unconditional left operand of an
-    # `&` and walked the WHOLE tree once per set-operation arm, so 471 arms of a statement with no
-    # CTE anywhere spent 5.4 of their 5.5 seconds proving there was nothing to resolve.
-    bodies = _visible_cte_bodies(tree)
-    if bodies.keys() & {_tkey(v) for v in tables_in_scope.values()}:
-        tables_in_scope, cte_rels = _resolve_cte_scope(tree, bodies, tables_in_scope, tidx)
+    # Each reference is bound where it is written, by `_cte_binding` — the scope gate's rule and the
+    # one every receipt section reads a step by (ACE-178 item 7). A WITH binds its name for every arm
+    # below it, so an arm reading `oi` reads a name declared above it; which TABLES an arm reads stays
+    # strictly per-arm, because one arm's tables deciding another arm's fan is the defect ACE-099 and
+    # ACE-043 exist to prevent. Keyed by reference rather than by name, a same-named WITH in a sibling
+    # arm, or one bound only inside a `WHERE … IN (…)` subquery, cannot reach this SELECT's tables.
+    sidx = sidx if sidx is not None else (ctx.schema_index if ctx is not None and ctx.schema_index
+                                          is not None else _schema_index(org))
+    smemo = smemo if smemo is not None else {}
+    steps = _cte_steps(tree)
+    # A table reference the receipt cannot read as the declared table — a quoted name folded onto a
+    # WITH, an alias column list, a table function (`_step_of`) — binds to nothing: fail closed.
+    unread = {(t.alias or t.name) for t in _own_table_refs(tree)
+              if _cte_binding(t) is None and _step_of(t, smemo) is not None}
+    for alias in unread & tables_in_scope.keys():
+        tables_in_scope[alias] = ""
+    if steps:
+        tables_in_scope, cte_rels = _resolve_cte_scope(tree, steps, tables_in_scope, tidx, sidx, smemo)
         # A NEW list. `ctx.cardinality_index` is the model's own edges, shared across every guard
         # in the battery and across every arm of a set operation; appending a statement-derived
         # edge to it would leak this query's CTE into the next one's analysis.
         rels = rels + cte_rels
+    if visible is not None:
+        # `visible` subtracts every WITH name in the statement. A reference this SELECT reads as a
+        # TABLE — `public.orders` beside `WITH orders`, or the table a step hands back row for row —
+        # is one the analysis sees behind whatever a step elsewhere is called.
+        visible = visible | {_tkey(t.name) for t in _own_table_refs(tree)
+                             if (t.alias or t.name) not in unread and _cte_binding(t) is None
+                             and isinstance(_resolve_table(sidx, t), tuple)} | {
+            _tkey(name) for alias, name in tables_in_scope.items()
+            if alias in steps and _tkey(name) in tidx}
     # Every table-name comparison below is a plain string comparison, and a statement and a model
     # can spell one table two ways: `FROM ORDERS` against a model that says `orders`, or a model
     # introspected from an engine that hands names back uppercase against a statement written in
@@ -3237,55 +3280,44 @@ _MAX_CTE_CHAIN = 64
 _GRAIN_PRESERVING_SELECT_ARGS = ("expressions", "from_", "from", "where", "order")
 
 
-def _visible_cte_bodies(sel: "exp.Expression") -> dict[str, "exp.Expression"]:
-    """Folded CTE name -> body, for every WITH that BINDS for `sel`. Innermost binding wins.
+def _cte_steps(sel: "exp.Select") -> dict[str, "exp.Table"]:
+    """alias -> reference, for each WITH reference THIS SELECT's own FROM and JOINs read.
 
-    Lexical scope, walked up the parent chain, which is what "a WITH binds its name for every arm
-    below it" actually means. `sel.root().find_all(exp.CTE)` is the wrong set in both directions:
-    it collects CTEs from scopes that do not bind here, and being a flat dict keyed by folded name
-    it resolves a collision by whichever one the walk reached last. Two shapes measured, both of
-    them receipts calling an inflated number sound:
-
-    * two arms of a `UNION ALL` each declaring their OWN `WITH x AS (…)` over different tables. The
-      second arm's body won for both arms, so SWAPPING THE ARMS CHANGED THE ANSWER;
-    * `… WHERE orders.id IN (WITH order_items AS (SELECT id FROM customers) SELECT …)`, where a CTE
-      that binds only inside the subquery rebound the outer statement's real `order_items` table.
-
-    `setdefault` on the way UP is the innermost-wins rule: the nearest enclosing WITH is reached
-    first and keeps the name, and an outer WITH of the same name is shadowed exactly as SQL says.
-
-    **sqlglot 30 keys the argument `with_`**, the same rename that makes `args.get("from")` `None`
-    on every SELECT ever written. Read under one spelling only, this returns the empty dict for
-    every statement and every CTE reference silently falls to the fail-closed binding, which passes
-    a corpus that only forbids false cleans while quietly answering nothing at all.
+    Bound by `_cte_binding`, the scope gate's lexical rule and the one the `columns` section follows
+    a number by (ACE-178). It replaced a walk that keyed bodies by folded NAME up the parent chain,
+    which read a schema-qualified `public.orders` beside `WITH orders` as the step, and a step's own
+    name inside its non-recursive body as the step again, where the gate reads both as the table. Two
+    rules about one name is how the joins, aggregates and columns sections came to describe one step
+    three ways (#204). The test that pinned the old walk's two measured shapes — a same-named WITH per
+    UNION arm, and a WITH bound only inside a `WHERE … IN (…)` subquery — still holds: binding is
+    per reference node, so neither can reach a reference outside its scope.
     """
-    bodies: dict[str, "exp.Expression"] = {}
-    node: Optional["exp.Expression"] = sel
-    while node is not None:
-        with_clause = node.args.get("with_") or node.args.get("with")
-        if isinstance(with_clause, exp.With):
-            for cte in with_clause.expressions:
-                if isinstance(cte, exp.CTE) and cte.this is not None:
-                    bodies.setdefault(_tkey(cte.alias_or_name), cte.this)
-        node = node.parent
-    return bodies
+    return {(tbl.alias or tbl.name): tbl for tbl in _own_table_refs(sel)
+            if _cte_binding(tbl) is not None}
 
 
-def _grain_preserving_source(key: str, bodies: dict[str, "exp.Expression"],
-                             tidx: dict[str, tuple], seen: set[str],
-                             depth: int = 0) -> Optional[str]:
-    """The declared table a CTE hands back ROW FOR ROW, or None when it is not that simple.
+def _step_table(src: "exp.Expression", smemo: dict, sidx: dict,
+                depth: int = 0) -> Optional[str]:
+    """The declared table a WITH reference hands back ROW FOR ROW, or None when it is not that simple.
 
-    `WITH oi AS (SELECT * FROM order_items)` produces exactly the rows of `order_items`, so a join
-    to `oi` multiplies whatever a join to `order_items` would and the model's declared edge for
-    `order_items` describes it exactly. Returning the table name is what lets the fan detector name
-    the real join rather than the alias the statement invented for it.
+    The one rule every section reads a step reference by (ACE-178 item 7): the aggregates section
+    rebinds the reference to this table so the model's declared edges describe a join to it, the
+    joins section reports the join as one between this table and the other side, and the columns
+    section's `_step_of` is what classifies the step in the first place.
+
+    `WITH oi AS (SELECT * FROM order_items)` produces exactly the rows of `order_items`, so a join to
+    `oi` multiplies whatever a join to `order_items` would. **Every column it projects must be the
+    table's own, under its own name** (or `*`): a join key written against the step then names the
+    same column of the table, so a declaration about the table is a declaration about the join.
+    `SELECT customer_id AS id FROM orders` joined on `id` is a join on a customer; read as `orders.id`
+    it matched the declared `order_items → orders` key and a fanned sum reported `not_multiplied`.
 
     Every guard is a way the body could produce a DIFFERENT number of rows than its source, and
     each returns None rather than guessing:
 
-    * not an `exp.Select` — a UNION-bodied CTE, whose row count is the sum of its arms;
-    * already `seen` — the cycle guard, for a CTE that reads itself directly or through another;
+    * not an `exp.Select` — a UNION-bodied CTE, whose row count is the sum of its arms — or any
+      step `_step_of` gives a reason, or one that computes, is one row, is DISTINCT, or renames
+      its columns with an alias column list;
     * **any populated argument outside `_GRAIN_PRESERVING_SELECT_ARGS`.** This is the allowlist,
       and it subsumes the `GROUP BY` / `DISTINCT` / `JOIN` tests it replaced — all three collapse or
       multiply rows by definition, and so do the four the denylist never named. See the constant for
@@ -3311,21 +3343,75 @@ def _grain_preserving_source(key: str, bodies: dict[str, "exp.Expression"],
       count stays WHOLE-SUBTREE deliberately: `SELECT order_id FROM order_items WHERE order_id IN
       (SELECT id FROM orders)` is caught only because the IN subquery's table is counted, and its
       row count is not `order_items`'s.
-    * `_MAX_CTE_CHAIN` hops or more. `seen` catches a CYCLE and a linear chain is not one: 990
+    * `_MAX_CTE_CHAIN` hops or more. Lexical binding admits no cycle, and a linear chain is the bound's
+      reason: 990
       CTEs each reading the one before fit inside `_MAX_SQL_CHARS` and raised `RecursionError`,
       which `_receipt_for` catches as a build failure — so the statement still ran and returned
       rows while the caller silently lost the receipt. Caller-chosen input that turns off the trust
       layer without turning off the answer is the one shape a bound has to exist for.
 
-    Recursive through a chain of grain-preserving CTEs, because one that reads another is still
-    handing back the same rows, and `seen` is what stops a cyclic WITH from recursing forever. A
-    source that is neither another CTE nor a table the model declares returns None: an undeclared
-    name is one the analysis can say nothing about.
+    * no column at all (`SELECT FROM orders`), a star that renames, replaces or drops columns, or a
+      quoted column handed on under an unquoted name of another case (`"Id" AS id`) — each is not
+      the table's own column under its own name;
+    * the table it reads not resolving to ONE declared table by the scope gate's own rule
+      (`_resolve_table`): a schema the model does not declare it in, a name declared in two schemas,
+      `db..table`, or a reference `_step_of` cannot read as the table (a quoted name folded onto a
+      WITH, an alias column list, a table function).
+
+    Followed through a chain of such steps, each bound by `_cte_binding`, so a step reading its own
+    name in a non-recursive body reads the table, as the scope gate says. Worked out once per step
+    per statement (`_cte_table`) however many references read it — a chain read by 500 UNION arms
+    was reclassified per arm.
     """
-    body = bodies.get(key)
-    if not isinstance(body, exp.Select) or key in seen or depth >= _MAX_CTE_CHAIN:
+    if not isinstance(src, exp.Table):
         return None
-    seen.add(key)
+    cte = _cte_binding(src)
+    if cte is None:
+        return None
+    step = _step_of(src, smemo)
+    if step is None or step.reason:
+        return None                 # the reference's own column list
+    table, hops = _cte_table(cte, smemo, sidx)
+    return table if table is not None and depth + hops < _MAX_CTE_CHAIN else None
+
+
+def _cte_table(cte: "exp.CTE", smemo: dict, sidx: dict) -> "tuple[Optional[str], int]":
+    """(the declared table a WITH step hands back row for row, how many steps further on it is read),
+    remembered per step. Walked along the chain rather than recursed: a step that stands for a
+    table reads exactly one relation, and a chain can be as long as the statement allows."""
+    path: list = []
+    node = cte
+    while True:
+        hit = smemo.get(("cte_table", id(node)))
+        if hit is not None:
+            table, hops = hit
+            break
+        if len(path) >= _MAX_CTE_CHAIN:
+            return None, 0          # past the bound for the first step; remembered for none
+        path.append(node)
+        inner = _row_source(node, smemo)
+        if inner is None:
+            table, hops = None, 0
+            break
+        nxt = _cte_binding(inner)
+        if nxt is None:
+            table, hops = _physical_table(inner, smemo, sidx), -1
+            break
+        node = nxt
+    for step in reversed(path):
+        hops += 1
+        smemo[("cte_table", id(step))] = (table, hops)
+    return smemo[("cte_table", id(cte))]
+
+
+def _row_source(cte: "exp.CTE", smemo: dict) -> "exp.Table | None":
+    """The one table reference a WITH step's body hands back row for row, with every column under
+    its own name; None when the body does anything else (the guards on `_step_table`)."""
+    step = _cte_step(cte, smemo)
+    if (step.reason or step.computes or step.one_row or step.distinct or step.listed
+            or not isinstance(step.body, exp.Select)):
+        return None
+    body = step.body
     if any(value and arg not in _GRAIN_PRESERVING_SELECT_ARGS
            for arg, value in body.args.items()):
         return None
@@ -3334,14 +3420,37 @@ def _grain_preserving_source(key: str, bodies: dict[str, "exp.Expression"],
     frm = body.args.get("from_") or body.args.get("from")
     if not isinstance(frm, exp.From) or not isinstance(frm.this, exp.Table):
         return None
-    if frm.this.args.get("pivots"):
+    if frm.this.args.get("pivots") or _alias_columns(frm.this):
         return None
     if len(list(body.find_all(exp.Table))) != 1:
         return None
-    name = _tkey(frm.this.name)
-    if name in bodies:
-        return _grain_preserving_source(name, bodies, tidx, seen, depth + 1)
-    return frm.this.name if name in tidx else None
+    if not body.expressions or not all(_passed_on(proj) for proj in body.expressions):
+        return None
+    return frm.this
+
+
+def _physical_table(tbl: "exp.Table", smemo: dict, sidx: dict) -> Optional[str]:
+    """The declared table a reference `_cte_binding` reads as a table names, by the scope gate's
+    schema-aware rule; None when it is not exactly one declared table, or not read as a table."""
+    if _step_of(tbl, smemo) is not None:
+        return None
+    if not isinstance(_resolve_table(sidx, tbl), tuple) or len(sidx.get(_tkey(tbl.name), {})) != 1:
+        return None
+    return tbl.name
+
+
+def _passed_on(proj: "exp.Expression") -> bool:
+    """Whether a projection is a plain `*`, or one input column handed on under its own name."""
+    star = proj.this if isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star) else proj
+    if isinstance(star, exp.Star):
+        return not any(star.args.values())      # no EXCEPT, REPLACE or RENAME
+    inner = proj.this if isinstance(proj, exp.Alias) else proj
+    if not (isinstance(inner, exp.Column) and inner.name):
+        return False
+    if not isinstance(proj, exp.Alias):
+        return True
+    written, handed = _identifier_key(proj.args.get("alias")), _identifier_key(inner.this)
+    return written is not None and handed is not None and _same_identifier(written, handed)
 
 
 def _projection_sources(body: "exp.Expression") -> dict[str, str]:
@@ -3454,31 +3563,27 @@ def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain
     )
 
 
-def _resolve_cte_scope(sel: "exp.Select", bodies: dict[str, "exp.Expression"],
+def _resolve_cte_scope(sel: "exp.Select", steps: dict[str, "exp.Table"],
                        scope_map: dict[str, str],
-                       tidx: dict[str, tuple]) -> tuple[dict[str, str], list[Relationship]]:
-    """The scope map with every CTE reference resolved, plus the edges that resolution derived.
+                       tidx: dict[str, tuple], sidx: dict,
+                       smemo: "dict | None" = None) -> tuple[dict[str, str], list[Relationship]]:
+    """The scope map with every WITH reference resolved, plus the edges that resolution derived.
 
-    One pass over the map the caller already built, never a second walk for the reference list. The
-    CTE BODIES are passed in because the caller has already used them as its own guard, and they
-    are `_visible_cte_bodies`' answer rather than `_cte_body_scopes`', which answers which CTE a
-    reference sits IN — the opposite question.
-
-    Those bodies come from `sel`'s LEXICAL ANCESTORS, and the JOIN PREDICATES do not. A WITH sits
-    above a set operation and binds its name for every arm, so an arm that reads `oi` is reading a
-    name declared outside itself and looking for it inside the arm finds nothing — measured: a
-    UNION arm joining a grain-preserving CTE reported `not_multiplied` over a fan, on both the
-    resolvable and the unreadable shape. `_aggregate_reports` reads `_cte_names` off the root for
-    exactly this reason. The join predicates stay the arm's own, because which rows an arm joins is
-    a fact about that arm, and folding two arms' joins together is the defect ACE-099 and ACE-043
-    exist to prevent.
+    One pass over the map the caller already built, never a second walk for the reference list.
+    `steps` is `_cte_steps(sel)`: this SELECT's own WITH references, each already bound where it is
+    written. The JOIN PREDICATES are the arm's own too, because which rows an arm joins is a fact
+    about that arm, and folding two arms' joins together is the defect ACE-099 and ACE-043 exist to
+    prevent.
 
     Three outcomes per reference, and they are the three a caller can act on:
 
-    * a grain-preserving CTE rebinds to the table it hands back, and the model's declared edges then
-      describe the join with no new edge invented;
+    * a CTE that hands a table back row for row (`_step_table`) rebinds to that table, and the
+      model's declared edges then describe the join with no new edge invented;
     * a grain-changing CTE keeps its own name and contributes ONE derived edge, so the fan detector
-      sees it as the distinct source it is;
+      sees it as the distinct source it is. A CTE named like a declared table is keyed
+      `<name>_step` instead (#200): under the table's own name the model's edges for that table
+      attached to it as well, and the model's `order_items → orders` many-to-one outranked the
+      one-to-one derived for a step grouped to `order_id`;
     * anything else binds to the empty string, which `_aggregate_sites` reads as "this scope holds
       something the analysis could not resolve" and reports `undetermined` for every aggregate in
       the SELECT. That is the fail-closed branch and it is the common one: a CTE body with a join
@@ -3520,29 +3625,35 @@ def _resolve_cte_scope(sel: "exp.Select", bodies: dict[str, "exp.Expression"],
     # `FROM g JOIN p ON g.order_id = p.id` gave `undetermined`. Both are the safe direction and
     # neither is the rule this module states about itself, which is that a receipt has to read the
     # same way twice for the same SQL.
-    pending: list[tuple[str, str]] = []
+    # One memo per statement, handed in: a chain read by every arm of a UNION is read once.
+    smemo = smemo if smemo is not None else {}
+    pending: list[tuple[str, str, "exp.Table"]] = []
     for alias, written in scope_map.items():
-        key = _tkey(written)
-        if key not in bodies:
+        ref = steps.get(alias)
+        if ref is None:
             continue
-        source = _grain_preserving_source(key, bodies, tidx, set())
+        source = _step_table(ref, smemo, sidx)
         if source is not None:
             resolved[alias] = source
         else:
-            pending.append((alias, written))
+            pending.append((alias, written, ref))
     # PASS TWO derives the edges, every one of them against the SAME settled map. A snapshot rather
     # than `resolved` itself, so that one grain-changing CTE failing to derive an edge — which binds
     # it to the empty string below — cannot change what a later one resolves its far side to.
     settled = dict(resolved)
     derived: list[Relationship] = []
-    for alias, written in pending:
-        body = bodies[_tkey(written)]
+    for alias, written, ref in pending:
+        body = _cte_binding(ref).this
         grain = _group_by_grain(body)
-        edge = _cte_edge(conjuncts, alias, written, grain, tables, settled,
+        key = written
+        while _tkey(key) in tables:
+            key += "_step"
+        edge = _cte_edge(conjuncts, alias, key, grain, tables, settled,
                          _projection_sources(body)) if grain else None
         if edge is None:
             resolved[alias] = ""
         else:
+            resolved[alias] = key
             derived.append(edge)
     return resolved, derived
 
@@ -4114,7 +4225,8 @@ def _join_site_status(js: "_JoinSite", declared_pairs: list) -> "tuple[str, Opti
         written = js.pairs | js.fixed
         match = next((rel for rel, pairs in declared_pairs
                       if pairs is not None and pairs <= written), None)
-        same_tables = {_tkey(js.endpoints[0]), _tkey(js.endpoints[1])}
+        ends = js.resolves_to or js.endpoints
+        same_tables = {_tkey(_bare(ends[0])), _tkey(_bare(ends[1]))}
         if match is not None:
             status = DECLARED
         elif any(_rel_tables(rel) == same_tables and (
@@ -4243,7 +4355,7 @@ def assemble_receipt(
     # The cap goes IN rather than being a slice of what came back. Every join past it was resolved,
     # serialized and reduced only to be dropped here, and how many of those there are is the
     # caller's choice — which is the whole reason the section is capped in the first place.
-    join_sites, joins_written = _join_sites(tree, visible, _RECEIPT_MAX_REFS)
+    join_sites, joins_written = _join_sites(tree, visible, _RECEIPT_MAX_REFS, _schema_index(org))
     dropped_joins = joins_written - len(join_sites)
     # Every relationship the model declares, through `_cardinality_index` — per subject area PLUS
     # `org.cross_subject_area_relationships`. The old walk read only the subject areas, so a
@@ -4293,6 +4405,12 @@ def assemble_receipt(
             # receipt takes: the receipt is tool output the calling model weights as
             # server-authored, and a quoted identifier can hold any string at all.
             "from_to": f"{_echo_name(left)} → {_echo_name(right)}",
+            # The tables the status was decided on, when a WITH step on either side stands for the
+            # table it hands back row for row (ACE-178): `o → order_items` over
+            # `WITH o AS (SELECT * FROM orders)` resolves to `orders → order_items`, the edge the
+            # aggregates section names. Null when nothing was resolved.
+            "resolves_to": (f"{_echo_name(js.resolves_to[0])} → {_echo_name(js.resolves_to[1])}"
+                            if js.resolves_to else None),
             # The keys are the ones the relationship-keyed item already carried, so a consumer
             # reading `review_state` off a join keeps reading it off the same key.
             **signoff,
@@ -4619,6 +4737,7 @@ def assemble_receipt(
     # not called here for that reason.
     sites = _reference_sites(tree)
     node_of_ref = {id(site.ref): site.node for site in sites}
+    table_sidx, table_decls = _schema_index(org), _table_decls(org)
     dropped_refs = max(0, len(sites) - _RECEIPT_MAX_REFS)
     # How many of the LISTED references the accounting could not settle, for the marker below. A
     # reference counts here when it has declared filters and ANY one of them came back
@@ -4640,14 +4759,11 @@ def assemble_receipt(
     # report one reference's filters under another reference's name.
     for r, ref_filters in check_declared_filters(
             tree, org, refs=sites[:_RECEIPT_MAX_REFS], ctx=None):
-        # A CTE name resolved through the bare-name index, so `WITH orders AS (…)` reported
-        # `declared: true` and borrowed the real table's row estimate — a fact about a table the
-        # statement never read. `_declared_table` is the one place that subtraction lives. It still
-        # skips a CTE name anywhere in the statement, unlike `check_table_scope`, which resolves each
-        # reference against its enclosing WITH (#332); the receipt can therefore disagree with the
-        # gate on a statement the gate refuses.
-        info = _declared_table(r.bare)
-        t = info[0] if info else None
+        # Resolved from the reference's own node, once, for every field below (#462): a WITH
+        # reference is no model table however closely it is named, and a table reference gets the
+        # row of the schema it reads, by the scope gate's rule. It used to look the bare name up,
+        # first match wins, and skip any name a WITH bound anywhere in the statement.
+        t, unpinned = _declared_reference(node_of_ref.get(id(r)), table_sidx, table_decls, dialect)
         ph = t.performance_hints if t else None
         table_items.append({
             # `ref` and `alias` are the CALLER's text, not the model's: a quoted identifier can hold
@@ -4694,20 +4810,10 @@ def assemble_receipt(
         # disagree with what a reader sees beside it.
         if ref_filters and any(f["status"] == "undetermined" for f in ref_filters):
             unaccounted_refs += 1
-        # A name bound by a WITH suppresses the model row for EVERY reference to that bare name in
-        # the statement, because the subtraction both `_declared_table` and `check_declared_filters`
-        # perform is statement-global rather than scope-aware. So
-        # `WITH orders AS (…) SELECT … FROM public.orders` reads the real table, applies none of its
-        # declared filters, and is handed `filters: []` — the same empty list a table declaring no
-        # filters gets. The item cannot tell those two apart, and the fixed sentence that used to
-        # cover both meanings of `[]` is gone, so without this the section would report a genuine
-        # unfiltered read of a declared table under a marker claiming nothing is missing.
-        #
-        # Resolving the reference by SCOPE is the real answer and is more than this section is
-        # allowed to build. Counting is what is affordable, and it errs the safe way: a genuine read
-        # of the CTE in the same statement is counted too, which overstates what was not established
-        # rather than understating it.
-        if _tkey(r.bare) in cte_names and _tkey(r.bare) in tidx:
+        # A table read the receipt could not pin to one declared row — a name two schemas declare,
+        # written with no schema — is handed `declared: false` and `filters: []`, the same as an
+        # undeclared table, so the marker counts it rather than let it pass as settled.
+        if unpinned:
             unresolved_refs += 1
 
     # The four analyses that used to refuse, run on the tree THIS function already parsed rather
@@ -4739,8 +4845,8 @@ def assemble_receipt(
     # same `cte_names`; recomputing it here would be the same set under a second spelling.
     reports = _aggregate_reports(
         tree, org, ctx=None, visible=visible, tidx=tidx,
-        join_statuses=([(it["scope"], status, it["from_to"])
-                        for status, it in zip(_weighed_statuses(join_sites, join_results, tidx, org), join_items)],
+        join_statuses=([(js.feeds, status, it["from_to"]) for js, status, it in zip(
+                        join_sites, _weighed_statuses(join_sites, join_results, tidx, org), join_items)],
                        dropped_joins),
     )
     dropped_aggregates = max(0, len(reports) - _RECEIPT_MAX_REFS)
@@ -5439,6 +5545,13 @@ def _reference_sites(node: "exp.Expression", *,
     `pre_flight_check` directly with no gate battery at all, and on that surface every one of those
     shapes reported a clean `not_multiplied` over a source that can multiply rows. Deleting it as
     dead code would restore exactly that.
+
+    With `sidx` (the receipt and the pre-flight pass it), each endpoint is resolved where it is
+    written (ACE-178 item 7): a table reference is the table whenever the model declares it, whatever
+    a step elsewhere is called (#462's shape), and a WITH reference stands for the table it hands back
+    row for row (`_step_table`), the rule the aggregates and columns sections read that step by, so
+    the three cannot describe one edge two ways (#204). Without it, the statement-wide `visible` set
+    decides, as `probes.join_probes` still reads it.
     """
     cte_scopes = _cte_body_scopes(node)
     arm_suffixes = _arm_suffixes(node)
@@ -5648,32 +5761,52 @@ def _pick_binding(sources: list["exp.Expression"], qualifier: str) -> "exp.Expre
     return folded[0] if len(folded) == 1 else None
 
 
-# The last tree `_cte_reference_ids` walked and its answer: one statement's receipt asks it once
-# per column, and `_cte_references` walks the whole tree.
-# Rebound whole, never mutated: receipts are built in worker threads, and a reader holding one
-# tuple cannot see another thread's tree paired with it.
-_CTE_REFS_LAST: tuple = (None, frozenset())
+# Where a tree keeps its own WITH bindings (`_tree_bindings`), beside the `id` of the tree they
+# were computed for: `copy()` copies `meta`, and a copy's nodes have other ids.
+_BINDINGS_META = "agami_cte_bindings"
 
 
-def _cte_reference_ids(root: "exp.Expression") -> "set[int] | frozenset[int]":
-    """`_cte_references(root)`, computed once per tree."""
-    global _CTE_REFS_LAST
-    cached_root, refs = _CTE_REFS_LAST
-    if cached_root is not root:
-        refs = _cte_references(root)
-        _CTE_REFS_LAST = (root, refs)
-    return refs
+def _tree_bindings(root: "exp.Expression") -> "dict[int, exp.CTE]":
+    """`_cte_bindings(root)`, computed once per tree and kept on the tree.
+
+    It was one module-wide entry holding the last tree asked about, so two receipts assembled at
+    once in two threads evicted each other on every call and each rebuilt it per reference (a
+    24,000-character statement took 3.8 s alone and 25 s beside another). Kept on the tree, each
+    statement pays once, and no thread can see another's.
+    """
+    cached = root.meta.get(_BINDINGS_META)
+    if cached is None or cached[0] != id(root):
+        cached = (id(root), _cte_bindings(root))
+        root.meta[_BINDINGS_META] = cached
+    return cached[1]
 
 
 def _cte_binding(table: "exp.Table") -> "exp.CTE | None":
     """The CTE a table reference reads, or None when it reads a table.
 
-    Bound by `_cte_references`' rules, so a schema-qualified name, a later sibling and a
-    non-recursive self-reference read the table, as they do for the scope gate.
+    Bound by `_cte_bindings`' rules, so a schema-qualified name, a later sibling and a
+    non-recursive self-reference read the table, as they do for the scope gate. A lookup: the
+    whole tree is bound once (`_tree_bindings`).
     """
-    if table.db or id(table) not in _cte_reference_ids(table.root()):
+    if table.db:
         return None
+    return _tree_bindings(table.root()).get(id(table))
+
+
+def _folded_namesake(table: "exp.Table") -> bool:
+    """Whether an unqualified table reference `_cte_binding` reads as the TABLE has the name of a
+    WITH visible where it is written, once quoting and case are set aside.
+
+    `"customers"` beside `WITH customers`: the scope gate reads a mixed-quote pair as the table
+    (`_same_identifier`, the cheap direction for a gate), and Postgres, DuckDB and Snowflake fold
+    it onto the step. Which one the engine read is not established, so a receipt section reads it
+    as neither (ACE-178): not the declared table, and not the step.
+    """
+    if table.db or _cte_binding(table) is not None:
+        return False
     key = _identifier_key(table.this)
+    if key is None:
+        return False
     via: "exp.CTE | None" = None
     node: "exp.Expression | None" = table.parent
     while node is not None:
@@ -5686,13 +5819,13 @@ def _cte_binding(table: "exp.Table") -> "exp.CTE | None":
             if pos is not None:
                 # A body sees the siblings before it, and itself only under RECURSIVE.
                 ctes = ctes[:pos + 1] if with_.args.get("recursive") else ctes[:pos]
-            for cte in reversed(ctes):
+            for cte in ctes:
                 alias = cte.args.get("alias")
                 name = _identifier_key(alias.this) if isinstance(alias, exp.TableAlias) else None
-                if name is not None and key is not None and _same_identifier(key, name):
-                    return cte
+                if name is not None and name[1].lower() == key[1].lower():
+                    return True
         node = node.parent
-    return None
+    return False
 
 
 def _alias_columns(node: "exp.Expression") -> list[str]:
@@ -5866,6 +5999,14 @@ class _JoinSite(NamedTuple):
     # This join's fixed-value conditions on its own right-hand alias (`_fixed_value_pairs`); the
     # declared-join match reads `pairs | fixed`, everything else reads `pairs` alone.
     fixed: frozenset[frozenset[tuple[str, str]]] = frozenset()
+    # The two tables the endpoints are, when a WITH step on either side stands for the table it hands
+    # back row for row (`_step_table`, ACE-178): what the status is decided on, while `endpoints`
+    # keeps what the statement wrote. None when no endpoint was a step that resolved.
+    resolves_to: Optional[tuple[str, str]] = None
+    # The output arms (`main`, `main#<n>`) whose numbers this join can feed: its own arm, or, inside a
+    # WITH body, every arm that reaches that step. What decides whether a join no declaration settled
+    # downgrades a number (#429). Outside both, its own scope label, which matches no arm.
+    feeds: frozenset[str] = frozenset()
 
 
 def _predicate_pairs(pred: "exp.Expression",
@@ -6132,8 +6273,9 @@ def _relation_name(rel: "exp.Expression") -> str:
     return rel.name if isinstance(rel, exp.Table) else rel.alias_or_name
 
 
-def _join_sites(node: "exp.Expression", visible: set[str],
-                limit: int) -> "tuple[list[_JoinSite], int]":
+def _join_sites(node: "exp.Expression", visible: set[str], limit: int,
+                sidx: "dict | None" = None,
+                smemo: "dict | None" = None) -> "tuple[list[_JoinSite], int]":
     """The one walk of `exp.Join`: the first `limit` joins the STATEMENT wrote, resolved to their
     scope, beside the number of joins it wrote in total.
 
@@ -6169,6 +6311,8 @@ def _join_sites(node: "exp.Expression", visible: set[str],
     scopes: dict[int, tuple[dict[str, str], frozenset[str]]] = {}
     sites: list[_JoinSite] = []
     written = 0
+    smemo = smemo if smemo is not None else {}
+    reach: "_Reach | None" = None
     for join in node.find_all(exp.Join):
         written += 1
         if len(sites) >= limit:
@@ -6189,6 +6333,7 @@ def _join_sites(node: "exp.Expression", visible: set[str],
                    None) if sel is not None else None
         left = _relation_name(frm.this) if frm is not None else ""
         pinned = True
+        left_src = frm.this if frm is not None else None
         if on is not None:
             names = {scope_map.get(col.table, col.table)
                      for col in on.find_all(exp.Column) if col.table}
@@ -6203,30 +6348,143 @@ def _join_sites(node: "exp.Expression", visible: set[str],
             pinned = right in names and len(others) <= 1
             if pinned:
                 left = others[0] if others else right
+                quals = {col.table for col in on.find_all(exp.Column) if col.table
+                         and scope_map.get(col.table, col.table) == left} - {join.this.alias_or_name}
+                left_src = (_pick_binding(_own_sources(sel), next(iter(quals)))
+                            if len(quals) == 1 and sel is not None else None)
         # An EMPTY left is no endpoint at all rather than a name we happen to dislike: there was no
         # enclosing SELECT to read a FROM from, or the FROM introduced an unaliased derived table,
         # which has no name for a qualifier to use. The item renders one side of the label blank and
         # says so; a status settled off it would be a claim about a relation the receipt cannot name.
         pinned = pinned and bool(left)
+        left_declarable = _tkey(left) not in computed and _tkey(left) in visible
+        right_declarable = isinstance(join.this, exp.Table) and _tkey(right) in visible
+        pair_map, resolves_to = scope_map, None
+        if sidx is not None:
+            right_declarable, right_table = _endpoint_table(join.this, smemo, sidx)
+            left_table = None
+            if left_src is not None:
+                left_declarable, left_table = _endpoint_table(left_src, smemo, sidx)
+            stood = {src.alias_or_name: table for src, table in
+                     ((left_src, left_table), (join.this, right_table)) if table is not None}
+            if stood:
+                pair_map = {**scope_map, **stood}
+                resolves_to = (left_table or left, right_table or right)
+        label = _scope_label(sel, node, cte_scopes, arm_suffixes, output_ids)
+        if label.startswith("cte:"):
+            if reach is None:
+                reach = _Reach(node)
+            cte = join.parent
+            while cte is not None and not isinstance(cte, exp.CTE):
+                cte = cte.parent
+            feeds = reach.feeds(cte)
+        else:
+            feeds = frozenset({label})
         sites.append(_JoinSite(
             node=join,
             predicate=_join_condition(join),
-            scope=_scope_label(sel, node, cte_scopes, arm_suffixes, output_ids),
+            scope=label,
             endpoints=(left, right),
             # STRUCTURAL on the right, where the source node is in hand: only a table REFERENCE can
             # be what a declaration is about, so a derived table or a `VALUES` list aliased with a
             # declared table's name cannot pass by spelling. The left endpoint is a NAME by the time
             # it is known — resolved out of the ON through the scope map — so its structural half is
             # `computed`, the names this SELECT bound to relations of its own.
-            left_declarable=_tkey(left) not in computed and _tkey(left) in visible,
-            right_declarable=isinstance(join.this, exp.Table) and _tkey(right) in visible,
+            left_declarable=left_declarable,
+            right_declarable=right_declarable,
             pinned=pinned,
-            # Resolved through THIS join's own enclosing scope, which is the map already in hand.
-            pairs=_predicate_pairs(on, scope_map) if on is not None else frozenset(),
-            fixed=(_fixed_value_pairs(on, scope_map, {join.this.alias_or_name})
+            # Resolved through THIS join's own enclosing scope, which is the map already in hand,
+            # with a step that stands for a table read as that table.
+            pairs=_predicate_pairs(on, pair_map) if on is not None else frozenset(),
+            fixed=(_fixed_value_pairs(on, pair_map, {join.this.alias_or_name})
                    if on is not None else frozenset()),
+            resolves_to=resolves_to,
+            feeds=feeds,
         ))
     return sites, written
+
+
+def _endpoint_table(src: "exp.Expression", smemo: dict,
+                    sidx: dict) -> "tuple[bool, Optional[str]]":
+    """(whether a join endpoint is one the model could declare, the table a WITH step stands for).
+
+    A table reference is declarable when it resolves to a declared table by the scope gate's own
+    schema-aware rule (`_resolve_table`), as the `tables` section resolves it; a WITH reference when
+    it hands one back row for row (`_step_table`), and then it is that table. Anything else — a
+    derived table, a table function, a step that computes, a quoted name folded onto a WITH, a
+    table whose alias renames its columns — is not.
+    """
+    if not isinstance(src, exp.Table):
+        return False, None
+    if _cte_binding(src) is not None:
+        table = _step_table(src, smemo, sidx)
+        return table is not None, table
+    if _step_of(src, smemo) is not None:
+        return False, None
+    return isinstance(_resolve_table(sidx, src), tuple), None
+
+
+# How many nodes `_Reach` may visit for one statement before every output arm counts as fed by
+# every step's joins: a bound on the caller's SQL, failing to the downgrade the receipt made before.
+_MAX_REACH_VISITS = 200_000
+
+
+class _Reach:
+    """Which output arms (`main`, `main#<n>`) read each WITH step, directly or through other steps
+    (#429), for one statement.
+
+    The steps each step's body reads are found once, and so are the steps each arm reads; the arms
+    reaching a step are then the arms reading any step that reaches it, found by walking those
+    dependencies backwards from it, once per step asked about. Re-walking every step body an arm
+    reaches, per arm, made 700 chained steps read by 400 arms cost seconds. Anywhere in an arm counts
+    — a FROM, a join, an `IN (…)` subquery — because over-including is the safe side; the arm's own
+    WITH does not, since a step written there and never read feeds nothing. Past
+    `_MAX_REACH_VISITS` every arm is fed by every step.
+    """
+
+    def __init__(self, tree: "exp.Expression") -> None:
+        suffixes = _arm_suffixes(tree)
+        visits = 0
+        self.arms: list = []
+        for arm in _output_select_arms(tree):
+            for sel in arm:
+                direct: set[int] = set()
+                for key, value in sel.args.items():
+                    if key in ("with_", "with"):
+                        continue
+                    for child in value if isinstance(value, list) else [value]:
+                        if isinstance(child, exp.Expression):
+                            for tbl in child.find_all(exp.Table):
+                                visits += 1
+                                cte = _cte_binding(tbl)
+                                if cte is not None:
+                                    direct.add(id(cte))
+                self.arms.append(("main" + suffixes.get(id(sel), ""), direct))
+        self.every = frozenset(label for label, _ in self.arms)
+        self.users: dict[int, set[int]] = {}       # id(step) -> the steps whose bodies read it
+        for cte in tree.find_all(exp.CTE):
+            for tbl in cte.this.find_all(exp.Table):
+                visits += 1
+                read = _cte_binding(tbl)
+                if read is not None:
+                    self.users.setdefault(id(read), set()).add(id(cte))
+        self.budget = _MAX_REACH_VISITS - visits
+        self.memo: dict[int, frozenset] = {}
+
+    def feeds(self, cte: "exp.CTE | None") -> frozenset:
+        if cte is None or self.budget <= 0:
+            return self.every
+        if id(cte) not in self.memo:
+            reached, frontier = {id(cte)}, [id(cte)]
+            while frontier and self.budget > 0:
+                for user in self.users.get(frontier.pop(), ()):
+                    self.budget -= 1
+                    if user not in reached:
+                        reached.add(user)
+                        frontier.append(user)
+            self.memo[id(cte)] = (self.every if self.budget <= 0 else frozenset(
+                label for label, direct in self.arms if not direct.isdisjoint(reached)))
+        return self.memo[id(cte)]
 
 
 class _AggSite(NamedTuple):
@@ -8108,15 +8366,17 @@ def check_declared_filters(
     if not _HAVE_SQLGLOT or node is None:
         return []
     sites = refs if refs is not None else _reference_sites(node)
-    tidx = ctx.model_table_index if ctx is not None else _model_table_index(org)
     # Declared filter text is authored against the datasource's engine, so it is read in that
     # engine's grammar — same rule as the caller's SQL, same reason. Taken from the context when
     # there is one so the ctx and non-ctx paths resolve identically.
     dialect = ctx.dialect if ctx is not None else _dialect_of(org)[0]
-    # The same case-folded lookup every other model resolution uses, with the same CTE subtraction:
-    # `WITH orders AS (…)` names a result the statement defined for itself, so reporting the real
-    # `orders` table's declared filters against it would be an accounting of a table nothing read.
-    cte_names = _cte_names(node)
+    # Each reference resolved where it is written (`_declared_reference`, #462): `WITH orders AS (…)`
+    # names a result the statement defined for itself, so the real `orders` table's filters are not
+    # judged against it, while `public.orders` beside it IS the table and is judged.
+    sidx = (ctx.schema_index if ctx is not None and ctx.schema_index is not None
+            else _schema_index(org))
+    decls = (ctx.table_decls if ctx is not None and ctx.table_decls is not None
+             else _table_decls(org))
     # id(select) -> that select's folded filtering conjuncts, built lazily and shared across every
     # reference judged inside it. Two references to the same table in one WHERE ask the same question
     # of the same conjunct list, and folding is a deep copy per conjunct; without this the cost is
@@ -8125,9 +8385,7 @@ def check_declared_filters(
     folded: dict[int, set["exp.Expression"]] = {}
     out: list[tuple[TableRef, list[dict[str, str]]]] = []
     for site in sites:
-        key = _tkey(site.ref.bare)
-        info = None if key in cte_names else tidx.get(key)
-        table = info[0] if info else None
+        table, _unpinned = _declared_reference(site.node, sidx, decls, dialect)
         # RAW `Table.default_filters`, deliberately not `loader.collect_default_filters`: that one
         # binds `{alias}` to the table's bare name and dedupes across tables, and both destroy the
         # per-reference answer this function exists to give — an aliased reference would be judged
@@ -9084,6 +9342,7 @@ _WHY_UNREADABLE = "it reads a relation the semantic model does not declare"
 _WHY_UNATTRIBUTED = "a column it reads could not be attributed to one table or step"
 _WHY_DEEP = "its steps are nested deeper than the receipt follows"
 _WHY_UNSEEN = "it reads a sampled table, or a table as of another time"
+_WHY_NAMESAKE = "it reads a name that is both a table and a step, told apart only by quoting"
 _WHY_TWICE = "it reads one step through two references"
 _WHY_REAGGREGATE = "it aggregates a number a step already computed"
 _WHY_SRF = "a step uses a function that can return several rows, or one the check does not know"
@@ -9172,10 +9431,7 @@ def _step_of(src: "exp.Expression", memo: dict) -> "_Step | None":
     if isinstance(src, exp.Table):
         cte = _cte_binding(src)
         if cte is not None:
-            with_ = cte.parent
-            recursive = bool(isinstance(with_, exp.With) and with_.args.get("recursive")
-                             and any(_cte_binding(t) is cte for t in cte.this.find_all(exp.Table)))
-            step = _classify_step(cte.this, _alias_columns(cte), recursive)
+            step = _cte_step(cte, memo)
             if _alias_columns(src) and step.reason is None:
                 step = step._replace(reason=_WHY_UNATTRIBUTED)
         elif not isinstance(src.this, exp.Identifier):
@@ -9184,12 +9440,30 @@ def _step_of(src: "exp.Expression", memo: dict) -> "_Step | None":
             # The scope gate reads this as the table. Under WITH RECURSIVE an engine may bind it to
             # a sibling defined after the step that reads it, so what it reads is not established.
             step = _Step(src, [], False, False, _WHY_RECURSIVE)
+        elif _folded_namesake(src):
+            # `"orders"` beside `WITH orders`: the gate reads the table, the engine may read the step.
+            step = _Step(src, [], False, False, _WHY_NAMESAKE)
+        elif _alias_columns(src):
+            # `orders AS t(customer_id, id)` renames the table's columns by position, so a column
+            # read through it is not the declared column of its name.
+            step = _Step(src, [], False, False, _WHY_UNATTRIBUTED)
     elif isinstance(src, exp.Subquery):
         step = _classify_step(src.this, _alias_columns(src), False)
     else:
         step = _Step(src, [], False, False, _WHY_UNREADABLE)       # VALUES, LATERAL, UNNEST …
     memo[key] = step
     return step
+
+
+def _cte_step(cte: "exp.CTE", memo: dict) -> _Step:
+    """What a WITH step hands back, classified once per step however many references read it."""
+    key = ("cte", id(cte))
+    if key not in memo:
+        with_ = cte.parent
+        recursive = bool(isinstance(with_, exp.With) and with_.args.get("recursive")
+                         and any(_cte_binding(t) is cte for t in cte.this.find_all(exp.Table)))
+        memo[key] = _classify_step(cte.this, _alias_columns(cte), recursive)
+    return memo[key]
 
 
 def _recursive_namesake(table: "exp.Table") -> bool:

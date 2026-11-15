@@ -402,3 +402,49 @@ STEP_TRICK_TWINS = {
     "WITH s0 AS (SELECT id, total_amount FROM orders WHERE status = 'paid'), s1 AS (SELECT id, total_amount FROM s0), s2 AS (SELECT id, total_amount FROM s1), s3 AS (SELECT id, total_amount FROM s2), s4 AS (SELECT id, total_amount FROM s3), s5 AS (SELECT id, total_amount FROM s4), s6 AS (SELECT id, total_amount FROM s5), s7 AS (SELECT id, total_amount FROM s6), s8 AS (SELECT id, total_amount FROM s7), s9 AS (SELECT id, total_amount FROM s8) SELECT SUM(total_amount) AS n FROM s9":
         'paid_sales',
 }
+
+
+# ACE-178 item 7: a join to a WITH step is the declared join to the table the step reads only when the
+# step hands that table back row for row, every column under its own name. Against a model declaring
+# `orders.customer_id → customers.id`, each of these joins on something else — a renamed column, a
+# computed one, a de-duplicated step, the number's own side renamed, a filter on a renamed column — so
+# none may read a plain `matched`: each names the join, or lists the restriction.
+STEP_JOIN_TRICKS = [
+    "WITH c AS (SELECT region AS id FROM customers) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "JOIN c ON c.id = o.customer_id",
+    "WITH c AS (SELECT id + 0 AS id FROM customers) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "JOIN c ON c.id = o.customer_id",
+    "WITH c AS (SELECT DISTINCT id FROM customers) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "JOIN c ON c.id = o.customer_id",
+    "WITH o2 AS (SELECT customer_id AS id, total_amount FROM orders) SELECT SUM(o2.total_amount) AS n "
+    "FROM o2 JOIN customers c ON c.id = o2.id",
+    "WITH c AS (SELECT id, status AS region FROM customers) SELECT SUM(o.total_amount) AS n "
+    "FROM orders o JOIN c ON c.id = o.customer_id WHERE c.region = 'EU'",
+    "WITH c(id) AS (SELECT region FROM customers) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "JOIN c ON c.id = o.customer_id",
+    # Review of ACE-178 part 2. A quoted name an engine folds onto a WITH of that name: the scope
+    # gate reads it as the table, the engine may read the step. Neither, for the receipt.
+    "WITH customers AS (SELECT 1 AS id, status AS region FROM orders) SELECT SUM(o.total_amount) "
+    "AS n FROM orders o JOIN \"customers\" c ON c.id = o.customer_id",
+    "WITH orders AS (SELECT id, 1000 AS total_amount, customer_id FROM orders) "
+    "SELECT SUM(total_amount) AS n FROM \"orders\"",
+    # An alias column list renames a TABLE's columns by position, inside a step or not.
+    "WITH o2 AS (SELECT customer_id, total_amount FROM orders AS t(customer_id, id)) "
+    "SELECT SUM(o2.total_amount) AS n FROM o2 JOIN customers c ON c.id = o2.customer_id",
+    "SELECT SUM(o.total_amount) AS n FROM orders AS o(customer_id, total_amount)",
+    # Under WITH RECURSIVE a step may read a sibling defined after it.
+    "WITH RECURSIVE a AS (SELECT id, total_amount FROM orders), orders AS (SELECT id, 1000 AS "
+    "total_amount FROM public.orders) SELECT SUM(total_amount) AS n FROM a",
+    # A star that renames or replaces columns, a quoted column that is another column, a step with
+    # no columns, and a step over a table the model does not declare in that schema, or in the
+    # connecting user's default schema. (A catalog part is the scope gate's catalog check's to judge,
+    # as for a table read outside a step.)
+    "WITH c AS (SELECT * REPLACE (region AS id) FROM customers) SELECT SUM(o.total_amount) AS n "
+    "FROM orders o JOIN c ON c.id = o.customer_id",
+    "WITH c AS (SELECT \"Id\" AS id FROM customers) SELECT SUM(o.total_amount) AS n "
+    "FROM orders o JOIN c ON c.id = o.customer_id",
+    "WITH c AS (SELECT * FROM secretschema.customers) SELECT SUM(o.total_amount) AS n "
+    "FROM orders o JOIN c ON c.id = o.customer_id",
+    "WITH c AS (SELECT * FROM public..customers) SELECT SUM(o.total_amount) AS n "
+    "FROM orders o JOIN c ON c.id = o.customer_id",
+]
