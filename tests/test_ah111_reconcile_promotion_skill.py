@@ -264,11 +264,13 @@ def test_confirm_replace_is_never_preemptive_and_the_before_and_after_come_first
 
 
 def test_the_cheat_sheet_carries_the_save_doors_exit_codes():
-    """The cheat sheet is where somebody lands holding a non-zero exit, and `1` is the one that
-    must not be read as a failure or as a success."""
-    assert "| A promotion exits `0` |" in SKILL
-    assert "| A promotion exits `1` with `needs_confirmation` |" in SKILL
+    """The cheat sheet says what each outcome of the save door is. A stop for the person's yes
+    exits 0 with `status: needs_confirmation` (it exited 1, which the app showed as a failed
+    command), so it is never read as a failure or as a success."""
+    assert "| A promotion prints `status: written` |" in SKILL
+    assert "| A promotion prints `status: needs_confirmation` with `needs_confirmation` |" in SKILL
     assert "| A promotion exits `2` |" in SKILL
+    assert "exits `1`" not in SKILL
 
 
 def test_hard_rule_3_still_forbids_mutating_the_semantic_model():

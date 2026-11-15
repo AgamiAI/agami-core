@@ -122,11 +122,29 @@ _CONVENTION_BUDGET_S = 8.0
 # ones that change WHICH ROWS are counted, which is what an answer key is for.
 _CONVENTION_CLAIMS = ("tables", "filter_predicates", "date_window")
 
-# What an exit code means. `_NEEDS_CONFIRMATION` belongs to the write door: a change the person has
-# not agreed to yet is neither a success nor a breakage, and a pipeline that treats it as either
-# would be wrong in both directions.
-_NEEDS_CONFIRMATION = 1
+# What the write door says. A change the person has not agreed to yet is neither a success nor a
+# breakage: it exits 0 with `status: needs_confirmation` and nothing written. It used to exit 1, which
+# the app drew as a red "Failed" command right before the question it led to. `2` is the one
+# non-zero exit: this could not start.
 _CANNOT_START = 2
+STATUS_WRITTEN = "written"
+STATUS_NEEDS_CONFIRMATION = "needs_confirmation"
+THEN_CONFIRM_REPLACE = (
+    "Nothing was written. Show the person the before and the after of each item, ask, and re-run "
+    "with --confirm-replace only on their yes."
+)
+THEN_CONFIRM_CONVENTION = (
+    "Nothing was written. Say in one plain sentence how this answer differs from the example "
+    "agami keeps for a similar question, ask whether to save it anyway, and re-run with "
+    "--confirm-convention only on their yes."
+)
+
+# How each claim the convention check reports is said to a person, after "It".
+_CONVENTION_WORDS = {
+    "tables": "reads different tables",
+    "filter_predicates": "filters rows differently",
+    "date_window": "covers a different date range",
+}
 
 # The column contract. Matching is EXACT against these alias sets after folding, and never fuzzy:
 # a header this contract does not know is the analyst's own note column, which is only safe to
@@ -610,8 +628,12 @@ def _write_items(
     confirm_replace: bool,
     description: Optional[str] = None,
     remove: Sequence[str] = (),
+    extra: Optional[dict[str, Any]] = None,
 ) -> int:
     """Merge `items` into a profile's dataset, print what happened, and return the exit code.
+
+    `extra` is carried into what a write prints (the save door's note of a departure from
+    convention, said once the answer is saved).
 
     THE write path. Every door calls it, so the append-only rule is enforced once rather than
     remembered by each caller. `remove` deletes by id and comes through here for that reason: a
@@ -707,9 +729,11 @@ def _write_items(
         print(
             json.dumps(
                 {
+                    "status": STATUS_NEEDS_CONFIRMATION,
                     "dataset": stem,
                     "path": str(path),
                     "added": [item.id for item in added],
+                    "then": THEN_CONFIRM_REPLACE,
                     "needs_confirmation": [
                         {
                             "id": item.id,
@@ -728,7 +752,7 @@ def _write_items(
                 indent=2,
             )
         )
-        return _NEEDS_CONFIRMATION
+        return 0
 
     dropped = set(remove)
     incoming = {item.id: item for item in items}
@@ -759,6 +783,8 @@ def _write_items(
     print(
         json.dumps(
             {
+                "status": STATUS_WRITTEN,
+                **(extra or {}),
                 "dataset": stem,
                 "path": str(path),
                 "added": [item.id for item in added],
@@ -978,6 +1004,7 @@ def _convention_divergence(profile: str, question: str, sql: str) -> Optional[di
     except Exception:
         return None
 
+    claims = [_without_join_keys(claim, claims) for claim in claims]
     differing = [
         claim
         for claim in claims
@@ -992,6 +1019,50 @@ def _convention_divergence(profile: str, question: str, sql: str) -> Optional[di
     }
 
 
+def _join_equalities(claims: list[dict]) -> set[str]:
+    """Each join key of either statement as the filter-predicate key an inner join's ON reads as
+    (`eq(orders.id, order_items.order_id)`), both ways round."""
+    keys: set[str] = set()
+    for claim in claims:
+        if claim.get("name") != "join_keys":
+            continue
+        for side in (claim.get("generated") or [], claim.get("golden") or []):
+            for pair in side:
+                if len(pair) == 2 and all(len(end) == 2 for end in pair):
+                    left, right = (f"{t}.{c}" for t, c in pair)
+                    keys |= {f"eq({left}, {right})", f"eq({right}, {left})"}
+    return keys
+
+
+def _without_join_keys(claim: dict, claims: list[dict]) -> dict:
+    """The filter-predicates claim with the join keys taken out of both sides.
+
+    An inner join's ON counts among the predicates that filter rows and an outer join's does not, so
+    the same joins written INNER on one side and LEFT on the other read as different filters. A
+    live sample run stopped a correct answer on exactly that, with a card about outer and inner
+    joins: the WHERE on the joined table already kept the same rows. Which columns join is its own
+    claim (`join_keys`), so nothing about the rows counted is lost here.
+    """
+    if claim.get("name") != "filter_predicates" or claim.get("status") != "differs":
+        return claim
+    keys = _join_equalities(claims)
+    generated = [p for p in claim.get("generated") or [] if p not in keys]
+    golden = [p for p in claim.get("golden") or [] if p not in keys]
+    status = "agrees" if sorted(generated) == sorted(golden) else "differs"
+    return {**claim, "status": status, "generated": generated, "golden": golden}
+
+
+def convention_sentence(divergence: dict) -> str:
+    """The departure from convention in one plain sentence, for the person."""
+    words = [_CONVENTION_WORDS[c["name"]] for c in divergence.get("claims") or []
+             if c.get("name") in _CONVENTION_WORDS]
+    how = " and ".join(words) or "is written differently"
+    return (
+        f"It {how} from the example agami already keeps for a similar question, so a later check "
+        "may flag it; say if you want it changed or removed."
+    )
+
+
 def _save(
     profile: str,
     stem: str,
@@ -1000,8 +1071,14 @@ def _save(
     confirm_replace: bool,
     confirm_convention: bool,
     description: Optional[str],
+    note_convention: bool = False,
 ) -> int:
     """Write one answer somebody looked at and accepted.
+
+    `note_convention` writes it even when it departs from the profile's own examples and says the
+    departure in the output (`convention`, `convention_say`) instead of stopping to ask: the path
+    for an answer the person has just called right, where a second question about it would be
+    asking again what they already answered.
 
     The only door that can produce an item able to gate a run, and everything that makes it one is
     written here: the statement, `sql_confirmed`, the receipt of when the answer was accepted, and
@@ -1057,12 +1134,17 @@ def _save(
     # makes undoing it a second confirmation. This is the only door it runs on: an import writes no
     # statement, and curation may not write one.
     item = GoldenItem(**fields)
+    noted: dict[str, Any] = {}
     if not confirm_convention:
         divergence = _convention_divergence(profile, payload["query"], payload["sql"])
-        if divergence:
+        if divergence and note_convention:
+            noted = {"convention": divergence, "convention_say": convention_sentence(divergence)}
+        elif divergence:
             stop: dict[str, Any] = {
+                "status": STATUS_NEEDS_CONFIRMATION,
                 "dataset": stem,
                 "added": [],
+                "then": THEN_CONFIRM_CONVENTION,
                 "needs_confirmation_convention": divergence,
             }
             # Both questions in one payload when both apply, so they can be asked together and
@@ -1077,7 +1159,7 @@ def _save(
                         {"id": item.id, "before": _item_doc(existing), "after": _item_doc(item)}
                     ]
             print(json.dumps(stop, indent=2))
-            return _NEEDS_CONFIRMATION
+            return 0
 
     return _write_items(
         profile,
@@ -1085,6 +1167,7 @@ def _save(
         [item],
         confirm_replace=confirm_replace,
         description=description,
+        extra=noted,
     )
 
 
@@ -1198,6 +1281,38 @@ def _apply(
     )
 
 
+STATUS_RENAMED = "renamed"
+STATUS_NAME_TAKEN = "name_taken"
+THEN_NAME_TAKEN = "Nothing was moved: a set by that name exists. Ask the person for another name."
+
+
+def _rename(profile: str, stem: str, to: str) -> int:
+    """Rename a dataset: its file, which is its name. A first save names the set itself rather than
+    asking, so a rename is the way back to the person's own name for it. A name already taken is a
+    question for the person (exit 0, `status: name_taken`), never an overwrite."""
+    for kind, value in (("profile", profile), ("dataset", stem), ("dataset", to)):
+        fault = _bad_name(kind, value)
+        if fault:
+            _stop(fault)
+            return _CANNOT_START
+    gdir = _datasets_dir(profile)
+    source, target = gdir / f"{stem}.yaml", gdir / f"{to}.yaml"
+    if source.resolve().parent != gdir.resolve() or target.resolve().parent != gdir.resolve():
+        _stop(f"{stem!r} or {to!r} does not name a file inside this profile's golden_datasets directory")
+        return _CANNOT_START
+    if not source.is_file():
+        _stop(f"there is no dataset named {stem!r} in this profile")
+        return _CANNOT_START
+    if target.exists():
+        print(json.dumps({"status": STATUS_NAME_TAKEN, "dataset": stem, "to": to,
+                          "then": THEN_NAME_TAKEN}, indent=2))
+        return 0
+    source.rename(target)
+    print(json.dumps({"status": STATUS_RENAMED, "dataset": to, "from": stem, "path": str(target)},
+                     indent=2))
+    return 0
+
+
 def _add_write_args(cmd: argparse.ArgumentParser) -> None:
     """The flags both write doors take. They go through one funnel, so they take one set."""
     cmd.add_argument("--profile", required=True, help="the profile whose dataset to write")
@@ -1270,7 +1385,11 @@ def _dispatch(args: argparse.Namespace) -> int:
             confirm_replace=args.confirm_replace,
             confirm_convention=args.confirm_convention,
             description=args.description,
+            note_convention=args.note_convention,
         )
+
+    if args.cmd == "rename":
+        return _rename(args.profile, args.dataset, args.to)
 
     return _apply(
         args.profile,
@@ -1316,7 +1435,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="write it even though it departs from the profile's own examples",
     )
+    save_cmd.add_argument(
+        "--note-convention",
+        action="store_true",
+        help="write it even when it departs from the profile's own examples, and say how it departs "
+        "(`convention_say`) instead of stopping to ask",
+    )
     _add_write_args(save_cmd)
+
+    rename_cmd = sub.add_parser("rename", help="Rename a dataset (its file); never overwrites one.")
+    rename_cmd.add_argument("--profile", required=True, help="the profile whose dataset to rename")
+    rename_cmd.add_argument("--dataset", required=True, help="the dataset's current name")
+    rename_cmd.add_argument("--to", required=True, help="its new name")
 
     apply_cmd = sub.add_parser("apply", help="Apply the explorer page's queued actions.")
     apply_cmd.add_argument("--ops", required=True, help="the parsed back-channel ops, as JSON")
@@ -1324,10 +1454,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     args = parser.parse_args(argv)
 
-    # Nothing gets out of here as a traceback. `1` is the skill's signal to render a
-    # `needs_confirmation` block and re-run with `--confirm-replace`, and an uncaught exception
-    # exits `1` too — so a crash would be read as a stop the person can agree to, and the answer to
-    # it would be a confirmed overwrite. Every unexpected failure becomes `2` and a stderr sentence.
+    # Nothing gets out of here as a traceback. A stop the person can agree to is exit 0 with
+    # `status: needs_confirmation`, which no crash can print; an uncaught exception would exit `1`,
+    # and every unexpected failure becomes `2` and a stderr sentence, so a caller never reads one
+    # as anything else.
     try:
         return _dispatch(args)
     except FileNotFoundError as exc:
@@ -1349,8 +1479,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         _stop(f"this does not fit a golden case — {golden._validation_digest(exc)}")
     except Exception as exc:
         # Deliberately bare. A named list of what these doors can raise would be a list that goes
-        # stale, and the one thing that must never happen is a failure this helper did not name
-        # reaching the caller as the exit code that means "say yes to overwrite".
+        # stale, and a failure this helper did not name must still reach the caller as one.
         _stop(f"this could not be completed: {exc.__class__.__name__}")
     return _CANNOT_START
 

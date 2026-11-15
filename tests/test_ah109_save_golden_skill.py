@@ -213,3 +213,19 @@ def test_a_relative_question_is_renamed_never_re_anchored():
 def test_with_no_dataset_yet_the_dataset_card_has_two_options():
     s = _section("4. **Which dataset**", "**Never glob")
     assert "Create one named" in s and "Name it myself" in s
+
+
+def test_a_first_save_names_its_set_and_says_how_to_rename_it():
+    """A live run asked a card to name the test set right after "looks right"."""
+    flat = " ".join(SKILL.split())
+    assert "**With no dataset yet, don't ask:**" in flat
+    assert 'to rename the set, say "rename the test set to …"' in flat
+    assert "golden_author.py rename --profile <profile> --dataset <old> --to <new>" in flat
+
+
+def test_a_stop_for_the_persons_yes_is_exit_zero_with_a_status():
+    flat = " ".join(SKILL.split())
+    assert "**`0` with `status: needs_confirmation`**" in flat
+    assert "Exit `1`" not in SKILL and "exit `1`" not in SKILL
+    assert "pass `--note-convention` instead, and ask nothing" in flat
+    assert "run the evals" not in SKILL

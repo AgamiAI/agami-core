@@ -424,7 +424,7 @@ def test_re_importing_the_same_sheet_asks_before_it_doubles_anything(tmp_path, m
     argv = _import_argv(_rows_file(tmp_path, [_row()]))
     assert _run(tmp_path, monkeypatch, capsys, argv)[0] == 0
     code, payload, _ = _run(tmp_path, monkeypatch, capsys, argv)
-    assert code == 1
+    assert code == 0 and payload["status"] == "needs_confirmation"
     assert [entry["id"] for entry in payload["needs_confirmation"]] == [
         "how-many-orders-have-been-placed"
     ]
@@ -608,7 +608,7 @@ def test_a_duplicate_save_declined_leaves_the_file_byte_identical(tmp_path, monk
         tmp_path, sql=REVENUE_SQL, recorded={"columns": ["revenue"], "rows": [[1234.56]]}
     )
     code, payload, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(replacement))
-    assert code == 1
+    assert code == 0 and payload["status"] == "needs_confirmation"
     assert _dataset_file(tmp_path).read_bytes() == before
 
     entry = payload["needs_confirmation"][0]
@@ -785,12 +785,10 @@ def test_an_ordinary_stem_with_dots_and_dashes_still_writes(tmp_path, monkeypatc
     assert [item.query for item in _items(tmp_path, "orders.v2-smoke")] == [QUERY]
 
 
-# --- exit 1 means one thing, so nothing unexpected may produce it ---
+# --- a failure exits 2, so it is never read as a stop the person can agree to ---
 #
-# The skill reads the exit code before the payload and `1` tells it to render a `needs_confirmation`
-# block and re-run with `--confirm-replace`. An uncaught exception exiting 1 therefore escalates a
-# crash into a confirmed-overwrite attempt, which is why every one of these asserts on the code
-# rather than only on the message.
+# A stop the person can agree to exits 0 with `status: needs_confirmation`; a crash must never look
+# like one, which is why every one of these asserts on the code rather than only on the message.
 
 
 def _json_file(tmp_path, name: str, body) -> str:
@@ -1263,7 +1261,7 @@ def test_a_key_that_departs_from_the_profiles_examples_stops_before_writing(
 
     code, payload, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(item))
 
-    assert code == golden_author._NEEDS_CONFIRMATION
+    assert code == 0 and payload["status"] == golden_author.STATUS_NEEDS_CONFIRMATION
     assert payload["added"] == []
     divergence = payload["needs_confirmation_convention"]
     assert divergence["example_sql"].count("created_at")
@@ -1307,6 +1305,67 @@ def test_a_key_that_matches_the_convention_is_written_without_a_question(
     code, _, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(_item_file(tmp_path)))
 
     assert code == 0 and _items(tmp_path)[0].expected.sql == SQL
+
+
+INNER_JOINS_SQL = (
+    "SELECT categories.name, SUM(order_items.quantity) AS units FROM order_items "
+    "JOIN orders ON order_items.order_id = orders.id "
+    "JOIN products ON order_items.product_id = products.id "
+    "JOIN categories ON products.category_id = categories.id "
+    "WHERE orders.status NOT IN ('cancelled', 'refunded') GROUP BY categories.name"
+)
+OUTER_JOINS_SQL = INNER_JOINS_SQL.replace(" JOIN ", " LEFT JOIN ")
+
+
+def test_the_same_joins_written_inner_and_outer_are_not_a_departure(tmp_path, monkeypatch, capsys):
+    """A live sample run stopped an answer the person had just called right with a card about outer
+    and inner joins: the inner joins' ON clauses read as three filters the example's LEFT JOINs did
+    not have. Which columns join is the `join_keys` claim; the rows filtered are the same."""
+    monkeypatch.setattr(golden_author, "_dialect", lambda profile: "sqlite")
+    monkeypatch.setattr(
+        golden_author, "_nearest_example", lambda profile, question: _example(OUTER_JOINS_SQL)
+    )
+    item = _item_file(tmp_path, sql=INNER_JOINS_SQL)
+
+    code, payload, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(item))
+
+    assert code == 0 and payload["status"] == golden_author.STATUS_WRITTEN
+    assert "convention" not in payload
+    # A real filter that differs is still reported.
+    monkeypatch.setattr(
+        golden_author,
+        "_nearest_example",
+        lambda profile, question: _example(OUTER_JOINS_SQL.replace("'refunded'", "'returned'")),
+    )
+    divergence = golden_author._convention_divergence(PROFILE, QUERY, INNER_JOINS_SQL)
+    assert [c["name"] for c in divergence["claims"]] == ["filter_predicates"]
+    assert not any(p.startswith("eq(") for c in divergence["claims"] for p in c["generated"])
+
+
+def test_a_noted_departure_is_saved_and_said_in_plain_words(tmp_path, monkeypatch, capsys):
+    """From a "looks right" reply the answer is saved and the departure said in one sentence: the
+    person already answered, so a card asking again is the wrong place for it."""
+    monkeypatch.setattr(
+        golden_author,
+        "_nearest_example",
+        lambda profile, question: _example(
+            "SELECT COUNT(*) AS order_count FROM orders WHERE created_at >= '2024-01-01'"
+        ),
+    )
+    item = _item_file(
+        tmp_path,
+        sql="SELECT COUNT(*) AS order_count FROM orders WHERE placed_at >= '2024-01-01'",
+    )
+
+    code, payload, _ = _run(
+        tmp_path, monkeypatch, capsys, _save_argv(item, "orders", "--note-convention")
+    )
+
+    assert code == 0 and payload["status"] == golden_author.STATUS_WRITTEN
+    assert _items(tmp_path)[0].expected.sql.count("placed_at")
+    say = payload["convention_say"]
+    assert say.startswith("It filters rows differently from the example agami already keeps")
+    assert "filter_predicates" not in say and "convention" not in say
 
 
 def test_the_check_never_costs_a_save_when_it_cannot_run(tmp_path, monkeypatch, capsys):
@@ -1424,7 +1483,7 @@ def test_a_replacement_that_also_departs_from_convention_requests_both_confirmat
 
     code, payload, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(replacement))
 
-    assert code == golden_author._NEEDS_CONFIRMATION
+    assert code == 0 and payload["status"] == golden_author.STATUS_NEEDS_CONFIRMATION
     assert payload["needs_confirmation"][0]["id"] == "how-many-orders-have-been-placed"
     assert payload["needs_confirmation"][0]["before"]["expected"]["sql"] == SQL
     assert payload["needs_confirmation"][0]["after"]["expected"]["sql"].count("placed_at")
@@ -1480,7 +1539,7 @@ def test_a_departure_that_is_also_a_replacement_asks_both_questions_at_once(
 
     code, payload, _ = _run(tmp_path, monkeypatch, capsys, _save_argv(item))
 
-    assert code == golden_author._NEEDS_CONFIRMATION
+    assert code == 0 and payload["status"] == golden_author.STATUS_NEEDS_CONFIRMATION
     assert "needs_confirmation_convention" in payload
     # …and the replacement, in the same breath, with both sides to render.
     assert [entry["id"] for entry in payload["needs_confirmation"]] == [
@@ -1516,3 +1575,26 @@ def test_a_departure_on_a_new_item_asks_only_about_the_departure(tmp_path, monke
 
     assert "needs_confirmation_convention" in payload
     assert "needs_confirmation" not in payload
+
+
+def test_a_set_is_renamed_and_a_taken_name_is_a_question(tmp_path, monkeypatch, capsys):
+    """A first save names the set itself (no card), so the person needs a way to rename it; a
+    name already taken comes back as a question, exit 0, and nothing moves."""
+    monkeypatch.setattr(golden_author, "_nearest_example", lambda profile, question: None)
+    assert _run(tmp_path, monkeypatch, capsys, _save_argv(_item_file(tmp_path), "sales"))[0] == 0
+    assert _run(tmp_path, monkeypatch, capsys, _save_argv(_item_file(tmp_path), "orders"))[0] == 0
+
+    code, payload, _ = _run(tmp_path, monkeypatch, capsys,
+                            ["rename", "--profile", PROFILE, "--dataset", "sales", "--to", "orders"])
+    assert code == 0 and payload["status"] == golden_author.STATUS_NAME_TAKEN
+    assert (tmp_path / PROFILE / "golden_datasets" / "sales.yaml").exists()
+
+    code, payload, _ = _run(tmp_path, monkeypatch, capsys,
+                            ["rename", "--profile", PROFILE, "--dataset", "sales", "--to", "store"])
+    assert code == 0 and payload["status"] == golden_author.STATUS_RENAMED
+    assert [item.query for item in _items(tmp_path, "store")] == [QUERY]
+    assert not (tmp_path / PROFILE / "golden_datasets" / "sales.yaml").exists()
+
+    code, _, err = _run(tmp_path, monkeypatch, capsys,
+                        ["rename", "--profile", PROFILE, "--dataset", "store", "--to", "../x"])
+    assert code == 2 and "usable dataset name" in err

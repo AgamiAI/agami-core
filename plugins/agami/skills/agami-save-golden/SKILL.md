@@ -49,7 +49,7 @@ If plan mode is not active, skip this phase silently and go to Phase 0.
 2. **Model present** — `<artifacts_dir>/<profile>/datasource.yaml` must exist. If not, invoke `/agami-connect`, unless `AGAMI_PROFILE` names a database with no model ([`shared/file-layout.md`](../../shared/file-layout.md#when-agami_profile-names-a-database-with-no-model)): then say so and stop. A dataset belongs to a profile, and a profile with no model has nothing to be scored against.
    Then, before any door below, create the scratch folder every later step writes to: `mkdir -p "<artifacts_dir>/local/tmp"` (Claude's Write tool and a `>` redirect both need it to exist).
 3. **See what exists** — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" run_golden_eval.py --profile <profile> --list`. It reads the files, runs nothing and writes nothing, and it is how you find out whether this is a new dataset or an existing one you are appending to. A missing directory is ordinary (`datasets` is empty, exit 0; the first write creates it), so never `ls` the folder: on a first save it does not exist, and the failed `ls` shows as an error.
-4. **Which dataset** — the one named in `$ARGUMENTS`, the only one that exists, or ask with `AskUserQuestion`, header `Dataset`, listing what is there (up to three) plus "a new one". **With no dataset yet**, the card still has two options: **Create one named <suggested>** (a plain name drawn from the question's subject, e.g. `orders`) and **Name it myself**, whose name is typed in "Other"; **Name it myself** picked with nothing typed is asked again. The name is the **filename stem** (`orders` → `orders.yaml`); the file never declares its own name and the writer never puts one in. A stem is **one plain name** — letters, digits, dots, dashes and underscores, nothing else. `--profile` is held to the same rule. Both are joined straight into the path the writer truncates and rewrites, so anything with a separator or a `..` in it is refused with exit `2` before a single byte is read; never "helpfully" pass a path where a name is asked for.
+4. **Which dataset** — the one named in `$ARGUMENTS`, the only one that exists, or ask with `AskUserQuestion`, header `Dataset`, listing what is there (up to three) plus "a new one". **With no dataset yet, don't ask:** use a plain name drawn from the question's subject (e.g. `orders`, or the subject area's name in words), and after the save say in one line what it was saved as and how to rename it (*"Saved as a test question in a new set called orders; to rename the set, say "rename the test set to …"."*). Ask on that card, **Create one named <suggested>** / **Name it myself** (the name typed in "Other"), only when the person asked to choose the name. A set by that name that already exists is the same subject: add to it. A rename is `golden_author.py rename --profile <profile> --dataset <old> --to <new>` (exit 0 with `status: renamed`; a taken name comes back as `status: name_taken`, nothing moved: ask for another). The name is the **filename stem** (`orders` → `orders.yaml`); the file never declares its own name and the writer never puts one in. A stem is **one plain name** — letters, digits, dots, dashes and underscores, nothing else. `--profile` is held to the same rule. Both are joined straight into the path the writer truncates and rewrites, so anything with a separator or a `..` in it is refused with exit `2` before a single byte is read; never "helpfully" pass a path where a name is asked for.
 
 **Never glob for a dataset outside this profile.** [`shared/golden-dataset-shape.md`](../../shared/golden-dataset-shape.md) is the authority on every field and it carries the hard rule verbatim: **never read another profile** to learn the file shape. A golden dataset is the business definitions and the answer key in one file, so a glob across `<artifacts_dir>` returns another customer's questions together with the SQL that correctly answers them — a tenant-data leak in a hosted deployment and a lift of somebody's business definitions even locally. The reference has every field; a sibling profile never is the reference.
 
@@ -168,17 +168,19 @@ Write the item with the **Write tool** as JSON — the same rule as any JSON fil
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py save \
   --profile <profile> --dataset <dataset> \
-  --item "<artifacts_dir>/local/tmp/agami-golden-item-<ts>.json" \
+  --item "<artifacts_dir>/local/tmp/agami-test-question.json" \
   > "<artifacts_dir>/local/tmp/agami-golden-save-<ts>.json"
 ```
 
-**A statement that departs from this profile's own examples stops here too**, with exit `1` and a `needs_confirmation_convention` payload. The library of curated examples is where a team's conventions live — which of two equally correct date columns they answer with, how they phrase a join — and it is what agami reads when it answers the question for real. An answer key that contradicts it will fail every future run and blame the model.
+**A statement that departs from this profile's own examples stops here too**: exit `0`, `status: needs_confirmation`, and a `needs_confirmation_convention` payload, nothing written. The library of curated examples is where a team's conventions live — which of two equally correct date columns they answer with, how they phrase a join — and it is what agami reads when it answers the question for real. An answer key that contradicts it will fail every future run and blame the model.
 
 The payload carries the nearest example's question and statement, and the claims that differ. **Show both statements and ask**, in one line:
 
 > Your examples for this kind of question filter on `created`; this one uses `opened`. Save it anyway?
 
-Ask it on a card, header `Convention`: **Save anyway** / **Don't save**. **It is a question and never a refusal.** A golden item may legitimately depart from convention — that is sometimes exactly why one is written. On **Save anyway**, re-run the same command with `--confirm-convention` appended. On **Don't save**, nothing was written, and the fix is usually to the statement rather than to the dataset.
+Ask it on a card, header `Convention`: **Save anyway** / **Don't save**, the difference said in the card's question and the options' descriptions (never only in a preview, [question-cards rule 1](../../shared/question-cards.md)). **It is a question and never a refusal.** A golden item may legitimately depart from convention — that is sometimes exactly why one is written. On **Save anyway**, re-run the same command with `--confirm-convention` appended. On **Don't save**, nothing was written, and the fix is usually to the statement rather than to the dataset.
+
+**From a "looks right" reply (agami-query 4d.2) pass `--note-convention` instead, and ask nothing**: the person has just said the answer is right, so the item is written, and a departure comes back as `convention_say`, one plain sentence to post after the line saying what was saved. Inner joins against an example's outer joins over the same tables are not a departure (which columns join is its own claim).
 
 Only three claims can stop a save this way — the tables read, the filters written, and the resolved date window — because those are the ones that change *which rows are counted*. Two statements answering one question differ in ordering and limit all the time, and stopping for those would make this a prompt people learn to click through.
 
@@ -236,7 +238,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py apply \
   > "<artifacts_dir>/local/tmp/agami-golden-apply-<ts>.json"
 ```
 
-Exit codes are Phase 4's, unchanged. On `1` the payload carries `needs_confirmation` for the edits **and `needs_confirmation_removals` for the deletions** — the latter has a `before` and no `after`, because the whole of what somebody is agreeing to is what disappears. **Render the removals' questions and answer keys, not their ids.** An id is a slug; nobody can decide from it.
+Exit codes are Phase 4's, unchanged. On `status: needs_confirmation` the payload carries `needs_confirmation` for the edits **and `needs_confirmation_removals` for the deletions** — the latter has a `before` and no `after`, because the whole of what somebody is agreeing to is what disappears. **Render the removals' questions and answer keys, not their ids.** An id is a slug; nobody can decide from it.
 
 **What may be queued, and the one thing that may not.** Six actions: add or remove a tag, set `match`, edit the question, remove the item, and withdraw confirmation. **Nothing here grants confirmation.** The page has no control for it, the parser refuses a block that asks for it, and this door knows no verb that does — three layers, because a queued action that could confirm an item is the cheapest possible way to make a failing suite green.
 
@@ -246,8 +248,8 @@ Exit codes are Phase 4's, unchanged. On `1` the payload carries `needs_confirmat
 
 **Read the exit code before the payload.** Both write doors share it:
 
-- **`0`** — written. Report `added` / `replaced` and the path.
-- **`1`** — **needs confirmation.** Nothing was written. Not a failure and not a success; a pipeline that treated it as either would be wrong in both directions. **This is the only thing that produces `1`** — every other outcome, expected or not, is `2` with a sentence on stderr — so a `1` is never a crash.
+- **`0` with `status: written`** — written. Report `added` / `replaced` in words, not ids or paths: *"Saved as a test question in the orders set."*
+- **`0` with `status: needs_confirmation`** — Nothing was written. Not a failure and not a success: a question for the person, so it exits 0 (a `1` showed in the app as a failed command right before the question). Its `then` says what to do. No crash prints it: every unexpected outcome is `2` with a sentence on stderr.
 
   **Read which key the payload carries before you answer it. There are three, and they take different flags:**
 
@@ -257,7 +259,7 @@ Exit codes are Phase 4's, unchanged. On `1` the payload carries `needs_confirmat
   | `needs_confirmation_removals` | A queued action would delete an item. Carries `{id, before}` and no `after`. | `--confirm-replace` |
   | `needs_confirmation_convention` | The statement departs from the profile's own examples. Carries the nearest example and the claims that differ. | `--confirm-convention` |
 
-  A payload may carry more than one — a replacement whose statement also departs needs both flags. If you ever see `1` with none of the three, stop and report it rather than re-running with a flag.
+  A payload may carry more than one — a replacement whose statement also departs needs both flags. If you ever see `needs_confirmation` with none of the three, stop and report it rather than re-running with a flag.
 - **`2`** — cannot start. The stderr line (prefix `agami-save-golden:`) says why. Nothing was written, or a failed write was rolled back to the bytes that were there before.
 
 On a `needs_confirmation` payload — a list of `{id, before, after}` — **render both sides** — a markdown table or two fenced blocks per id, the existing item and the one that would take its place. "This id already exists" is not enough for anyone to decide with: the thing being overwritten is an answer key, and they have to see what they would lose.
@@ -269,7 +271,7 @@ The two sides end the turn (long text before a card does not reach the person), 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py save \
   --profile <profile> --dataset <dataset> \
-  --item "<artifacts_dir>/local/tmp/agami-golden-item-<ts>.json" --confirm-replace \
+  --item "<artifacts_dir>/local/tmp/agami-test-question.json" --confirm-replace \
   > "<artifacts_dir>/local/tmp/agami-golden-save-<ts>.json"
 ```
 
@@ -283,7 +285,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py save \
 2. **Never write `sql_confirmed: true` for an answer nobody vouched for.** Two doors can produce one: the save door, where a person read a result and accepted it, and the import door, for a row whose sheet already carried a statement — that statement is passed through **verbatim**, never generated or edited here (rule 1 is what keeps that true). A statement that "looks right" to you is not one; a statement the sheet already carried is.
 3. **Never skip the confirmation step.** The parse is shown as a table and agreed to before the import runs; a replacement is shown as a before and an after and agreed to before `--confirm-replace` is passed. Both are the point of the two-step, not a formality in front of it.
 4. **Never read another profile.** Not to learn the file shape, not to copy a case, not to see "how other people tag these". [`shared/golden-dataset-shape.md`](../../shared/golden-dataset-shape.md) is the authority and it has every field; a glob across profiles returns another tenant's questions together with the SQL that answers them.
-5. **Never run or score a dataset from here.** No `/agami-eval`, no executing the statement to "check it first". This skill writes. If the user wants a verdict, hand them off: *"Say 'run the evals' to score `<dataset>`."*
+5. **Never run or score a dataset from here.** No `/agami-eval`, no executing the statement to "check it first". This skill writes. If the user wants a verdict, hand them off: *"To check agami against these test questions, say "run my test questions"."*
 6. **Never edit a dataset YAML by hand.** Every write goes through `golden_author.py`, which re-reads the file with the runner's own reader and rolls back if it would not read clean. A hand edit skips that gate, and the fault surfaces at the next run against the file rather than at the moment it was made.
 
 ---
@@ -292,10 +294,10 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py save \
 
 | Symptom | Action |
 |---|---|
-| Exit `0` | Written. Report `added` / `replaced` and the path. After an import, say plainly that nothing can gate yet. |
-| Exit `1` with `needs_confirmation` | Nothing was written. Render the before and the after for every id, ask, and re-run with `--confirm-replace` only on an explicit yes. On a no, say the file is untouched and stop. |
-| Exit `1` with `needs_confirmation_removals` | Nothing was written. Render each removal's question and answer key — not its id — ask, and re-run with `--confirm-replace` on an explicit yes. |
-| Exit `1` with `needs_confirmation_convention` | Nothing was written. Show the nearest example's statement beside the one being saved, say which claims differ, and ask. On a yes re-run with `--confirm-convention`. On a no the fix is usually to the statement, not to the dataset. |
+| `status: written` | Written. Report `added` / `replaced` in words. After an import, say plainly that nothing can gate yet. |
+| `status: needs_confirmation` with `needs_confirmation` | Nothing was written. Render the before and the after for every id, ask, and re-run with `--confirm-replace` only on an explicit yes. On a no, say the file is untouched and stop. |
+| `status: needs_confirmation` with `needs_confirmation_removals` | Nothing was written. Render each removal's question and answer key — not its id — ask, and re-run with `--confirm-replace` on an explicit yes. |
+| `status: needs_confirmation` with `needs_confirmation_convention` | Nothing was written. Show the nearest example's statement beside the one being saved, say which claims differ, and ask. On a yes re-run with `--confirm-convention`. On a no the fix is usually to the statement, not to the dataset. |
 | Exit `2` | Cannot start. Read the `agami-save-golden:` line on stderr — it names the cause. Nothing was written; a rolled-back write left the previous bytes exactly as they were. |
 | `agami-save-golden: this file is empty` / `no column here holds the question` / `this file has no header row` | The sheet's question column can't be identified. The refusal lists every header it read — quote it back, ask which column holds the question, and have them rename it (or add a header row) and re-invoke. Never guess at column 0: a bank of ids imported as questions fails every future run in a way that looks exactly like a model regression. |
 | `agami-save-golden: N row(s) were skipped` on a successful parse | A warning, not a stop. List every entry in `skipped` with its row number and reason before asking for the import — a question silently missing from a dataset is the failure this line exists to prevent. |

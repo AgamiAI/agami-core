@@ -157,7 +157,7 @@ def test_a_question_bank_imports_unconfirmed_and_one_verified_answer_confirms_it
     # The item exists already, so the append-only rule fires first: the person is shown what is
     # there and what would take its place, and nothing is written until they say yes.
     stop_code, stop = _run(tmp_path, monkeypatch, capsys, save_argv)
-    assert stop_code == 1
+    assert stop_code == 0 and stop["status"] == "needs_confirmation"
     (pending,) = stop["needs_confirmation"]
     assert pending["id"] == target
     assert pending["before"]["expected"]["sql_confirmed"] is False
@@ -370,7 +370,7 @@ def test_a_promotion_onto_an_existing_question_stops_until_it_is_confirmed(
     del resolution["tags"]
     second = _write(tmp_path, "resolved.json", json.dumps(resolution))
     stop_code, stop = _run(tmp_path, monkeypatch, capsys, [*argv, second])
-    assert stop_code == 1
+    assert stop_code == 0 and stop["status"] == "needs_confirmation"
     (pending,) = stop["needs_confirmation"]
     assert pending["id"] == golden_author._slug(Q3_REVENUE)
     # Both sides, and the two provenance shapes are what tells them apart.
@@ -569,7 +569,7 @@ def test_a_queued_removal_shows_the_item_before_it_is_applied(tmp_path, monkeypa
 
     code, payload = _run(tmp_path, monkeypatch, capsys, argv)
 
-    assert code == 1
+    assert code == 0 and payload["status"] == "needs_confirmation"
     shown = payload["needs_confirmation_removals"]
     assert [row["id"] for row in shown] == ["orders-stale"]
     assert shown[0]["before"]["query"] == "An old question nobody kept"

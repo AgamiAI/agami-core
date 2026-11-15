@@ -1,7 +1,7 @@
 ---
 name: agami-eval
 description: "Runs the golden evaluation harness for a profile. Picks one golden dataset, regenerates SQL for every question in it, executes each statement against the org's own warehouse, scores the result against the confirmed answer key, and reports the verdicts — failures first, with the errored, the unscored and the unconfirmed each kept separate. Scoring is deterministic and happens in agami-core; the skill reports it and never re-judges it. Neither the answer key nor the generated statement is printed: both stay in a local JSON artifact the report points at."
-when_to_use: "Use when the user says 'run the evals', 'run the golden dataset', 'score the model against my golden questions', 'did anything regress?', 'how accurate is agami on my data?', or '/agami-eval <dataset>' — any ask for evidence that the semantic model still answers its agreed questions correctly. Requires agami-connect to have been run first (needs a semantic model + working credentials) and at least one dataset under `<artifacts_dir>/<profile>/golden_datasets/`. This skill reads and scores only; it never writes or edits a dataset."
+when_to_use: "Use when the user says 'run the evals', 'run my test questions', 'run the golden dataset', 'score the model against my golden questions', 'did anything regress?', 'how accurate is agami on my data?', or '/agami-eval <dataset>' — any ask for evidence that the semantic model still answers its agreed questions correctly. Requires agami-connect to have been run first (needs a semantic model + working credentials) and at least one dataset under `<artifacts_dir>/<profile>/golden_datasets/`. This skill reads and scores only; it never writes or edits a dataset."
 argument-hint: "[dataset-name]"
 ---
 
