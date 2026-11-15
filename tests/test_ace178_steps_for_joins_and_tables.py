@@ -349,3 +349,155 @@ def test_an_ambiguous_table_name_borrows_no_row():
         [],
     )
     assert "1 of the listed reference(s) could not be resolved" in r["tables"]["undetermined"]
+
+
+# --- review of part 2: names the receipt cannot pin to one relation -------------------------------
+
+QUOTED_STEP = (
+    "WITH customers AS (SELECT 1 AS id, status AS region FROM orders) SELECT SUM(o.total_amount) "
+    'AS n FROM orders o JOIN "customers" c ON c.id = o.customer_id'
+)
+
+
+def test_a_quoted_name_folded_onto_a_step_is_neither_the_table_nor_the_step(tmp_path):
+    """`"customers"` beside `WITH customers`: the scope gate reads the table, Postgres and DuckDB fold
+    the name onto the step. What it reads is not established, so no section claims the table."""
+    r = rt.assemble_receipt(_related(tmp_path), QUOTED_STEP)
+    join = _join(r, "orders → customers")
+    assert (join["status"], join["resolves_to"]) == (rt.UNDECLARABLE, None)
+    (agg,) = r["aggregates"]["items"]
+    assert agg["status"] != rt.NOT_MULTIPLIED, agg
+    (item,) = [i for i in r["columns"]["items"] if i.get("column") == "n"]
+    assert item["status"] != rt.MATCHED or item["joins_not_declared"], item
+    quoted = [t for t in r["tables"]["items"] if t["scope"] == "main" and t["ref"] != "orders"]
+    assert [(t["declared"], t["qname"]) for t in quoted] == [(False, None)], quoted
+    assert "could not be resolved" in (r["tables"]["undetermined"] or "")
+
+
+def test_a_recursive_forward_reference_borrows_no_row(tmp_path):
+    sql = (
+        "WITH RECURSIVE a AS (SELECT id, total_amount FROM orders), orders AS (SELECT id, 1000 AS "
+        "total_amount FROM public.orders) SELECT SUM(total_amount) AS n FROM a"
+    )
+    r = rt.assemble_receipt(_related(tmp_path), sql)
+    inner = [t for t in r["tables"]["items"] if t["scope"] == "cte:a"]
+    assert [(t["declared"], t["qname"]) for t in inner] == [(False, None)], inner
+    assert "could not be resolved" in (r["tables"]["undetermined"] or "")
+
+
+def test_a_table_whose_alias_renames_its_columns_is_not_read_as_the_declared_table():
+    sql = (
+        "SELECT SUM(oi.quantity) FROM order_items oi JOIN orders AS t(customer_id, id) "
+        "ON t.id = oi.order_id"
+    )
+    r = rt.assemble_receipt(_sales_org(), sql)
+    assert all(it["status"] != rt.DECLARED for it in r["joins"]["items"]), r["joins"]
+    assert all(a["status"] != rt.NOT_MULTIPLIED for a in r["aggregates"]["items"])
+
+
+def test_a_step_over_a_name_two_schemas_declare_stands_for_no_table():
+    tree = rt._parse_sql("WITH o AS (SELECT * FROM staging.orders) SELECT COUNT(*) FROM o", None)
+    org = _two_schema_org()
+    steps = rt._cte_steps(tree)
+    assert rt._step_table(steps["o"], {}, rt._schema_index(org)) is None
+    org = _sales_org()
+    assert (
+        rt._step_table(steps["o"], {}, rt._schema_index(org)) is None
+    )  # `staging` is not a schema this model declares `orders` in
+    tree = rt._parse_sql("WITH o AS (SELECT * FROM public.orders) SELECT COUNT(*) FROM o", None)
+    assert rt._step_table(rt._cte_steps(tree)["o"], {}, rt._schema_index(org)) == "orders"
+
+
+def test_a_step_with_no_columns_stands_for_no_table():
+    tree = rt._parse_sql("WITH o AS (SELECT FROM orders) SELECT COUNT(*) FROM o", "postgres")
+    org = _sales_org()
+    step = rt._cte_steps(tree)["o"]
+    assert rt._step_table(step, {}, rt._schema_index(org)) is None
+
+
+# --- review of part 2: the cost of following steps stays linear -----------------------------------
+
+
+def _untraced() -> None:
+    try:
+        import coverage
+
+        if coverage.Coverage.current() is not None:
+            pytest.skip("a clock under coverage measures the tracer; the untraced pass checks this")
+    except ImportError:
+        pass
+
+
+def _best_of(sql: str, runs: int = 2) -> float:
+    import time
+
+    best = float("inf")
+    for _ in range(runs):
+        started = time.perf_counter()
+        rt.assemble_receipt(_sales_org(), sql)
+        best = min(best, time.perf_counter() - started)
+    return best
+
+
+def _long_chain_read_by_many_arms() -> str:
+    steps = ["s0 AS (SELECT o.id FROM orders o JOIN customers k ON k.id = o.customer_id)"]
+    steps += [f"s{i} AS (SELECT id FROM s{i - 1})" for i in range(1, 700)]
+    return (
+        "WITH "
+        + ", ".join(steps)
+        + " "
+        + " UNION ALL ".join("SELECT id FROM s699" for _ in range(400))
+    )
+
+
+def _resolvable_chain_joined_in_many_arms() -> str:
+    steps = ["c0 AS (SELECT id, customer_id, total_amount FROM orders)"]
+    steps += [f"c{i} AS (SELECT id, customer_id, total_amount FROM c{i - 1})" for i in range(1, 63)]
+    arm = "SELECT SUM(c62.total_amount) FROM c62 JOIN order_items i ON i.order_id = c62.id"
+    return "WITH " + ", ".join(steps) + " " + " UNION ALL ".join(arm for _ in range(500))
+
+
+def test_each_step_is_read_once_however_many_arms_reach_it(monkeypatch):
+    """Which arms reach which step, and what a step stands for, are worked out once per statement:
+    700 chained steps read by 400 arms classify each step once, not once per arm."""
+    calls = {"classify": 0}
+    real = rt._classify_step
+
+    def counted(*args, **kwargs):
+        calls["classify"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(rt, "_classify_step", counted)
+    rt.assemble_receipt(_sales_org(), _resolvable_chain_joined_in_many_arms())
+    assert calls["classify"] <= 4 * 63, calls
+
+
+@pytest.mark.parametrize(
+    "build,bound",
+    [(_long_chain_read_by_many_arms, 2.0), (_resolvable_chain_joined_in_many_arms, 3.5)],
+    ids=["700 steps x 400 arms", "63 steps x 500 joined arms"],
+)
+def test_steps_read_by_many_arms_stay_inside_the_bound(build, bound):
+    """Measured before the fix on the part 1 head and on this branch: 1.33 s and 7.32 s for the
+    first, 2.31 s and 2.72 s for the second. Untraced pass only, best of two."""
+    _untraced()
+    sql = build()
+    assert len(sql) <= 50_000
+    assert _best_of(sql) < bound
+
+
+def test_past_the_reach_budget_every_arm_is_fed(monkeypatch):
+    """The reach walk is bounded; past its budget a join in a step downgrades every arm's numbers,
+    the answer the receipt gave before it followed reach at all."""
+    monkeypatch.setattr(rt, "_MAX_REACH_VISITS", 1)
+    sql = UNDECLARED_STEP + "SELECT SUM(total_amount) FROM orders"
+    [item] = rt.pre_flight_check(sql, _sales_org()).aggregates
+    assert item.status == rt.UNDETERMINED
+
+
+def test_only_a_with_reference_can_stand_for_a_table():
+    org = _sales_org()
+    tree = rt._parse_sql("SELECT COUNT(*) FROM orders", None)
+    table = tree.find(rt.exp.Table)
+    assert rt._step_table(table, {}, rt._schema_index(org)) is None
+    assert rt._step_table(tree, {}, rt._schema_index(org)) is None

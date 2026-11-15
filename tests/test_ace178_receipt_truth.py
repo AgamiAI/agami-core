@@ -485,6 +485,57 @@ CASES = [
         "orders o JOIN customers c ON c.id = o.customer_id",
         "c.region = 'EU'",
     ),
+    # Review of ACE-178 part 2: each read as a plain match the engine's numbers refuted (the engine
+    # folds a quoted name onto the step; an alias column list renames the table's columns). Not
+    # followed now, so nothing is claimed.
+    (
+        "rel",
+        "WITH customers AS (SELECT 1 AS id, status AS region FROM orders) SELECT SUM(o.total_amount) AS n FROM orders o JOIN \"customers\" c ON c.id = o.customer_id",
+        [],
+        [],
+        "undetermined",
+        None,
+        None,
+        None,
+        None,
+        None,
+    ),
+    (
+        "rel",
+        "WITH orders AS (SELECT id, 1000 AS total_amount, customer_id FROM orders) SELECT SUM(total_amount) AS n FROM \"orders\"",
+        [],
+        [],
+        "undetermined",
+        None,
+        None,
+        None,
+        None,
+        None,
+    ),
+    (
+        "rel",
+        "WITH o2 AS (SELECT customer_id, total_amount FROM orders AS t(customer_id, id)) SELECT SUM(o2.total_amount) AS n FROM o2 JOIN customers c ON c.id = o2.customer_id",
+        [],
+        [],
+        "undetermined",
+        None,
+        None,
+        None,
+        None,
+        None,
+    ),
+    (
+        "rel",
+        "SELECT SUM(o.total_amount) AS n FROM orders AS o(customer_id, total_amount)",
+        [],
+        [],
+        "undetermined",
+        None,
+        None,
+        None,
+        None,
+        None,
+    ),
 ]
 
 # What each engine must compare, and of that how many with a join on the path. Every `matched` case

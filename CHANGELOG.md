@@ -59,7 +59,14 @@ below corresponds to one such version.
   inside a step only downgrades the numbers of the query arms that read that step. A `tables` item
   resolves its own reference by schema: `staging.orders` gets staging's row estimate and filters,
   a schema-qualified table read beside a WITH of its name is the table, and an unqualified name the
-  model declares in two schemas borrows no row and is counted on the section's marker.
+  model declares in two schemas borrows no row and is counted on the section's marker. A table
+  name told apart from a WITH of the same name only by quoting (`"orders"` beside `WITH orders`),
+  a table whose alias renames its columns (`orders AS t(customer_id, id)`), and a name a `WITH
+  RECURSIVE` sibling defined later may bind are read as neither the table nor the step in every
+  section: the number is `undetermined` with its reason, the join `undeclarable`, the table item
+  borrows no row. Which steps reach which query arms, and what each step stands for, are worked
+  out once per statement, and a statement's WITH bindings are kept on its own parse tree rather
+  than in one module-wide entry two threads evicted from each other.
 
 - **A matched metric says which rows it was counted over (#656).** The receipt's `columns`
   section compared an output column's expression with each metric's binding and nothing else, so

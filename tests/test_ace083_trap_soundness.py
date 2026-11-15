@@ -399,6 +399,31 @@ INFLATED_SHAPES = [
     ("a CTE body that explodes a column", LATERAL_VIEW_CTE, ["SUM(o.total_amount)"]),
     ("a CTE body that unpivots", UNPIVOT_CTE, ["SUM(o.total_amount)"]),
     ("a CTE body that walks a hierarchy", CONNECT_BY_CTE, ["SUM(o.total_amount)"]),
+    # ACE-178 part 2: a step stands for its table only with every column under its own name.
+    ("a step renaming the one side's key",
+     "WITH o AS (SELECT customer_id AS id, total_amount FROM orders) "
+     "SELECT SUM(oi.quantity) FROM order_items oi JOIN o ON o.id = oi.order_id", ["SUM(oi.quantity)"]),
+    ("a step renaming the many side's key",
+     "WITH oi AS (SELECT product_id AS order_id, quantity FROM order_items) "
+     "SELECT SUM(orders.total_amount) FROM orders JOIN oi ON oi.order_id = orders.id",
+     ["SUM(orders.total_amount)"]),
+    # Its review: a quoted name folded onto a WITH, alias column lists, star modifiers, schemas.
+    ("a quoted name an engine binds to the step",
+     "WITH orders AS (SELECT customer_id AS id, total_amount FROM public.orders) "
+     "SELECT SUM(oi.quantity) FROM order_items oi JOIN \"orders\" ON \"orders\".id = oi.order_id",
+     ["SUM(oi.quantity)"]),
+    ("a table whose alias renames its key",
+     "SELECT SUM(oi.quantity) FROM order_items oi JOIN orders AS t(customer_id, id) "
+     "ON t.id = oi.order_id", ["SUM(oi.quantity)"]),
+    ("a step over a table whose alias renames its key",
+     "WITH o AS (SELECT id, total_amount FROM orders AS t(customer_id, id)) "
+     "SELECT SUM(oi.quantity) FROM order_items oi JOIN o ON o.id = oi.order_id", ["SUM(oi.quantity)"]),
+    ("a step whose star replaces its key",
+     "WITH o AS (SELECT * REPLACE (customer_id AS id) FROM orders) "
+     "SELECT SUM(oi.quantity) FROM order_items oi JOIN o ON o.id = oi.order_id", ["SUM(oi.quantity)"]),
+    ("a step over a schema the model does not declare",
+     "WITH o AS (SELECT * FROM secretschema.orders) "
+     "SELECT SUM(oi.quantity) FROM order_items oi JOIN o ON o.id = oi.order_id", ["SUM(oi.quantity)"]),
 ]
 
 # A conditional count and a conditional sum over the many side. Both are honestly clean: one row
@@ -1444,7 +1469,7 @@ def test_a_grain_preserving_cte_resolves_through_another_one():
     tree = _parse(TRANSITIVE_CTE)
     scope, derived = rt._resolve_cte_scope(
         tree, rt._cte_steps(tree), rt._alias_map(tree, in_scope_only=True),
-        rt._model_table_index(_sales_org()))
+        rt._model_table_index(_sales_org()), rt._schema_index(_sales_org()))
     assert scope == {"orders": "orders", "b": "order_items"}, scope
     # No DERIVED edge: `b` IS `order_items`, so the model's own declared relationship is the one the
     # fan is read off. A derived edge here would mean the resolution fell back to treating the CTE
@@ -1476,7 +1501,7 @@ def test_a_cte_grain_that_does_not_cover_the_join_key_still_fans():
     tree = _parse(CTE_GRAIN_BELOW_JOIN_KEY)
     scope, derived = rt._resolve_cte_scope(
         tree, rt._cte_steps(tree), rt._alias_map(tree, in_scope_only=True),
-        rt._model_table_index(_sales_org()))
+        rt._model_table_index(_sales_org()), rt._schema_index(_sales_org()))
     assert scope == {"orders": "orders", "oi": "oi"}, scope
     assert [(r.from_table, r.to_table, r.from_column, r.to_column, r.relationship)
             for r in derived] == [("oi", "orders", "order_id", "id", "many_to_one")], derived
@@ -1500,7 +1525,7 @@ def test_a_cte_grain_that_covers_the_join_key_is_not_multiplied():
     tree = _parse(GRAIN_CHANGING_CTE)
     scope, derived = rt._resolve_cte_scope(
         tree, rt._cte_steps(tree), rt._alias_map(tree, in_scope_only=True),
-        rt._model_table_index(_sales_org()))
+        rt._model_table_index(_sales_org()), rt._schema_index(_sales_org()))
     assert scope == {"orders": "orders", "oi": "oi"}, scope
     assert [(r.from_table, r.to_table, r.from_column, r.to_column, r.relationship)
             for r in derived] == [("oi", "orders", "order_id", "id", "one_to_one")], derived
@@ -1528,7 +1553,7 @@ def test_the_join_key_is_read_in_either_orientation(label, on, expected):
     tree = _parse(sql)
     _scope, derived = rt._resolve_cte_scope(
         tree, rt._cte_steps(tree), rt._alias_map(tree, in_scope_only=True),
-        rt._model_table_index(_sales_org()))
+        rt._model_table_index(_sales_org()), rt._schema_index(_sales_org()))
     assert [(r.from_table, r.to_table, r.from_column, r.to_column, r.relationship)
             for r in derived] == [("oi", "orders", "order_id", "id", expected)], label
     assert [a.status for a in _reports(sql)] == [rt.NOT_MULTIPLIED], label
@@ -1610,7 +1635,7 @@ def test_a_cte_name_is_resolved_case_insensitively_but_reported_as_written():
     tree = _parse(CASE_FOLDED_CTE)
     scope, derived = rt._resolve_cte_scope(
         tree, rt._cte_steps(tree), rt._alias_map(tree, in_scope_only=True),
-        rt._model_table_index(_sales_org()))
+        rt._model_table_index(_sales_org()), rt._schema_index(_sales_org()))
     assert scope == {"orders": "orders", "OI": "order_items"}, scope
     assert derived == [], derived
 
@@ -2284,7 +2309,7 @@ def test_a_join_key_written_in_another_case_does_not_invent_a_fan():
     tree = _parse(JOIN_KEY_IN_ANOTHER_CASE)
     _scope, derived = rt._resolve_cte_scope(
         tree, rt._cte_steps(tree), rt._alias_map(tree, in_scope_only=True),
-        rt._model_table_index(_sales_org()))
+        rt._model_table_index(_sales_org()), rt._schema_index(_sales_org()))
     assert [(r.from_table, r.to_table, r.relationship) for r in derived] == [
         ("g", "orders", "one_to_one")], derived
     assert [a.status for a in _reports(JOIN_KEY_IN_ANOTHER_CASE)] == [rt.NOT_MULTIPLIED]
@@ -2304,7 +2329,7 @@ def test_a_declared_grain_the_catalog_upper_cased_is_still_the_grain():
     tree = _parse(GRAIN_CHANGING_CTE)
     _scope, derived = rt._resolve_cte_scope(
         tree, rt._cte_steps(tree), rt._alias_map(tree, in_scope_only=True),
-        rt._model_table_index(org))
+        rt._model_table_index(org), rt._schema_index(org))
     assert [(r.from_table, r.to_table, r.relationship) for r in derived] == [
         ("oi", "orders", "one_to_one")], derived
 
@@ -2485,7 +2510,7 @@ def test_a_cte_body_that_multiplies_its_own_rows_is_not_the_table_it_reads(label
     tree = _parse(sql)
     steps = rt._cte_steps(tree.find(exp.Select))
     assert set(steps) == {"o"}, (label, steps)
-    assert rt._step_table(steps["o"], {}, rt._model_table_index(_sales_org())) is None, label
+    assert rt._step_table(steps["o"], {}, rt._schema_index(_sales_org())) is None, label
 
     reports = _reports(sql)
     assert [a.status for a in reports] == [rt.UNDETERMINED], (label, reports)
@@ -2616,7 +2641,7 @@ def test_the_cte_chain_bound_admits_exactly_the_number_it_is_written_as():
     Both sides of the boundary, because either alone is satisfiable by a bound that is off by one in
     the other direction.
     """
-    org, tidx = _sales_org(), None
+    org = _sales_org()
 
     def chain(links: int) -> str:
         bodies = ["c0 AS (SELECT * FROM order_items)"]
@@ -2625,14 +2650,14 @@ def test_the_cte_chain_bound_admits_exactly_the_number_it_is_written_as():
                 f" SELECT SUM(orders.total_amount) FROM orders JOIN c{links - 1} "
                 f"ON c{links - 1}.order_id = orders.id")
 
-    tidx = rt._model_table_index(org)
+    sidx = rt._schema_index(org)
     assert rt._MAX_CTE_CHAIN == 64
     at_the_bound = _parse(chain(rt._MAX_CTE_CHAIN))
     assert rt._step_table(
-        rt._cte_steps(at_the_bound.find(exp.Select))["c63"], {}, tidx) == "order_items"
+        rt._cte_steps(at_the_bound.find(exp.Select))["c63"], {}, sidx) == "order_items"
     past_it = _parse(chain(rt._MAX_CTE_CHAIN + 1))
     assert rt._step_table(
-        rt._cte_steps(past_it.find(exp.Select))["c64"], {}, tidx) is None
+        rt._cte_steps(past_it.find(exp.Select))["c64"], {}, sidx) is None
 
     assert [a.status for a in _reports(chain(rt._MAX_CTE_CHAIN))] == [rt.MULTIPLIED]
     assert [a.status for a in _reports(chain(rt._MAX_CTE_CHAIN + 1))] == [rt.UNDETERMINED]
