@@ -495,7 +495,7 @@ STEP_BASE_TERMS = {
         ["change_requests.type = 'normal'"],
     "WITH pop AS (SELECT o.id, o.total_amount, o.status = 'paid' AS is_paid FROM orders o) "
     "SELECT SUM(total_amount) AS n FROM pop WHERE NOT is_paid":
-        ["NOT (orders.status = 'paid')"],
+        ["orders.status <> 'paid'"],
     "WITH a AS (SELECT id, total_amount, status = 'paid' OR status = 'open' AS live FROM orders), "
     "b AS (SELECT id, total_amount, live AS keep FROM a) SELECT SUM(total_amount) AS n FROM b "
     "WHERE keep AND id > 1":
@@ -537,28 +537,31 @@ GROUP_KEY_THROUGH_STEP = [
 #
 # A condition on a table reached by one of several declared relationships: (statement, what the
 # receipt must say). A restriction list, or None for "not matched" (the link cannot be told). A
-# link is shown once, with every condition reached through it.
+# link is shown once, with every condition reached through it: on the join's own line when the join
+# drops rows, else on a line of its own (round 3).
 LINK_TRICKS = [
     ("SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id WHERE NOT u.active",
-     ["users via assets.assigned_to_id → users.id: NOT u.active",
-      "only assets rows with a matching users (on users.id = assets.assigned_to_id)"]),
+     ["only assets rows that have a matching users row (on users.id = assets.assigned_to_id) "
+      "via assets.assigned_to_id → users.id: u.active = FALSE"]),
     ("SELECT COUNT(*) AS n FROM assets a JOIN users u ON a.owned_by_id = u.id "
      "WHERE u.active = FALSE",
-     ["users via assets.owned_by_id → users.id: u.active = FALSE",
-      "only assets rows with a matching users (on assets.owned_by_id = users.id)"]),
+     ["only assets rows that have a matching users row (on assets.owned_by_id = users.id) "
+      "via assets.owned_by_id → users.id: u.active = FALSE"]),
     ("SELECT COUNT(*) AS n FROM assets a LEFT JOIN users u ON u.id = a.managed_by_id "
      "WHERE u.active",
-     ["users via assets.managed_by_id → users.id: u.active"]),
+     ["only assets rows that have a matching users row (on users.id = assets.managed_by_id) "
+      "via assets.managed_by_id → users.id: u.active"]),
     ("SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id "
      "AND u.id = a.managed_by_id WHERE NOT u.active", None),
     ("SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id "
      "WHERE NOT u.active AND u.id > 2",
-     ["users via assets.assigned_to_id → users.id: NOT u.active AND u.id > 2",
-      "only assets rows with a matching users (on users.id = assets.assigned_to_id)"]),
+     ["only assets rows that have a matching users row (on users.id = assets.assigned_to_id) "
+      "via assets.assigned_to_id → users.id: u.active = FALSE AND u.id > 2"]),
     # The related table read through a step.
     ("WITH uu AS (SELECT id, active FROM users) SELECT COUNT(*) AS n FROM assets a "
      "LEFT JOIN uu ON uu.id = a.managed_by_id WHERE uu.active",
-     ["users via assets.managed_by_id → users.id: users.active"]),
+     ["only assets rows that have a matching users row (on users.id = assets.managed_by_id) "
+      "via assets.managed_by_id → users.id: users.active"]),
     ("WITH uu AS (SELECT id, active FROM users) SELECT COUNT(*) AS n FROM assets a "
      "LEFT JOIN uu ON uu.id = a.managed_by_id AND uu.id = a.owned_by_id WHERE uu.active", None),
     # A comma join, whose columns the joins section does not read: which link cannot be told.
@@ -571,36 +574,36 @@ INNER_JOIN_TRICKS = [
     ("SELECT d.is_central, SUM(e.amount) AS n FROM expense_lines e JOIN award_departments d "
      "ON d.award_id = e.award_id WHERE e.fiscal_year = 2018 GROUP BY d.is_central",
      ["e.fiscal_year = 2018",
-      "only expense_lines rows with a matching award_departments (on award_id)"]),
+      "only expense_lines rows that have a matching award_departments row (on award_id)"]),
     ("SELECT SUM(e.amount) AS n FROM expense_lines e, award_departments d "
      "WHERE d.award_id = e.award_id",
-     ["only expense_lines rows with a matching award_departments (on award_id)"]),
+     ["only expense_lines rows that have a matching award_departments row (on award_id)"]),
     ("SELECT SUM(e.amount) AS n FROM expense_lines e CROSS JOIN award_departments d "
      "WHERE d.award_id = e.award_id",
-     ["only expense_lines rows with a matching award_departments (on award_id)"]),
+     ["only expense_lines rows that have a matching award_departments row (on award_id)"]),
     ("SELECT SUM(e.amount) AS n FROM expense_lines e JOIN award_departments d USING (award_id)",
-     ["only expense_lines rows with a matching award_departments (on award_id)"]),
+     ["only expense_lines rows that have a matching award_departments row (on award_id)"]),
     ("SELECT SUM(e.amount) AS n FROM award_departments d JOIN expense_lines e "
      "ON d.award_id = e.award_id",
-     ["only expense_lines rows with a matching award_departments (on award_id)"]),
+     ["only expense_lines rows that have a matching award_departments row (on award_id)"]),
     ("WITH x AS (SELECT e.amount FROM expense_lines e JOIN award_departments d "
      "ON d.award_id = e.award_id) SELECT SUM(amount) AS n FROM x",
-     ["only expense_lines rows with a matching award_departments (on award_id)"]),
+     ["only expense_lines rows that have a matching award_departments row (on award_id)"]),
     # A value condition in the ON narrows the rows as well.
     ("SELECT COUNT(DISTINCT i.id) AS n FROM outages o JOIN incidents i "
      "ON i.service_id = o.service_id AND i.opened BETWEEN o.begin_at AND o.end_at",
      ["i.opened BETWEEN o.begin_at AND o.end_at",
-      "only incidents rows with a matching outages (on service_id)"]),
+      "only incidents rows that have a matching outages row (on service_id)"]),
     # NATURAL drops the rows with no partner as an ON would.
     ("SELECT SUM(e.amount) AS n FROM expense_lines e NATURAL JOIN award_departments d",
-     ["only expense_lines rows with a matching award_departments (on every column the two share)"]),
+     ["only expense_lines rows that have a matching award_departments row (on every column the two share)"]),
     # An outer join whose optional side the number reads keeps only the rows that found a partner.
     ("SELECT SUM(e.amount) AS n FROM award_departments d LEFT JOIN expense_lines e "
      "ON d.award_id = e.award_id",
-     ["only expense_lines rows with a matching award_departments (on award_id)"]),
+     ["only expense_lines rows that have a matching award_departments row (on award_id)"]),
     ("SELECT SUM(e.amount) AS n FROM expense_lines e RIGHT JOIN award_departments d "
      "ON d.award_id = e.award_id",
-     ["only expense_lines rows with a matching award_departments (on award_id)"]),
+     ["only expense_lines rows that have a matching award_departments row (on award_id)"]),
     # An outer join keeps the rows with no partner; a CROSS join drops none.
     ("SELECT SUM(e.amount) AS n FROM expense_lines e LEFT JOIN award_departments d "
      "ON d.award_id = e.award_id", []),
@@ -618,14 +621,160 @@ REAUDIT_JOIN_PATH = [
      "JOIN problems p ON p.id = i.problem_id WHERE mo.window_valid",
      ["id > 0", "outages.end_at >= outages.begin_at", "i.opened >= outages.begin_at",
       "i.opened <= outages.end_at",
-      "only outages rows with a matching incidents (on service_id)",
-      "only problems rows with a matching incidents (on problems.id = incidents.problem_id)"]),
+      "only outages rows that have a matching incidents row (on service_id)",
+      "only problems rows that have a matching incidents row (on problems.id = incidents.problem_id)"]),
     ("WITH mo AS (SELECT service_id, begin_at, end_at, end_at >= begin_at AS window_valid "
      "FROM outages WHERE id > 0) SELECT COUNT(DISTINCT p.id) AS n FROM mo JOIN incidents i "
      "ON i.service_id = mo.service_id AND i.opened >= mo.begin_at AND i.opened <= mo.end_at "
      "JOIN problems p ON p.id = i.problem_id WHERE mo.window_valid",
      ["id > 0", "outages.end_at >= outages.begin_at", "i.opened >= outages.begin_at",
       "i.opened <= outages.end_at",
-      "only outages rows with a matching incidents (on service_id)",
-      "only problems rows with a matching incidents (on problems.id = incidents.problem_id)"]),
+      "only outages rows that have a matching incidents row (on service_id)",
+      "only problems rows that have a matching incidents row (on problems.id = incidents.problem_id)"]),
+]
+
+
+# Round 3, over the `audit` model with `problem_count` and `rejected` its metrics: a step joined in
+# requires rows of its own, and a count read off a LEFT join's optional side counts only the rows
+# with a partner. Every requirement is listed over the tables; no line names a step.
+ROUND3_JOIN_PATH = [
+    ("WITH mo AS (SELECT service_id, begin_at, end_at, end_at >= begin_at AS window_valid "
+     "FROM outages WHERE kind = 'major'), inc AS (SELECT i.problem_id FROM mo JOIN incidents i "
+     "ON i.service_id = mo.service_id AND i.opened >= mo.begin_at AND i.opened <= mo.end_at "
+     "WHERE mo.window_valid) SELECT COUNT(DISTINCT p.id) AS n FROM problems p "
+     "JOIN inc ON inc.problem_id = p.id",
+     ["kind = 'major'", "outages.end_at >= outages.begin_at", "i.opened >= outages.begin_at",
+      "i.opened <= outages.end_at",
+      "only outages rows that have a matching incidents row (on service_id)",
+      "only problems rows that have a matching incidents row (on incidents.problem_id = problems.id)"]),
+    ("WITH s AS (SELECT id FROM requests WHERE fiscal_year = 2025), rsn AS (SELECT request_id "
+     "FROM rejections WHERE reason IS NOT NULL) SELECT COUNT(DISTINCT n.request_id) AS n "
+     "FROM s LEFT JOIN rsn n ON n.request_id = s.id",
+     ["fiscal_year = 2025", "reason IS NOT NULL",
+      "only rejections rows that have a matching requests row "
+      "(on rejections.request_id = requests.id)"]),
+]
+
+# Round 3: a condition shown as the most readable SQL it is, and a link shown once. Over the
+# `audit` model.
+READABLE_CONDITIONS = [
+    ("SELECT COUNT(*) AS n FROM assets a WHERE NOT a.status IS NULL AND NOT a.status IN ('x', 'y') "
+     "AND NOT (a.id = 3) AND NOT a.status LIKE 'z%'",
+     ["a.status IS NOT NULL", "a.status NOT IN ('x', 'y')", "a.id <> 3", "a.status NOT LIKE 'z%'"]),
+    # The link and the join it names, once.
+    ("SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id WHERE NOT u.active",
+     ["only assets rows that have a matching users row (on users.id = assets.assigned_to_id) "
+      "via assets.assigned_to_id → users.id: u.active = FALSE"]),
+]
+
+
+# Round 3, exact synthetic analogs of two real receipts (same structure, made-up names). Over the
+# `audit` model; each with its one metric (see the battery). (statement, column, the restrictions,
+# or None for undetermined, the reference that states the claim over the tables).
+_OUTAGE_STEP = (
+    "WITH major_outage AS (SELECT os.id AS outage_id, os.service_id, os.began AS outage_begin, "
+    "os.ended AS outage_end, (os.ended >= os.began) AS window_valid, os.change_id FROM outages os "
+    "WHERE os.began >= DATE '2026-01-01' AND TRIM(COALESCE(os.kind, '')) = 'Emergency'), "
+)
+_OUTAGE_TAIL = (
+    "SELECT mo.outage_id, COUNT(DISTINCT p.number) AS problems_created FROM major_outage mo "
+    "LEFT JOIN changes c ON c.id = mo.change_id LEFT JOIN inc ON inc.outage_id = mo.outage_id "
+    "LEFT JOIN problems p ON p.id = inc.problem_id GROUP BY mo.outage_id"
+)
+AUDIT_REAL_SHAPES = [
+    # A count through a chain of LEFT JOINs needs every step on the chain: `p` exists only where
+    # `inc` found a row. Here `inc` re-reads the first step, one step through two references,
+    # which is not modelled: undetermined, never a match missing `inc`'s conditions.
+    (_OUTAGE_STEP + "inc AS (SELECT mo.outage_id, i.number AS incident_number, i.problem_id "
+     "FROM major_outage mo JOIN incidents i ON i.service_id = mo.service_id "
+     "AND i.opened >= mo.outage_begin AND i.opened <= mo.outage_end WHERE mo.window_valid) "
+     + _OUTAGE_TAIL, "problems_created", None, None),
+    # The same chain where `inc` reads the table. Its steps hand the join key on renamed
+    # (`id AS outage_id`), and a renamed column is not traced to a table: undetermined.
+    (_OUTAGE_STEP + "inc AS (SELECT o.id AS outage_id, i.problem_id FROM outages o "
+     "JOIN incidents i ON i.service_id = o.service_id AND i.opened >= o.began "
+     "AND i.opened <= o.ended WHERE o.ended >= o.began) " + _OUTAGE_TAIL, "problems_created",
+     None, None),
+    # Counting the optional side of a LEFT JOIN to a step, over a model declaring no relationship
+    # between the two steps' tables: the line tying the two steps, both steps' filters, and a
+    # non-equality period join naming both its tables. A third LEFT-joined step, counted by
+    # another column, is on none of `with_reason`'s lines.
+    ("WITH sub AS (SELECT DISTINCT f.request_id FROM expense_lines f JOIN dates d "
+     "ON d.date_key = f.submit_date_key JOIN fiscal_periods p ON CAST(d.full_date AS DATE) "
+     "BETWEEN p.period_start AND p.period_end AND p.adjustment_flag = 'N' "
+     "WHERE p.fiscal_year = 2025), rsn AS (SELECT DISTINCT r.request_id FROM rejections r "
+     "WHERE r.request_id IS NOT NULL AND r.reason IS NOT NULL AND r.reason <> ''), "
+     "apc AS (SELECT DISTINCT a.id AS request_id FROM requests a WHERE a.fiscal_year = 2025) "
+     "SELECT COUNT(DISTINCT s.request_id) AS submitted, COUNT(DISTINCT n.request_id) AS with_reason, "
+     "COUNT(DISTINCT x.request_id) AS approved FROM sub s LEFT JOIN rsn n "
+     "ON n.request_id = s.request_id LEFT JOIN apc x ON x.request_id = s.request_id",
+     "with_reason",
+     ["p.fiscal_year = 2025", "CAST(d.full_date AS DATE) BETWEEN p.period_start AND p.period_end",
+      "p.adjustment_flag = 'N'", "r.request_id IS NOT NULL", "r.reason IS NOT NULL",
+      "r.reason <> ''",
+      "only expense_lines rows that have a matching dates row "
+      "(on dates.date_key = expense_lines.submit_date_key)",
+      "only dates rows that have a matching fiscal_periods row",
+      "only rejections rows that have a matching expense_lines row (on request_id)"],
+     "SELECT COUNT(DISTINCT r.request_id) AS v FROM rejections r JOIN expense_lines f "
+     "ON f.request_id = r.request_id JOIN dates d ON d.date_key = f.submit_date_key "
+     "JOIN fiscal_periods p ON CAST(d.full_date AS DATE) BETWEEN p.period_start AND p.period_end "
+     "AND p.adjustment_flag = 'N' WHERE p.fiscal_year = 2025 AND r.request_id IS NOT NULL "
+     "AND r.reason IS NOT NULL AND r.reason <> ''"),
+]
+
+
+# Final round: over-claims a correctness review found, each fixed by deletion or by reading
+# undetermined. Over the `acme` model, UNFILTERED unless the storage type says otherwise:
+# (storage type, statement, the reason it reads undetermined).
+FAIL_CLOSED = [
+    # A join key a step hands on renamed (`customer_id AS status`).
+    ("PostgreSQL", "WITH x AS (SELECT customer_id AS status, total_amount FROM orders) "
+     "SELECT SUM(x.total_amount) AS n FROM x JOIN customers c ON c.status = x.status",
+     "_WHY_JOIN_UNNAMED"),
+    ("PostgreSQL", "WITH x AS (SELECT customer_id AS id, total_amount FROM orders) "
+     "SELECT SUM(x.total_amount) AS n FROM x JOIN customers c USING (id)", "_WHY_JOIN_UNNAMED"),
+    # Arms matched by column name.
+    ("DuckDB", "SELECT COUNT(*) AS n FROM orders UNION ALL BY NAME SELECT COUNT(*) AS n FROM orders",
+     "_WHY_BY_NAME"),
+    # An outer join's optional side required beside a RIGHT join; an anti-join; a key that is not
+    # a plain `=`.
+    ("PostgreSQL", "SELECT SUM(o.total_amount) AS n FROM payments p LEFT JOIN orders o "
+     "ON o.id = p.order_id RIGHT JOIN customers c ON c.id = o.customer_id", "_WHY_JOIN_ORDER"),
+    ("PostgreSQL", "SELECT SUM(o.total_amount) AS n FROM orders o LEFT JOIN payments p "
+     "ON p.order_id = o.id WHERE p.id IS NULL", "_WHY_JOIN_ORDER"),
+    ("PostgreSQL", "SELECT SUM(o.total_amount) AS n FROM orders o LEFT JOIN payments p "
+     "ON p.order_id IS NOT DISTINCT FROM o.id WHERE p.status = 'paid'", "_WHY_JOIN_ORDER"),
+]
+
+# A WHERE condition on an outer join's optional side drops the rows with no partner: the join and
+# its ON conditions are listed. (statement, restrictions) over the `acme` model, UNFILTERED.
+OPTIONAL_SIDE_FILTERED = [
+    ("SELECT SUM(o.total_amount) AS n FROM orders o LEFT JOIN payments p ON p.order_id = o.id "
+     "AND p.amount > 1 WHERE p.status = 'paid'",
+     ["p.status = 'paid'", "p.amount > 1",
+      "only orders rows that have a matching payments row (on payments.order_id = orders.id)"]),
+]
+
+# A subquery reading a step that cannot be shown is withheld whole, never shown with the step's
+# name or its values: a whole-row reference or a sensitive column inside, a recursive step, and a
+# chain deeper than the inlining bound. Over the `acme` model (`customers.email` is sensitive).
+INLINE_WITHHELD = [
+    "WITH paid AS (SELECT c.id FROM customers c WHERE CAST(c AS TEXT) LIKE '%SECRETVAL%') "
+    "SELECT SUM(total_amount) AS n FROM orders o WHERE o.customer_id IN (SELECT id FROM paid)",
+    "WITH a AS (SELECT c.id FROM customers c WHERE CAST(c AS TEXT) LIKE '%SECRETVAL%'), "
+    "paid AS (SELECT id FROM a) SELECT SUM(total_amount) AS n FROM orders o "
+    "WHERE o.customer_id IN (SELECT id FROM paid)",
+    "WITH paid AS (SELECT c.id FROM customers c WHERE CAST(c AS TEXT) LIKE '%SECRETVAL%') "
+    "SELECT SUM(total_amount) AS n FROM orders o WHERE EXISTS (SELECT 1 FROM paid "
+    "WHERE paid.id = o.customer_id)",
+    "WITH paid AS (SELECT c.id FROM customers c WHERE row_to_json(c)::text LIKE '%SECRETVAL%') "
+    "SELECT SUM(total_amount) AS n FROM orders o WHERE o.customer_id IN (SELECT id FROM paid)",
+    "WITH RECURSIVE r AS (SELECT id FROM customers WHERE id = 1 UNION ALL SELECT c.id "
+    "FROM customers c WHERE c.id IN (SELECT id FROM r)) SELECT SUM(total_amount) AS n "
+    "FROM orders WHERE customer_id IN (SELECT id FROM r)",
+    "WITH c0 AS (SELECT id FROM customers WHERE region = 'EU'), "
+    + ", ".join(f"c{i} AS (SELECT id FROM customers WHERE id IN (SELECT id FROM c{i - 1}))"
+                for i in range(1, 45))
+    + " SELECT SUM(total_amount) AS n FROM orders WHERE customer_id IN (SELECT id FROM c44)",
 ]

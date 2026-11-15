@@ -82,16 +82,24 @@ below corresponds to one such version.
   key included; a number filtered on a value no condition over the tables can state, or that would
   need a table the statement reads twice, a whole-row reference, a subquery naming the step, or
   more than a bounded amount of text, is `undetermined`. A condition on a table reached by one of
-  several relationships the model declares between two tables names the one used, once for all
-  its conditions (`users via assets.assigned_to_id → users.id: NOT u.active`), through a step too,
-  and is `undetermined` when the join fits more than one or is a comma join. A join that drops the
-  counted rows with no partner is listed in table names (`only orders rows with a matching
-  customers (on customers.id = orders.customer_id)`): a plain, INNER, NATURAL, or equated comma
-  or CROSS join, and an outer join whose optional side the number reads or a later inner join
-  needs, whose own ON conditions are then listed too. The model records nothing saying every row
-  has a partner; a join between two of the metric's own tables is not listed. And in the joins
-  section a step is its table on a join when it hands every row back and passes that join's
-  columns on unchanged, whatever it does to its others.
+  several relationships the model declares between two tables names the one used, beside the
+  query's own join keys, once, with every condition reached through it (`only assets rows that
+  have a matching users row (on users.id = assets.assigned_to_id) via assets.assigned_to_id →
+  users.id: u.active = FALSE`), through a step too, and is `undetermined` when the join fits more
+  than one or is a comma join. A join that drops the counted rows with no partner is listed in table names,
+  never a step's or a query alias (`only orders rows that have a matching customers row (on
+  customers.id = orders.customer_id)`): a plain, INNER, NATURAL, or equated comma or CROSS join,
+  and an outer join whose optional side the number reads or a later inner join needs, whose own ON
+  conditions are then listed too; a join to a step lists what the step requires over its tables,
+  and a number joined to one whose join columns come from no one table is `undetermined`. A join
+  after a step counted is said that way among the result filters. The model records nothing
+  saying every row has a partner; a join between two of the metric's own tables is not listed. A
+  negation is shown as the most readable SQL it is (`x IS NOT NULL`, `x NOT IN (…)`, `a <> b`,
+  and `u.active = FALSE` for a column the model types boolean), and a subquery reading a step
+  shows the step's own SELECT, or is withheld whole when the step would carry a withheld value, is
+  recursive or nests too deep. `joins_not_declared` names tables, never a step's alias. Read
+  `undetermined`: a join key a step hands on renamed, arms matched BY NAME, an anti-join, an outer
+  join keyed by something other than a plain `=` or required beside a RIGHT join.
 - **A matched metric says which rows it was counted over (#656).** The receipt's `columns`
   section compared an output column's expression with each metric's binding and nothing else, so
   `COUNT(DISTINCT number) … WHERE state = 'open'` read `matched` to the metric counting every row,

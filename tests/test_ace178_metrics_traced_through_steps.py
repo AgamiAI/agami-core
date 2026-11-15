@@ -363,7 +363,7 @@ def test_a_declared_join_on_the_path_is_not_named(tmp_path):
     assert (item["name"], item["joins_not_declared"], item["restrictions"]) == (
         "total_sales",
         [],
-        ["only orders rows with a matching customers (on orders.customer_id = customers.id)"],
+        ["only orders rows that have a matching customers row (on orders.customer_id = customers.id)"],
     )
 
 
@@ -818,7 +818,9 @@ def test_a_join_dropping_groups_is_a_result_filter_on_either_side(org):
         "SELECT g.n AS n FROM customers c JOIN g ON c.status = g.status",
     ):
         item = _one(org, sql, "n")
-        assert item["result_filters"] == ["c.status = g.status"], sql
+        # ACE-178 part 3, round 3: said as the join it is, in table names.
+        assert item["result_filters"] == [
+            "only orders rows that have a matching customers row (on status)"], sql
 
 
 def test_a_full_join_names_no_missing_table(org):

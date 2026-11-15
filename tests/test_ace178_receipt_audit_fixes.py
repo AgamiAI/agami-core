@@ -38,11 +38,17 @@ from semantic_model import runtime as rt  # noqa: E402
 
 import receipt_truth as truth  # noqa: E402
 from receipt_trick_queries import (  # noqa: E402
+    AUDIT_REAL_SHAPES,
+    FAIL_CLOSED,
     GROUP_KEY_THROUGH_STEP,
+    INLINE_WITHHELD,
     INNER_JOIN_TRICKS,
     LINK_TRICKS,
+    OPTIONAL_SIDE_FILTERED,
     OR_GROUPS,
+    READABLE_CONDITIONS,
     REAUDIT_JOIN_PATH,
+    ROUND3_JOIN_PATH,
     SET_OP_TRICKS,
     STEP_BASE_TERMS,
     STEP_UNSTATED,
@@ -192,7 +198,10 @@ def test_the_whole_line_is_bounded_link_and_join_lines_included(tmp_path):
         + " AND ".join(f"u.id <> {i}" for i in range(200))
     )
     item = _item(_audit(tmp_path), sql)
-    assert item["restrictions"][0].startswith("users via assets.assigned_to_id")
+    assert item["restrictions"][0].startswith(
+        "only assets rows that have a matching users row (on users.id = assets.assigned_to_id) "
+        "via assets.assigned_to_id"
+    )
     assert all(len(t) <= rt._ECHO_MAX_CONDITION_CHARS + 1 for t in item["restrictions"])
 
 
@@ -329,6 +338,8 @@ AUDIT_TABLES = {
         ("award_id", "integer"),
         ("fiscal_year", "integer"),
         ("amount", "decimal"),
+        ("request_id", "integer"),
+        ("submit_date_key", "integer"),
     ],
     "award_departments": [("award_id", "integer"), ("is_central", "boolean")],
     "outages": [
@@ -336,14 +347,29 @@ AUDIT_TABLES = {
         ("service_id", "integer"),
         ("begin_at", "date"),
         ("end_at", "date"),
+        ("kind", "string"),
+        ("began", "date"),
+        ("ended", "date"),
+        ("change_id", "integer"),
     ],
     "incidents": [
         ("id", "integer"),
         ("service_id", "integer"),
         ("opened", "date"),
         ("problem_id", "integer"),
+        ("number", "string"),
     ],
-    "problems": [("id", "integer"), ("state", "string")],
+    "problems": [("id", "integer"), ("state", "string"), ("number", "string")],
+    "changes": [("id", "integer")],
+    "dates": [("date_key", "integer"), ("full_date", "string")],
+    "fiscal_periods": [
+        ("period_start", "date"),
+        ("period_end", "date"),
+        ("adjustment_flag", "string"),
+        ("fiscal_year", "integer"),
+    ],
+    "requests": [("id", "integer"), ("fiscal_year", "integer")],
+    "rejections": [("id", "integer"), ("request_id", "integer"), ("reason", "string")],
 }
 
 AUDIT_METRICS = {
@@ -378,6 +404,7 @@ AUDIT_RELATIONSHIPS = [
     _rel("expense_lines", "award_id", "award_departments", "award_id"),
     _rel("incidents", "service_id", "outages", "service_id"),
     _rel("incidents", "problem_id", "problems", "id"),
+    _rel("rejections", "request_id", "requests", "id"),
 ]
 
 
@@ -462,8 +489,8 @@ def test_one_declared_link_leaves_the_condition_as_written(tmp_path):
     org = _audit(tmp_path, relationships=[_rel("assets", "assigned_to_id", "users", "id")])
     item = _item(org, LINK_TRICKS[0][0])
     assert item["restrictions"] == [
-        "NOT u.active",
-        "only assets rows with a matching users (on users.id = assets.assigned_to_id)",
+        "u.active = FALSE",
+        "only assets rows that have a matching users row (on users.id = assets.assigned_to_id)",
     ]
 
 
@@ -476,7 +503,7 @@ def test_a_join_no_declared_link_fits_is_named_as_undeclared(tmp_path):
     )
     assert item["status"] == rt.MATCHED
     assert item["joins_not_declared"] == ["assets → users"]
-    assert item["restrictions"][0] == "NOT u.active"
+    assert item["restrictions"][0] == "u.active = FALSE"
 
 
 def test_a_condition_on_the_counted_table_carries_no_link(tmp_path):
@@ -518,7 +545,7 @@ def test_a_built_from_number_lists_the_inner_join_of_its_groups(tmp_path):
         "e.award_id GROUP BY e.fiscal_year) SELECT AVG(t) AS n FROM g",
     )
     assert item["built_from"]["restrictions"] == [
-        "only expense_lines rows with a matching award_departments (on award_id)"
+        "only expense_lines rows that have a matching award_departments row (on award_id)"
     ]
 
 
@@ -527,7 +554,7 @@ def test_the_restriction_forms_parse_back_where_they_are_conditions():
     keeps the join), a linked condition is read past its link."""
     assert truth._LINKED.match("users via assets.assigned_to_id → users.id: NOT u.active")
     assert sqlglot.parse_one("SELECT 1 WHERE NOT u.active") is not None
-    assert truth._INNER_JOIN.match("only orders rows with a matching customers (on id)")
+    assert truth._INNER_JOIN.match("only orders rows that have a matching customers row (on id)")
 
 
 def test_the_trace_shares_no_mutable_default():
@@ -535,3 +562,268 @@ def test_the_trace_shares_no_mutable_default():
         rt._Trace._field_defaults["links"]["x"] = 1
     with pytest.raises(TypeError):
         rt._Path._field_defaults["ref_joins"]["x"] = 1
+
+
+# --- round 3: what a step requires, joins through it, and readable SQL ---------------------------
+
+ROUND3_MODEL = {
+    "problem_count": ("COUNT(DISTINCT id)", ["problems"]),
+    "rejected": ("COUNT(DISTINCT request_id)", ["rejections"]),
+}
+
+
+@pytest.mark.parametrize("sql,expect", ROUND3_JOIN_PATH, ids=["step-requires", "optional-side"])
+def test_what_a_joined_step_requires_is_listed_over_the_tables(tmp_path, sql, expect):
+    """A step joined in narrows the counted rows by its own joins and filters: each is listed over
+    the tables, and the join to the step is named by the table its key comes from, never the step."""
+    item = _item(_audit(tmp_path, metrics=ROUND3_MODEL), sql)
+    assert (item["status"], item["restrictions"]) == (rt.MATCHED, expect)
+    assert not any("step" in line for line in item["restrictions"])
+
+
+@pytest.mark.parametrize("sql,expect", READABLE_CONDITIONS, ids=range(len(READABLE_CONDITIONS)))
+def test_a_condition_is_shown_as_the_most_readable_sql_it_is(tmp_path, sql, expect):
+    item = _item(_audit(tmp_path), sql)
+    assert (item["status"], item["restrictions"]) == (rt.MATCHED, expect)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_a_readable_negation_counts_the_same_rows(unf, engine):
+    """On the numbers: the rewritten negations keep the statement's rows."""
+    sql = (
+        "SELECT COUNT(*) AS n FROM orders WHERE NOT status IS NULL AND NOT status IN ('x') "
+        "AND NOT (customer_id = 9) AND NOT status LIKE 'z%' AND NOT total_amount BETWEEN 3 AND 4"
+    )
+    item = _item(unf, sql)
+    assert item["restrictions"] == [
+        "status IS NOT NULL",
+        "status NOT IN ('x')",
+        "customer_id <> 9",
+        "status NOT LIKE 'z%'",
+        "total_amount NOT BETWEEN 3 AND 4",
+    ]
+    reference = "SELECT COUNT(*) FROM orders WHERE " + " AND ".join(item["restrictions"])
+    assert _rows(engine, sql) == _rows(engine, reference)
+
+
+def test_a_subquery_reading_a_step_shows_the_steps_own_select(unf):
+    sql = (
+        "WITH paid AS (SELECT id FROM orders WHERE status = 'paid') "
+        "SELECT COUNT(*) AS n FROM orders WHERE id IN (SELECT id FROM paid)"
+    )
+    assert _item(unf, sql)["restrictions"] == [
+        "id IN (SELECT id FROM (SELECT id FROM orders WHERE status = 'paid') AS paid)"
+    ]
+
+
+def test_a_condition_the_declared_link_also_states_is_still_listed(tmp_path):
+    """Final round: a condition is never dropped for appearing in the declared `on:` (qualifiers
+    are stripped when they are compared, so `u.status` would stand for `assets.status`). Saying it
+    twice is the price."""
+    rel = _rel("assets", "assigned_to_id", "users", "id")
+    rel.pop("from_column"), rel.pop("to_column")
+    rel["on"] = "assets.assigned_to_id = users.id AND users.active = TRUE"
+    org = _audit(tmp_path, relationships=[rel, _rel("assets", "owned_by_id", "users", "id")])
+    item = _item(
+        org,
+        "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id "
+        "AND u.active = TRUE WHERE u.id > 2",
+    )
+    assert item["status"] == rt.MATCHED
+    assert any("u.active = TRUE" in line for line in item["restrictions"]), item["restrictions"]
+
+
+def test_an_extra_join_key_is_never_hidden_by_the_link(tmp_path):
+    """The query's own keys are shown beside the declared link they fit, extra ones included."""
+    item = _item(
+        _audit(tmp_path),
+        "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id "
+        "AND u.active = a.status WHERE u.id > 2",
+    )
+    assert item["status"] == rt.MATCHED
+    assert any(
+        "(on users.id = assets.assigned_to_id" in line and "via assets.assigned_to_id" in line
+        for line in item["restrictions"]
+    ), item["restrictions"]
+
+
+def test_a_join_after_a_grouping_step_is_a_join_line_among_the_result_filters(unf):
+    item = _item(
+        unf,
+        "WITH g AS (SELECT customer_id, COUNT(*) AS n FROM orders GROUP BY "
+        "customer_id) SELECT g.n FROM g JOIN customers c ON c.id = g.customer_id",
+    )
+    assert item["result_filters"] == [
+        "only orders rows that have a matching customers row (on customers.id = orders.customer_id)"
+    ]
+
+
+# A small DuckDB fixture over the `audit` tables these shapes read, chosen so that dropping any one
+# listed condition or join changes a number: outages outside the year, of another kind, with an
+# inverted window; incidents outside a window or on another service; a problem no incident names;
+# requests submitted outside the year or in an adjustment period, rejections with no reason.
+_AUDIT_ROWS = {
+    "outages(id INTEGER, service_id INTEGER, began DATE, ended DATE, kind TEXT, change_id INTEGER)": [
+        (1, 10, "2026-02-01", "2026-02-05", "Emergency", 1),
+        (2, 10, "2025-06-01", "2025-06-09", "Emergency", None),
+        (3, 20, "2026-03-01", "2026-03-04", " Emergency ", 2),
+        (4, 20, "2026-04-05", "2026-04-01", "Emergency", None),
+        (5, 30, "2026-05-01", "2026-05-03", "Normal", None),
+    ],
+    "incidents(id INTEGER, service_id INTEGER, opened DATE, problem_id INTEGER, number TEXT)": [
+        (1, 10, "2026-02-02", 100, "I1"),
+        (2, 10, "2026-02-09", 101, "I2"),
+        (3, 20, "2026-03-02", 102, "I3"),
+        (4, 20, "2026-04-03", 103, "I4"),
+        (5, 30, "2026-05-02", 104, "I5"),
+        (6, 10, "2025-06-02", 105, "I6"),
+        (7, 20, "2026-03-03", 100, "I7"),
+    ],
+    "problems(id INTEGER, number TEXT)": [
+        (100, "P0"),
+        (101, "P1"),
+        (102, "P2"),
+        (103, "P3"),
+        (104, "P4"),
+        (105, "P5"),
+        (106, "P6"),
+    ],
+    "changes(id INTEGER)": [(1,), (2,)],
+    "expense_lines(request_id INTEGER, submit_date_key INTEGER)": [
+        (1, 1),
+        (2, 2),
+        (3, 3),
+        (4, 1),
+        (5, 4),
+        (6, 1),
+    ],
+    "dates(date_key INTEGER, full_date TEXT)": [
+        (1, "2025-03-01"),
+        (2, "2024-03-01"),
+        (3, "2025-12-31"),
+        (4, "2025-06-30"),
+    ],
+    "fiscal_periods(period_start DATE, period_end DATE, adjustment_flag TEXT, fiscal_year INTEGER)": [
+        ("2025-01-01", "2025-06-29", "N", 2025),
+        ("2025-06-30", "2025-06-30", "Y", 2025),
+        ("2025-07-01", "2025-12-31", "N", 2025),
+        ("2024-01-01", "2024-12-31", "N", 2024),
+    ],
+    "requests(id INTEGER, fiscal_year INTEGER)": [(1, 2025), (2, 2024), (5, 2025)],
+    "rejections(request_id INTEGER, reason TEXT)": [
+        (1, "late"),
+        (2, "late"),
+        (3, ""),
+        (4, None),
+        (5, "missing"),
+        (6, "dup"),
+        (None, "x"),
+    ],
+}
+
+
+def _audit_duckdb():
+    duckdb = pytest.importorskip("duckdb")
+    conn = duckdb.connect()
+    for table, rows in _AUDIT_ROWS.items():
+        conn.execute(f"CREATE TABLE {table}")
+        width = len(rows[0])
+        conn.executemany(
+            f"INSERT INTO {table.split('(')[0]} VALUES ({', '.join(['?'] * width)})", rows
+        )
+    return conn
+
+
+@pytest.mark.parametrize(
+    "sql,column,expect,reference",
+    AUDIT_REAL_SHAPES,
+    ids=["chain-step-read-twice", "chain", "optional-step"],
+)
+def test_a_real_shape_lists_everything_or_reads_undetermined(
+    tmp_path, sql, column, expect, reference
+):
+    metric = {
+        "problems_created": ("COUNT(DISTINCT number)", ["problems"]),
+        "with_reason": ("COUNT(DISTINCT request_id)", ["rejections"]),
+    }[column]
+    # No relationship between the rejections and the expense lines, as in the real model.
+    org = _audit(
+        tmp_path,
+        metrics={column: metric},
+        relationships=[r for r in AUDIT_RELATIONSHIPS if r["from_table"] != "rejections"],
+    )
+    (item,) = [i for i in _outputs(org, sql) if i["column"] == column]
+    if expect is None:
+        assert item["status"] == rt.UNDETERMINED, item
+        return
+    assert (item["status"], item["restrictions"]) == (rt.MATCHED, expect)
+    assert not any(line.startswith("only rows") for line in item["restrictions"])
+    if column == "with_reason":
+        # Joins it was counted through, named by their tables; the third step's join is not one.
+        assert item["joins_not_declared"] == [
+            "expense_lines → dates",
+            "dates → fiscal_periods",
+            "expense_lines → rejections",
+        ]
+        assert not any("requests" in line for line in item["restrictions"])
+    # On the numbers: the claim, written over the tables, is the statement's number, group by
+    # group (a group the claim does not keep must count nothing).
+    conn = _audit_duckdb()
+    try:
+        got = conn.execute(sql).fetchall()
+        want = dict(conn.execute(reference).fetchall()) if "AS k" in reference else None
+        if want is None:
+            (value,) = conn.execute(reference).fetchone()
+            index = [c for c in ("submitted", "with_reason")].index(column)
+            assert got[0][index] == value and value > 0, (got, value)
+        else:
+            for key, value in got:
+                assert value == want.get(key, 0), (key, value, want)
+            assert any(want.values())
+    finally:
+        conn.close()
+
+
+# --- final round: fail closed ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("storage_type,sql,why", FAIL_CLOSED, ids=range(len(FAIL_CLOSED)))
+def test_an_over_claim_the_review_found_reads_undetermined(tmp_path, storage_type, sql, why):
+    org = _acme(tmp_path, "f", metrics=UNFILTERED, storage_type=storage_type)
+    items = [i for i in _outputs(org, sql) if i["aggregate"]]
+    assert items and all(
+        (i["status"], i["reason"]) == (rt.UNDETERMINED, getattr(rt, why)) for i in items
+    ), items
+
+
+@pytest.mark.parametrize("sql,expect", OPTIONAL_SIDE_FILTERED)
+def test_a_filter_on_an_optional_side_lists_its_join(unf, sql, expect):
+    item = _item(unf, sql)
+    assert (item["status"], item["restrictions"]) == (rt.MATCHED, expect)
+
+
+@pytest.mark.parametrize(
+    "sql", INLINE_WITHHELD, ids=["row-ref", "chain", "exists", "to-json", "recursive", "deep"]
+)
+def test_a_subquery_whose_step_cannot_be_shown_is_withheld_whole(tmp_path, sql):
+    """No value, no step name, and a receipt every time, fast."""
+    import json
+    import time
+
+    org = _acme(tmp_path, "w")
+    started = time.perf_counter()
+    receipt = rt.assemble_receipt(org, sql)
+    assert time.perf_counter() - started < 1.0
+    text = json.dumps(receipt["columns"])
+    assert "SECRETVAL" not in text
+    (item,) = [i for i in receipt["columns"]["items"] if i["kind"] == "output"]
+    assert item["status"] == rt.MATCHED
+    assert any("<withheld>" in line for line in item["restrictions"]), item["restrictions"]
+    for step in ("paid", "c44", " r)", "FROM r"):
+        assert all(step not in line for line in item["restrictions"]), item["restrictions"]
+
+
+def test_not_of_a_column_the_model_does_not_type_boolean_stays_not(unf):
+    assert _item(unf, "SELECT COUNT(*) AS n FROM orders o WHERE NOT o.status AND NOT o.is_deleted")[
+        "restrictions"
+    ] == ["NOT o.status", "o.is_deleted = FALSE"]
