@@ -206,7 +206,9 @@ def test_a_metric_computed_in_a_step_matches(org, sql):
 
 def test_restrictions_at_every_level_are_listed(org):
     """A condition inside the step and one in the outer query both restrict the counted rows. The
-    step's comes first: it is written first."""
+    step's comes first: it is written first. The outer one is stated over the table, as the step
+    reads it (ACE-178 part 3): `x.status` names a step a reader of the receipt never sees, and a
+    bare `status` could be another table's where the list is read, so it is named by its table."""
     item = _one(
         org,
         "WITH x AS (SELECT id, status, total_amount FROM orders WHERE customer_id = 3) "
@@ -214,7 +216,7 @@ def test_restrictions_at_every_level_are_listed(org):
         "n",
     )
     assert (item["status"], item["name"]) == (rt.MATCHED, "total_sales")
-    assert item["restrictions"] == ["customer_id = 3", "x.status = 'shipped'"]
+    assert item["restrictions"] == ["customer_id = 3", "orders.status = 'shipped'"]
 
 
 def test_a_filter_on_a_steps_group_is_a_restriction_on_its_rows(tmp_path, org):
@@ -351,6 +353,8 @@ def test_a_join_the_model_does_not_declare_is_named(tmp_path, sql):
 
 
 def test_a_declared_join_on_the_path_is_not_named(tmp_path):
+    """Not named as undeclared. As an inner join it still drops the orders with no customer, so it
+    is listed as the rows it keeps (ACE-178 part 3)."""
     item = _one(
         _related(tmp_path),
         "SELECT SUM(o.total_amount) AS n FROM orders o JOIN customers c ON o.customer_id = c.id",
@@ -359,7 +363,7 @@ def test_a_declared_join_on_the_path_is_not_named(tmp_path):
     assert (item["name"], item["joins_not_declared"], item["restrictions"]) == (
         "total_sales",
         [],
-        [],
+        ["only orders rows that have a matching customers row (on orders.customer_id = customers.id)"],
     )
 
 
@@ -814,7 +818,9 @@ def test_a_join_dropping_groups_is_a_result_filter_on_either_side(org):
         "SELECT g.n AS n FROM customers c JOIN g ON c.status = g.status",
     ):
         item = _one(org, sql, "n")
-        assert item["result_filters"] == ["c.status = g.status"], sql
+        # ACE-178 part 3, round 3: said as the join it is, in table names.
+        assert item["result_filters"] == [
+            "only orders rows that have a matching customers row (on status)"], sql
 
 
 def test_a_full_join_names_no_missing_table(org):
