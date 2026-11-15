@@ -278,7 +278,7 @@ def _joins(cond: "exp.Expression", refs: "dict[str, set[str] | None]") -> bool:
 
 # The two restriction forms that are not a condition: an inner join on the counted rows' path, and
 # a condition prefixed with the declared relationship its table was reached by.
-_INNER_JOIN = "only rows with a match in "
+_INNER_JOIN = re.compile(r"^only .*rows with a matching ")
 _LINKED = re.compile(r"^\S+ via [^:]+: ")
 
 
@@ -306,7 +306,7 @@ def pair(oc: "rt.OutputColumn", item: dict, applied: list[str], org: Any,
     where = oc.sel.args.get("where")
     conds = [c.copy() for c in rt._and_conjuncts(where.this if where else None) if _joins(c, refs)]
     for text in [*item["restrictions"], *applied]:
-        if text.startswith(_INNER_JOIN):
+        if _INNER_JOIN.match(text):
             continue              # an inner join: kept as written in the FROM
         linked = _LINKED.match(text)
         if linked:

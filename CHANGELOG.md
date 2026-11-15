@@ -68,24 +68,30 @@ below corresponds to one such version.
   out once per statement, and a statement's WITH bindings are kept on its own parse tree rather
   than in one module-wide entry two threads evicted from each other.
 
-- **A receipt claims no more than it can show, from an audit of 100 real receipts.** Five shapes
+- **A receipt claims no more than it can show, from an audit of 100 real receipts.** Seven shapes
   read as more than they were. A condition looser than AND (`a OR b`) is listed in brackets in
   `restrictions`, `result_filters`, `missing_conditions` and `built_from`, since a reader joins
-  each list with AND; a condition cut to the length bound backs out of a string it ends inside and
-  closes every bracket it left open (`(a OR b …)`), so a cut never reads as a different, complete
-  condition. A column of a UNION or other set operation is `matched` only when every arm's value
-  in it matched the same metric (each arm keeping its own restrictions); otherwise each arm's is
-  `undetermined`. A filter on a step's column is listed over the tables the step reads (`WHERE
-  p.is_open` over `status = 'open' AS is_open` lists `status = 'open'`; a renamed column is listed
-  by its table's name), and a number filtered on a value no condition over the tables can state (a
-  grouping step's count) is `undetermined`. A condition on a table reached by one of several
-  relationships the model declares between two tables names the one used (`users via
-  assets.assigned_to_id → users.id: NOT u.active`), and is `undetermined` when the join fits more
-  than one. And an inner join on the counted rows' path is listed as the rows it keeps (`only rows
-  with a match in customers (c.id = o.customer_id)`), since a row with no partner is dropped and the
-  model records nothing saying every row has one; a join between two of the metric's own tables is
-  not listed, nor is an outer join, a CROSS join nothing equates, or a join to a one-row lookup.
-  New `reason` phrases for the three new `undetermined` cases.
+  each list with AND. A condition line is bounded at 500 characters, link and join wording
+  included, and a cut backs out of a string or quoted name it ends inside (doubled quotes,
+  backslash escapes and T-SQL `[names]` understood) and closes every bracket it left open
+  (`(a OR b …)`), so a cut never reads as a different, complete condition. Each arm of a UNION is
+  its own item, matched (or not) on its own and keyed by the column it lands in; the right arm of
+  an EXCEPT or INTERSECT, which adds no rows, is never `matched`. A filter on a step's column is
+  listed over the tables the step reads, each substituted column named by its table (`WHERE
+  p.is_open` over `status = 'open' AS is_open` lists `orders.status = 'open'`), a grouping step's
+  key included; a number filtered on a value no condition over the tables can state, or that would
+  need a table the statement reads twice, a whole-row reference, a subquery naming the step, or
+  more than a bounded amount of text, is `undetermined`. A condition on a table reached by one of
+  several relationships the model declares between two tables names the one used, once for all
+  its conditions (`users via assets.assigned_to_id → users.id: NOT u.active`), through a step too,
+  and is `undetermined` when the join fits more than one or is a comma join. A join that drops the
+  counted rows with no partner is listed in table names (`only orders rows with a matching
+  customers (on customers.id = orders.customer_id)`): a plain, INNER, NATURAL, or equated comma
+  or CROSS join, and an outer join whose optional side the number reads or a later inner join
+  needs, whose own ON conditions are then listed too. The model records nothing saying every row
+  has a partner; a join between two of the metric's own tables is not listed. And in the joins
+  section a step is its table on a join when it hands every row back and passes that join's
+  columns on unchanged, whatever it does to its others.
 - **A matched metric says which rows it was counted over (#656).** The receipt's `columns`
   section compared an output column's expression with each metric's binding and nothing else, so
   `COUNT(DISTINCT number) … WHERE state = 'open'` read `matched` to the metric counting every row,

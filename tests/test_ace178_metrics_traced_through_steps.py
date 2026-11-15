@@ -207,7 +207,8 @@ def test_a_metric_computed_in_a_step_matches(org, sql):
 def test_restrictions_at_every_level_are_listed(org):
     """A condition inside the step and one in the outer query both restrict the counted rows. The
     step's comes first: it is written first. The outer one is stated over the table, as the step
-    reads it (ACE-178 part 3): `x.status` names a step a reader of the receipt never sees."""
+    reads it (ACE-178 part 3): `x.status` names a step a reader of the receipt never sees, and a
+    bare `status` could be another table's where the list is read, so it is named by its table."""
     item = _one(
         org,
         "WITH x AS (SELECT id, status, total_amount FROM orders WHERE customer_id = 3) "
@@ -215,7 +216,7 @@ def test_restrictions_at_every_level_are_listed(org):
         "n",
     )
     assert (item["status"], item["name"]) == (rt.MATCHED, "total_sales")
-    assert item["restrictions"] == ["customer_id = 3", "status = 'shipped'"]
+    assert item["restrictions"] == ["customer_id = 3", "orders.status = 'shipped'"]
 
 
 def test_a_filter_on_a_steps_group_is_a_restriction_on_its_rows(tmp_path, org):
@@ -362,7 +363,7 @@ def test_a_declared_join_on_the_path_is_not_named(tmp_path):
     assert (item["name"], item["joins_not_declared"], item["restrictions"]) == (
         "total_sales",
         [],
-        ["only rows with a match in customers (o.customer_id = c.id)"],
+        ["only orders rows with a matching customers (on orders.customer_id = customers.id)"],
     )
 
 

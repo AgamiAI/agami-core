@@ -38,9 +38,11 @@ from semantic_model import runtime as rt  # noqa: E402
 
 import receipt_truth as truth  # noqa: E402
 from receipt_trick_queries import (  # noqa: E402
+    GROUP_KEY_THROUGH_STEP,
     INNER_JOIN_TRICKS,
     LINK_TRICKS,
     OR_GROUPS,
+    REAUDIT_JOIN_PATH,
     SET_OP_TRICKS,
     STEP_BASE_TERMS,
     STEP_UNSTATED,
@@ -151,8 +153,8 @@ def _balanced(text: str) -> bool:
     "where,expect",
     [
         (" OR ".join(f"(status = 'v{i}' AND customer_id = {i})" for i in range(30)), "(("),
-        ("status IN (" + ", ".join(f"'v{i:03}'" for i in range(60)) + ")", "status IN ("),
-        ("status = '" + "x" * 400 + "'", "status = …"),
+        ("status IN (" + ", ".join(f"'v{i:03}'" for i in range(120)) + ")", "status IN ("),
+        ("status = '" + "x" * 1000 + "'", "status = …"),
     ],
     ids=["or", "in-list", "literal"],
 )
@@ -163,17 +165,80 @@ def test_a_cut_condition_never_reads_as_a_complete_one(unf, where, expect):
     item = _item(unf, f"SELECT COUNT(*) AS n FROM orders WHERE customer_id > 0 AND ({where})")
     text = item["restrictions"][1]
     assert text.startswith(expect) and "…" in text and _balanced(text), text
-    assert len(text) <= rt._ECHO_MAX_EXPR_CHARS + 1
+    assert len(text) <= rt._ECHO_MAX_CONDITION_CHARS + 1
+
+
+@pytest.mark.parametrize(
+    "text,dialect,kept",
+    [
+        ("x = 'it\\'s (", "mysql", "x = "),
+        ("x = 'it''s (", "postgres", "x = "),
+        ("x = 'it''s' AND (y", "postgres", "x = 'it''s' AND (y"),
+        ("[weird (name] = 1 AND (y", "tsql", "[weird (name] = 1 AND (y"),
+        ("x = [open (", "tsql", "x = "),
+    ],
+    ids=["backslash", "doubled-open", "doubled-closed", "tsql-closed", "tsql-open"],
+)
+def test_a_cut_knows_each_dialects_quotes(text, dialect, kept):
+    """A backslash escapes a quote where the dialect writes it so, and T-SQL's `[name]` is quoted:
+    a bracket inside either is not one the cut has to close."""
+    assert rt._open_brackets(text, dialect)[0] == kept
+
+
+def test_the_whole_line_is_bounded_link_and_join_lines_included(tmp_path):
+    """The bound is on the line as shown, prefix included, not on the condition inside it."""
+    sql = (
+        "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id WHERE "
+        + " AND ".join(f"u.id <> {i}" for i in range(200))
+    )
+    item = _item(_audit(tmp_path), sql)
+    assert item["restrictions"][0].startswith("users via assets.assigned_to_id")
+    assert all(len(t) <= rt._ECHO_MAX_CONDITION_CHARS + 1 for t in item["restrictions"])
 
 
 # --- 2. a set operation's column ------------------------------------------------------------------
 
 
+def _arm_sqls(sql: str) -> list:
+    tree = sqlglot.parse_one(sql)
+    return [arm[0].sql() if arm else None for arm in rt._output_select_arms(tree)]
+
+
 @pytest.mark.parametrize("sql", SET_OP_TRICKS)
-def test_no_arm_of_a_column_counting_different_things_reads_matched(unf, sql):
+def test_each_arm_of_a_set_operation_is_matched_on_its_own(unf, sql):
+    """Every arm is its own item (`main#<n>`), matched exactly as that arm alone would be: one arm
+    counting a metric and the next something else into the same column is never one claim for the
+    column, and never undone into one undetermined item either. Each is keyed by the column it lands
+    in, which the first arm names."""
     items = [i for i in _outputs(unf, sql) if i["aggregate"]]
-    assert items and all(i["status"] != rt.MATCHED for i in items), items
-    assert any(i["reason"] == rt._WHY_ARMS for i in items), items
+    arms = [s for s in _arm_sqls(sql) if s is not None]
+    assert len(items) == len(arms)
+    first = _item(unf, arms[0])["column"]
+    for item, arm in zip(items, arms):
+        alone = _item(unf, arm)
+        assert (item["status"], item["name"], item["restrictions"]) == (
+            alone["status"],
+            alone["name"],
+            alone["restrictions"],
+        ), arm
+        assert item["column"] == first
+
+
+@pytest.mark.parametrize("op", ["EXCEPT", "INTERSECT"])
+def test_an_arm_that_adds_no_rows_is_never_matched(unf, op):
+    items = [
+        i
+        for i in _outputs(
+            unf,
+            f"SELECT COUNT(*) AS n FROM orders {op} "
+            "SELECT COUNT(*) FROM orders WHERE status = 'paid'",
+        )
+        if i["aggregate"]
+    ]
+    assert [(i["status"], i["reason"]) for i in items] == [
+        (rt.MATCHED, None),
+        (rt.UNDETERMINED, rt._WHY_ARMS),
+    ]
 
 
 def test_arms_counting_one_metric_keep_their_own_restrictions(unf):
@@ -210,12 +275,38 @@ def test_a_filter_no_condition_over_the_tables_can_state_is_undetermined(unf, sq
     assert item["status"] == rt.UNDETERMINED and item["reason"] == rt._WHY_UNSTATED
 
 
+def test_a_doubling_chain_of_steps_fails_closed_fast(unf):
+    """Each step doubling a column grew the stated condition exponentially: 20 steps took tens of
+    seconds and gigabytes. The bound makes it undetermined in well under a second."""
+    import time
+
+    start = time.perf_counter()
+    item = _item(unf, STEP_UNSTATED[-1])
+    assert time.perf_counter() - start < 1.0
+    assert item["status"] == rt.UNDETERMINED
+
+
+def test_a_whole_row_read_through_a_step_never_reaches_the_receipt(tmp_path):
+    """A whole row of a table with a sensitive column, read through a step: undetermined, and its
+    value is nowhere in the receipt (it was listed as `CAST(c AS TEXT) LIKE '%secret%'`)."""
+    import json
+
+    org = _acme(tmp_path, "s", metrics=UNFILTERED)
+    receipt = rt.assemble_receipt(org, STEP_UNSTATED[1])
+    assert "secret" not in json.dumps(receipt["columns"])
+
+
+@pytest.mark.parametrize("sql,expect", GROUP_KEY_THROUGH_STEP)
+def test_a_filter_on_a_grouping_steps_key_is_stated(unf, sql, expect):
+    assert _item(unf, sql)["built_from"]["restrictions"] == expect
+
+
 @pytest.mark.parametrize("engine", ENGINES)
 @pytest.mark.parametrize("sql", list(STEP_BASE_TERMS)[:4])
 def test_a_base_terms_restriction_agrees_with_the_numbers(unf, sql, engine):
     """The listed condition, over the step's own table, gives the statement's number."""
     item = _item(unf, sql)
-    table = "change_requests c" if "change_requests" in sql else "orders o"
+    table = "change_requests" if "change_requests" in sql else "orders"
     reference = f"SELECT {item['expression']} FROM {table} WHERE " + " AND ".join(
         item["restrictions"]
     )
@@ -246,13 +337,20 @@ AUDIT_TABLES = {
         ("begin_at", "date"),
         ("end_at", "date"),
     ],
-    "incidents": [("id", "integer"), ("service_id", "integer"), ("opened", "date")],
+    "incidents": [
+        ("id", "integer"),
+        ("service_id", "integer"),
+        ("opened", "date"),
+        ("problem_id", "integer"),
+    ],
+    "problems": [("id", "integer"), ("state", "string")],
 }
 
 AUDIT_METRICS = {
     "asset_count": ("COUNT(*)", ["assets"]),
     "expense_total": ("SUM(amount)", ["expense_lines"]),
     "incident_count": ("COUNT(DISTINCT id)", ["incidents"]),
+    "problem_count": ("COUNT(DISTINCT id)", ["problems"]),
 }
 
 
@@ -279,6 +377,7 @@ AUDIT_RELATIONSHIPS = [
     _rel("assets", "owned_by_id", "users", "id"),
     _rel("expense_lines", "award_id", "award_departments", "award_id"),
     _rel("incidents", "service_id", "outages", "service_id"),
+    _rel("incidents", "problem_id", "problems", "id"),
 ]
 
 
@@ -364,7 +463,7 @@ def test_one_declared_link_leaves_the_condition_as_written(tmp_path):
     item = _item(org, LINK_TRICKS[0][0])
     assert item["restrictions"] == [
         "NOT u.active",
-        "only rows with a match in users (u.id = a.assigned_to_id)",
+        "only assets rows with a matching users (on users.id = assets.assigned_to_id)",
     ]
 
 
@@ -395,6 +494,13 @@ def test_an_inner_join_on_the_counted_rows_is_listed(tmp_path, sql, expect):
     assert (item["status"], item["restrictions"]) == (rt.MATCHED, expect)
 
 
+@pytest.mark.parametrize("sql,expect", REAUDIT_JOIN_PATH, ids=["left", "inner"])
+def test_every_condition_on_a_multi_join_path_is_listed(tmp_path, sql, expect):
+    org = _audit(tmp_path, metrics={"problem_count": ("COUNT(DISTINCT id)", ["problems"])})
+    item = _item(org, sql)
+    assert (item["status"], item["restrictions"]) == (rt.MATCHED, expect)
+
+
 def test_a_join_the_metric_itself_spans_is_not_listed(tmp_path):
     org = _audit(
         tmp_path,
@@ -412,7 +518,7 @@ def test_a_built_from_number_lists_the_inner_join_of_its_groups(tmp_path):
         "e.award_id GROUP BY e.fiscal_year) SELECT AVG(t) AS n FROM g",
     )
     assert item["built_from"]["restrictions"] == [
-        "only rows with a match in award_departments (d.award_id = e.award_id)"
+        "only expense_lines rows with a matching award_departments (on award_id)"
     ]
 
 
@@ -421,4 +527,11 @@ def test_the_restriction_forms_parse_back_where_they_are_conditions():
     keeps the join), a linked condition is read past its link."""
     assert truth._LINKED.match("users via assets.assigned_to_id → users.id: NOT u.active")
     assert sqlglot.parse_one("SELECT 1 WHERE NOT u.active") is not None
-    assert "only rows with a match in x".startswith(truth._INNER_JOIN)
+    assert truth._INNER_JOIN.match("only orders rows with a matching customers (on id)")
+
+
+def test_the_trace_shares_no_mutable_default():
+    with pytest.raises(TypeError):
+        rt._Trace._field_defaults["links"]["x"] = 1
+    with pytest.raises(TypeError):
+        rt._Path._field_defaults["ref_joins"]["x"] = 1
