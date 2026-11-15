@@ -46,7 +46,7 @@ from .models import (
     example_metrics,
     metric_tag_key,
 )
-from .plain_names import column_label, distinct_labels, join_label, plain_words
+from .plain_names import column_label, display_name, distinct_labels, join_label, plain_words
 
 # Process-lived incremental-validation cache (ACE-046). Every curation write re-validates the whole
 # model; keyed by (area content + table registry) so an enrichment run — which edits one area at a
@@ -527,7 +527,7 @@ def overview(org: Datasource, root: str | Path) -> dict[str, Any]:
         done, total = described.get(sa.name, [0, 0])
         metrics, joins = _live(sa.metrics), _live(sa.relationships)
         areas.append({
-            "area": sa.name, "plain_name": plain_words(sa.name),
+            "area": sa.name, "plain_name": plain_words(display_name(sa.name)),
             "tables": len(_live(sa.tables_defined)), "columns": total,
             "described_pct": round(100 * done / total) if total else 0,
             "metrics": len(metrics), "metrics_waiting": sum(_needs_review(m) for m in metrics),

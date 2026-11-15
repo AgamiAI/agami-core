@@ -1081,7 +1081,7 @@ def test_remove_example_rejects_for_audit_and_drops_from_runtime(tmp_path):
 
     # a question that doesn't exist is reported (skipped), not silently swallowed
     rc2, out2 = _run(["remove-example", str(tmp_path), "--area", "s", "--question", "no such q?"])
-    assert rc2 == 1 and json.loads(out2)["skipped"]
+    assert rc2 == 0 and json.loads(out2)["skipped"] and json.loads(out2)["status"] == "needs_choice"
 
 
 def test_remove_example_names_each_question_in_full_and_says_it_is_kept(tmp_path):
@@ -1112,7 +1112,7 @@ def test_remove_example_names_each_question_in_full_and_says_it_is_kept(tmp_path
 
     # nothing rejected → no note claiming something was kept
     rc2, out2 = _run(["remove-example", str(tmp_path), "--area", "s", "--question", "no such q?"])
-    assert rc2 == 1 and "note" not in json.loads(out2) and json.loads(out2)["examples"] == []
+    assert rc2 == 0 and "note" not in json.loads(out2) and json.loads(out2)["examples"] == []
 
 
 def test_remove_example_keeps_an_authored_id_of_zero(tmp_path):

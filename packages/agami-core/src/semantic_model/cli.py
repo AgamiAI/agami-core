@@ -42,6 +42,7 @@ from . import loader as L
 from . import runtime as RT
 from . import validator as V
 from .plain_names import column_label, distinct_labels
+from .say_text import quoted
 
 
 def _print_json(obj) -> None:
@@ -822,6 +823,36 @@ def cmd_steps(args) -> int:
     return 0
 
 
+def _steps_refresh(root: Path) -> dict:
+    """`{"list": …}` when this model is being onboarded (it has a step timeline) and the step list
+    now reads differently from the one last printed, else {}. A command that changes a count the
+    list shows carries it, so the task list is refreshed where the count changed: a live run's list
+    read "2% described" while the chat said 82%, and "11 examples" after one was dropped."""
+    from . import steps
+    root = Path(root).expanduser()
+    if not (root / ".introspect" / "timeline.jsonl").is_file():
+        return {}
+    try:
+        listed = steps.compact(steps.onboarding_steps(root))["list"]
+    except Exception:  # noqa: BLE001 — the list is a view: a command never fails over it
+        return {}
+    before = steps.read_printed(root)
+    if before.get("list") == listed:
+        return {}
+    steps.remember_printed(root, before, {"list": listed})
+    return {"list": listed}
+
+
+def _with_refresh(out: dict, root: Path) -> dict:
+    """`out` with the step list when it changed, and the instruction to show it added to `then`."""
+    from . import steps
+    fresh = _steps_refresh(root)
+    if not fresh:
+        return out
+    then = out.get("then")
+    return {**out, **fresh, "then": (then + steps.THEN_AND_UPDATE) if then else steps.THEN_UPDATE}
+
+
 def _closing_summary(root: Path) -> Optional[str]:
     """The closing message for the closing step's `say` (the summary, the examples kept and the
     questions to start with), or None when the model can't be summed up (the step list's `problem`
@@ -873,6 +904,17 @@ def cmd_identity(args) -> int:
     return 0
 
 
+def cmd_optins(args) -> int:
+    """Which one-time notes this computer has already been shown: `star_asked` (the GitHub-star ask,
+    `<artifacts_dir>/local/.optins`) and `sample_intro_shown` (the sample's orientation tips,
+    `local/.agami-example-intro`). Always exit 0: a note not shown yet is not a failure, and a
+    `test -f` on a missing file showed the person a failed command."""
+    local = Path(args.artifacts_dir).expanduser() / "local"
+    _print_json({"star_asked": (local / ".optins").is_file(),
+                 "sample_intro_shown": (local / ".agami-example-intro").is_file()})
+    return 0
+
+
 def cmd_summary(args) -> int:
     """The onboarding's closing summary as markdown, ready to post as printed; `--json` wraps it
     with the overview's totals."""
@@ -901,7 +943,7 @@ def cmd_coverage(args) -> int:
     `ok: false` with untouched columns means enrichment skipped the column pass."""
     from . import curate
     org = L.load_datasource(args.root, include_rejected=True)
-    _print_json(curate.column_coverage(org))
+    _print_json(_with_refresh(curate.column_coverage(org), Path(args.root)))
     return 0
 
 
@@ -1419,7 +1461,7 @@ def cmd_add_example(args) -> int:
     if isinstance(items, dict):
         items = items.get("examples", items.get("items", []))
     res = curate.add_examples(args.root, args.area, items, signer=args.signer, role=args.role)
-    _print_json(res.as_dict())
+    _print_json(_with_refresh(res.as_dict(), Path(args.root)))
     return 0 if (res.applied or not res.skipped) else 1
 
 
@@ -2258,7 +2300,77 @@ def _match_question(known: dict[str, set[str]], question: str) -> tuple[list[str
     return [a for a, questions in known.items() if q in questions], q
 
 
+THEN_DROPPED = "Post `say` as your last message: it ends your turn."
+THEN_DROPPED_AND_LIST = ("Update the task list from `list`, then post `say` as your last message: it "
+                         "ends your turn.")
+THEN_WHICH_EXAMPLE = ("Nothing was dropped. Ask the person in one line which example they mean, by its "
+                      "number in the closing table, and end your turn.")
+
+
 def cmd_remove_example_areas(args) -> int:
+    """Drop examples, then say what was dropped in the person's words. Needing the person to say
+    which example (none matched, or one name matches in two areas) is a question to them, not a
+    failure: it exits 0 with `status` and a `then` that says to ask. A dropped example that was
+    offered as a question to start with gets the questions offered again, without it."""
+    from . import summary
+    numbers = getattr(args, "number", None) or []
+    if numbers:
+        shown = {e["n"]: e for e in summary.closing_record(Path(args.root))["examples"]}
+        unknown = [n for n in numbers if n not in shown]
+        if unknown:
+            _print_json({"status": "needs_choice", "rejected": [], "unknown_numbers": unknown,
+                         "then": THEN_WHICH_EXAMPLE})
+            return 0
+        args = argparse.Namespace(**{**vars(args), "number": None, "question_file": None,
+                                     "question": [f"{shown[n]['area']}/{shown[n]['question']}" for n in numbers]})
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = _remove_example_areas(args)
+    except SystemExit:
+        # a file that can't be read prints its JSON error and exits 2: let both through
+        sys.stdout.write(buf.getvalue())
+        raise
+    try:
+        out = json.loads(buf.getvalue())
+    except ValueError:
+        sys.stdout.write(buf.getvalue())
+        return rc
+    if not isinstance(out, dict) or out.get("error"):
+        _print_json(out)
+        return rc
+    questions = [e["question"] for e in out.get("examples") or []]
+    if out.get("refused") == "ambiguous_question" or not questions:
+        _print_json({**out, "status": "needs_choice", "then": THEN_WHICH_EXAMPLE})
+        return 0
+    if not out.get("validated"):
+        _print_json(out)
+        return rc
+    # Said with the number the person used, when they used one: "example 3" is what they typed.
+    by_number = ({(e.get("area"), e["question"]): e["n"]
+                  for e in summary.closing_record(Path(args.root))["examples"]} if numbers else {})
+
+    def _named(e: dict) -> str:
+        n = by_number.get((e.get("area"), e["question"]))
+        return (f"example {n}, " if n else "") + quoted(e["question"])
+
+    named = "; ".join(_named(e) for e in out.get("examples") or [])
+    it = "it is" if len(questions) == 1 else "they are"
+    say = (f"Dropped {named}. agami no longer answers from {'it' if len(questions) == 1 else 'them'}; "
+           f"{it} kept in the model, marked rejected, not deleted.")
+    try:
+        again = summary.restart_questions(Path(args.root), questions)
+    except Exception:  # noqa: BLE001 — the drop is done; the list offered again is a courtesy
+        again = None
+    if again:
+        say += "\n\n" + again
+    fresh = _steps_refresh(Path(args.root))
+    _print_json({**out, "status": "dropped", "say": say, **fresh,
+                 "then": THEN_DROPPED_AND_LIST if fresh else THEN_DROPPED})
+    return 0
+
+
+def _remove_example_areas(args) -> int:
     if args.question_file:
         # one question per line, each verbatim: the questions are the person's own words
         lines = _read_text_file(args.question_file).splitlines()
@@ -2899,6 +3011,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("artifacts_dir", help="the artifacts folder, the parent of the model folders")
     sp.set_defaults(func=cmd_identity)
 
+    sp = sub.add_parser("optins", help="which one-time notes were already shown on this computer (the "
+                        "GitHub-star ask, the sample's tips); always exit 0")
+    sp.add_argument("artifacts_dir", help="the artifacts folder, the parent of the model folders")
+    sp.set_defaults(func=cmd_optins)
+
     sp = sub.add_parser("summary", help="the onboarding's closing summary as markdown, ready to post: totals, the per-area table, what waits for sign-off, and the 'Set up in …' line")
     sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
     sp.add_argument("--json", action="store_true",
@@ -3025,6 +3142,8 @@ def build_parser() -> argparse.ArgumentParser:
                                 "across several areas name it <area>/<question> unless only one area has it")
     questions.add_argument("--question-file",
                            help="a UTF-8 file with one such question per line, each used as written")
+    questions.add_argument("--number", action="append", type=int,
+                           help="the example's number in the closing message's table (repeatable)")
     sp.add_argument("--signer", default=None, help="who rejected it (recorded in the curation log)")
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_remove_example_areas)

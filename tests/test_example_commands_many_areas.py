@@ -148,7 +148,8 @@ def test_remove_example_refuses_a_question_in_several_areas(tmp_path):
     rc, out = _run(["remove-example", str(tmp_path), "--question", "how many rows?",
                     "--question", "total billed?"])
     d = json.loads(out)
-    assert rc == 1 and d["refused"] == "ambiguous_question"
+    # a question for the person, not a failure: exit 0 with what to ask
+    assert rc == 0 and d["refused"] == "ambiguous_question" and d["status"] == "needs_choice"
     assert d["ambiguous"] == [{"question": "how many rows?", "areas": ["sales", "ops"]}]
     # nothing was rejected, not even the unambiguous one
     assert len(list_prompt_examples(tmp_path, "sales")) == 2
@@ -326,7 +327,7 @@ def test_remove_example_keeps_an_area_prefix_in_its_area(tmp_path):
                                            "sql": "SELECT COUNT(*) AS n FROM shipments"}])
     rc, out = _run(["remove-example", str(tmp_path), "--question", "sales/net revenue?"])
     d = json.loads(out)
-    assert rc == 1 and d["rejected"] == []
+    assert rc == 0 and d["rejected"] == [] and d["status"] == "needs_choice"
     assert [a["area"] for a in d["areas"]] == ["sales"]
     assert "sales/net revenue?" in [e["question"] for e in list_prompt_examples(tmp_path, "ops")]
 

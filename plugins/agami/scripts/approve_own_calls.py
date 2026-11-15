@@ -206,8 +206,9 @@ ROOT = (model_root,)
 
 # Every verb here only reads the model at <root> (and, for `steps --mark`, appends to its
 # .introspect/timeline.jsonl), or writes only to a scratch file named by --out. Read from cli.py.
-# `steps` and `progress` also keep the list they last printed in <root>/.introspect/steps.last,
-# replaced atomically and only inside that folder, so the rule above still holds.
+# `steps`, `progress` and `coverage` also keep the list they last printed in
+# <root>/.introspect/steps.last, replaced atomically and only inside that folder, so the rule above
+# still holds.
 #
 # NOT approved, by design; do not add them: each connects to a database, uses credentials, installs
 # a package, reads a file the call names, writes elsewhere, or changes the model or its sign-off:

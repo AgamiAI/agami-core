@@ -56,7 +56,7 @@ def test_overview_matches_the_commands_it_replaces(model, capsys):
         len(L.list_prompt_examples(model, a["area"])) for a in ov["areas"]
     )
     area = ov["areas"][0]
-    assert area["plain_name"] == "Agami example"  # named in words for the tile
+    assert area["plain_name"] == "Sample store"  # the sample, named in words for the tile
     assert set(area) >= {"tables", "described_pct", "metrics", "metrics_waiting", "joins",
                          "joins_waiting", "examples"}
 

@@ -76,7 +76,7 @@ def test_the_closing_mark_says_the_whole_summary(model, capsys):
     steps.mark(model, "examples", "done")
     out = _run(["steps", str(model), "--mark", "first_question=in_progress"], capsys)
     assert out["say"] == summary.closing_message(model)
-    assert out["say"].startswith("**agami-example: 11 tables, 12 joins, 8 metrics, 14 examples.**")
+    assert out["say"].startswith("**Sample store: 11 tables, 12 joins, 8 metrics, 14 examples.**")
     assert out["then"] == CLOSING
     assert out["list"][-1].startswith("▶ Summary and first question")
     # the same list printed again carries no summary
@@ -364,7 +364,7 @@ def test_apply_enrichment_says_what_it_applied(model, tmp_path, capsys):
     f.write_text(json.dumps(result))
     out = _run(["apply-enrichment", str(model), "--file", str(f), "--area", "agami-example"], capsys)
     assert out["applied"] is True
-    assert out["say"] == '✓ "Agami example": 3 tables described, 3 columns, 1 entity.'
+    assert out["say"] == '✓ "Sample store": 3 tables described, 3 columns, 1 entity.'
     assert out["then"] == "Post `say`, then run `sm steps` and update the task list."
 
 

@@ -23,7 +23,7 @@ SAMPLE = PLUGIN / "samples" / "store" / "model"
 
 TABLE = ("| Subject area | Tables | Described | Metrics | Joins | Examples |\n"
          "|---|---|---|---|---|---|\n"
-         "| Agami example | 11 | 40% | 8 | 12 | 14 |")
+         "| Sample store | 11 | 40% | 8 | 12 | 14 |")
 
 
 @pytest.fixture
@@ -44,7 +44,7 @@ def _timeline(root: Path, marks: list[tuple[str, str, str]]) -> None:
 def test_summary_of_the_sample(model, capsys):
     assert cli.main(["summary", str(model)]) == 0
     assert capsys.readouterr().out == (
-        "**agami-example: 11 tables, 12 joins, 8 metrics, 14 examples.**\n\n" + TABLE + "\n")
+        "**Sample store: 11 tables, 12 joins, 8 metrics, 14 examples.**\n\n" + TABLE + "\n")
 
 
 def test_summary_adds_the_set_up_line(model, capsys):
@@ -52,7 +52,7 @@ def test_summary_adds_the_set_up_line(model, capsys):
                       ("first_question", "in_progress", "10:06:40")])
     assert cli.main(["summary", str(model)]) == 0
     assert capsys.readouterr().out == (
-        "**agami-example: 11 tables, 12 joins, 8 metrics, 14 examples.**\n\n" + TABLE
+        "**Sample store: 11 tables, 12 joins, 8 metrics, 14 examples.**\n\n" + TABLE
         + "\n\nSet up in 6 min 40 s\n")
 
 
@@ -109,7 +109,7 @@ def test_summary_counts_what_the_sign_off_card_counts(model, capsys):
     assert queue["rule_1"] + queue["rule_2"] == 23
     text = summary.onboarding_summary(model)["markdown"]
     assert text.endswith("\n\n23 definitions are waiting for sign-off: 11 metrics, 12 entities.\n")
-    assert text.startswith("**agami-example: 11 tables, 12 joins, 11 metrics, 14 examples.**")
+    assert text.startswith("**Sample store: 11 tables, 12 joins, 11 metrics, 14 examples.**")
 
 
 def test_summary_counts_the_review_queue_with_a_hidden_table(model, capsys):
@@ -139,7 +139,7 @@ def test_summary_has_a_totals_row_with_two_areas(model):
     (model / "datasource.yaml").write_text(yaml.safe_dump(ds))
     text = summary.onboarding_summary(model)["markdown"]
     rows = [ln for ln in text.splitlines() if ln.startswith("| ")]
-    assert rows[1].startswith("| Agami example | 11 |")
+    assert rows[1].startswith("| Sample store | 11 |")
     assert rows[2].startswith("| Agami extra | 11 |")
     assert rows[3].startswith("| **Total** | 22 | ")
 
@@ -225,7 +225,7 @@ def test_one_of_each_reads_singular(model, monkeypatch):
 
     monkeypatch.setattr(curate, "overview", one_of_each)
     first = summary.onboarding_summary(model)["markdown"].splitlines()[0]
-    assert first == "**agami-example: 1 table, 1 join, 1 metric, 1 example.**"
+    assert first == "**Sample store: 1 table, 1 join, 1 metric, 1 example.**"
 
 
 def test_a_name_with_a_line_break_or_pipe_stays_on_its_line():
