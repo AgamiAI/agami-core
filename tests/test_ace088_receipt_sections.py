@@ -251,8 +251,13 @@ def test_a_cte_that_shadows_a_declared_table_is_not_declared(org):
 
 
 def test_a_reference_a_shadowing_cte_zeroed_is_counted_rather_than_called_complete(org):
-    """The CTE subtraction is statement-GLOBAL, so a WITH-bound name collides with every reference
+    """The CTE subtraction WAS statement-GLOBAL, so a WITH-bound name collided with every reference
     to the declared table of that name — including a genuine read of the real table.
+
+    ACE-178 (#462) built the scope-aware resolution this docstring said the section could not: the
+    reference resolves where it is written, so `public.orders` is the table, its filter is judged
+    (`omitted`: the statement never writes it), and with nothing left unresolved the marker is null.
+    The history below is why the item had to change rather than the marker.
 
     The statement below reads `public.orders` for real and applies none of its declared filters, and
     the subtraction hands that reference `filters: []` anyway. `[]` is the same list a table
@@ -270,11 +275,10 @@ def test_a_reference_a_shadowing_cte_zeroed_is_counted_rather_than_called_comple
     section = rt.assemble_receipt(org, shadowing)["tables"]
 
     assert [i["ref"] for i in section["items"]] == ["public.orders"]
-    assert section["items"][0]["declared"] is False
-    assert section["items"][0]["filters"] == []
-    assert section["undetermined"] == (
-        "1 of the listed reference(s) could not be resolved to a model table."
-    )
+    assert section["items"][0]["declared"] is True
+    assert section["items"][0]["qname"] == "public.orders"
+    assert [f["status"] for f in section["items"][0]["filters"]] == ["omitted"]
+    assert section["undetermined"] is None
 
 
 def test_tables_section_carries_the_models_row_estimate_not_a_count(org):

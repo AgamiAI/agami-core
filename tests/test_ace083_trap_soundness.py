@@ -41,7 +41,7 @@ inflated statement read `not_multiplied`. The intermediate state fails the corpu
 so it is not a legal place to stop.
 
 The last battery in this file is the one two independent re-reviews arrived at from opposite ends,
-and it is one root cause rather than several. `_value_sources` and `_grain_preserving_source` were
+and it is one root cause rather than several. `_value_sources` and `_step_table` (was `_grain_preserving_source`) were
 both DENYLISTS with an unsafe default: one enumerated the alternation node types and let every other
 node union its children, the other rejected three `exp.Select` arguments and accepted the rest, and
 in both an unanticipated shape landed on the side that CLEARS a finding. Seven statements were
@@ -1245,7 +1245,7 @@ LATERAL_SOURCE = "SELECT SUM(o.total_amount) FROM orders o, LATERAL (SELECT 1) l
 # at all — and a source absent from the map is a source the analysis reads as not being there.
 UNNEST_SOURCE = "SELECT SUM(orders.total_amount) FROM orders, UNNEST([1, 2]) AS t(x)"
 
-# Every way `_grain_preserving_source` and `_cte_edge` can decline, one row per guard. Each body
+# Every way `_step_table` (was `_grain_preserving_source`) and `_cte_edge` can decline, one row per guard. Each body
 # below differs from a grain-preserving one in exactly one respect, so a guard that stopped firing
 # would show up as one row rather than as a general collapse.
 UNREADABLE_CTE_BODIES = [
@@ -1443,7 +1443,7 @@ def test_a_grain_preserving_cte_resolves_through_another_one():
     """
     tree = _parse(TRANSITIVE_CTE)
     scope, derived = rt._resolve_cte_scope(
-        tree, rt._visible_cte_bodies(tree), rt._alias_map(tree, in_scope_only=True),
+        tree, rt._cte_steps(tree), rt._alias_map(tree, in_scope_only=True),
         rt._model_table_index(_sales_org()))
     assert scope == {"orders": "orders", "b": "order_items"}, scope
     # No DERIVED edge: `b` IS `order_items`, so the model's own declared relationship is the one the
@@ -1475,7 +1475,7 @@ def test_a_cte_grain_that_does_not_cover_the_join_key_still_fans():
     """
     tree = _parse(CTE_GRAIN_BELOW_JOIN_KEY)
     scope, derived = rt._resolve_cte_scope(
-        tree, rt._visible_cte_bodies(tree), rt._alias_map(tree, in_scope_only=True),
+        tree, rt._cte_steps(tree), rt._alias_map(tree, in_scope_only=True),
         rt._model_table_index(_sales_org()))
     assert scope == {"orders": "orders", "oi": "oi"}, scope
     assert [(r.from_table, r.to_table, r.from_column, r.to_column, r.relationship)
@@ -1499,7 +1499,7 @@ def test_a_cte_grain_that_covers_the_join_key_is_not_multiplied():
     """
     tree = _parse(GRAIN_CHANGING_CTE)
     scope, derived = rt._resolve_cte_scope(
-        tree, rt._visible_cte_bodies(tree), rt._alias_map(tree, in_scope_only=True),
+        tree, rt._cte_steps(tree), rt._alias_map(tree, in_scope_only=True),
         rt._model_table_index(_sales_org()))
     assert scope == {"orders": "orders", "oi": "oi"}, scope
     assert [(r.from_table, r.to_table, r.from_column, r.to_column, r.relationship)
@@ -1527,7 +1527,7 @@ def test_the_join_key_is_read_in_either_orientation(label, on, expected):
            f"SELECT SUM(orders.total_amount) FROM orders JOIN oi ON {on}")
     tree = _parse(sql)
     _scope, derived = rt._resolve_cte_scope(
-        tree, rt._visible_cte_bodies(tree), rt._alias_map(tree, in_scope_only=True),
+        tree, rt._cte_steps(tree), rt._alias_map(tree, in_scope_only=True),
         rt._model_table_index(_sales_org()))
     assert [(r.from_table, r.to_table, r.from_column, r.to_column, r.relationship)
             for r in derived] == [("oi", "orders", "order_id", "id", expected)], label
@@ -1609,7 +1609,7 @@ def test_a_cte_name_is_resolved_case_insensitively_but_reported_as_written():
     """
     tree = _parse(CASE_FOLDED_CTE)
     scope, derived = rt._resolve_cte_scope(
-        tree, rt._visible_cte_bodies(tree), rt._alias_map(tree, in_scope_only=True),
+        tree, rt._cte_steps(tree), rt._alias_map(tree, in_scope_only=True),
         rt._model_table_index(_sales_org()))
     assert scope == {"orders": "orders", "OI": "order_items"}, scope
     assert derived == [], derived
@@ -2127,14 +2127,14 @@ def test_a_with_inside_a_subquery_does_not_rebind_the_statements_own_table():
 def test_the_with_argument_is_read_under_the_spelling_sqlglot_actually_uses():
     """`with_`, not `with` — the same rename trap already documented for `from`.
 
-    Read under one spelling only, `_visible_cte_bodies` returns the empty dict for every statement
+    Read under one spelling only, `_cte_steps` returns the empty dict for every statement
     ever written. Nothing fails loudly: every CTE reference falls to the fail-closed binding and the
     receipt answers `undetermined` for statements it can answer. The corpus above forbids false
     cleans and would not notice, so the argument key is pinned directly.
     """
     tree = _parse(CTE_LAUNDERED_FAN)
     assert tree.args.get("with_") is not None, tree.args.keys()
-    assert set(rt._visible_cte_bodies(tree)) == {"oi"}, rt._visible_cte_bodies(tree)
+    assert set(rt._cte_steps(tree)) == {"oi"}, rt._cte_steps(tree)
 
 
 # --- the body's own FROM, and only its own ----------------------------------
@@ -2283,7 +2283,7 @@ def test_a_join_key_written_in_another_case_does_not_invent_a_fan():
     """
     tree = _parse(JOIN_KEY_IN_ANOTHER_CASE)
     _scope, derived = rt._resolve_cte_scope(
-        tree, rt._visible_cte_bodies(tree), rt._alias_map(tree, in_scope_only=True),
+        tree, rt._cte_steps(tree), rt._alias_map(tree, in_scope_only=True),
         rt._model_table_index(_sales_org()))
     assert [(r.from_table, r.to_table, r.relationship) for r in derived] == [
         ("g", "orders", "one_to_one")], derived
@@ -2303,7 +2303,7 @@ def test_a_declared_grain_the_catalog_upper_cased_is_still_the_grain():
     orders.grain = ["ID"]
     tree = _parse(GRAIN_CHANGING_CTE)
     _scope, derived = rt._resolve_cte_scope(
-        tree, rt._visible_cte_bodies(tree), rt._alias_map(tree, in_scope_only=True),
+        tree, rt._cte_steps(tree), rt._alias_map(tree, in_scope_only=True),
         rt._model_table_index(org))
     assert [(r.from_table, r.to_table, r.relationship) for r in derived] == [
         ("oi", "orders", "one_to_one")], derived
@@ -2375,7 +2375,7 @@ def test_the_root_cte_set_and_the_model_index_are_built_once_per_statement(monke
 # --- the same defect class, one node type over -----------------------------
 #
 # Two independent re-reviews found the same root cause in two functions: `_value_sources` and
-# `_grain_preserving_source` were both written as DENYLISTS with an unsafe default. One enumerated
+# `_step_table` (was `_grain_preserving_source`) were both written as DENYLISTS with an unsafe default. One enumerated
 # the alternation node types and let everything else union its children; the other rejected three
 # `exp.Select` arguments and accepted the rest. In both, an unanticipated shape landed on the side
 # that CLEARS a finding, and in both the docstring named the hazard without the code enforcing it.
@@ -2483,10 +2483,9 @@ def test_a_cte_body_that_multiplies_its_own_rows_is_not_the_table_it_reads(label
     the fix has to be that the body is unreadable rather than that the fan is absent.
     """
     tree = _parse(sql)
-    bodies = rt._visible_cte_bodies(tree.find(exp.Select))
-    assert set(bodies) == {"o"}, (label, bodies)
-    assert rt._grain_preserving_source(
-        "o", bodies, rt._model_table_index(_sales_org()), set()) is None, label
+    steps = rt._cte_steps(tree.find(exp.Select))
+    assert set(steps) == {"o"}, (label, steps)
+    assert rt._step_table(steps["o"], {}, rt._model_table_index(_sales_org())) is None, label
 
     reports = _reports(sql)
     assert [a.status for a in reports] == [rt.UNDETERMINED], (label, reports)
@@ -2629,11 +2628,11 @@ def test_the_cte_chain_bound_admits_exactly_the_number_it_is_written_as():
     tidx = rt._model_table_index(org)
     assert rt._MAX_CTE_CHAIN == 64
     at_the_bound = _parse(chain(rt._MAX_CTE_CHAIN))
-    assert rt._grain_preserving_source(
-        "c63", rt._visible_cte_bodies(at_the_bound.find(exp.Select)), tidx, set()) == "order_items"
+    assert rt._step_table(
+        rt._cte_steps(at_the_bound.find(exp.Select))["c63"], {}, tidx) == "order_items"
     past_it = _parse(chain(rt._MAX_CTE_CHAIN + 1))
-    assert rt._grain_preserving_source(
-        "c64", rt._visible_cte_bodies(past_it.find(exp.Select)), tidx, set()) is None
+    assert rt._step_table(
+        rt._cte_steps(past_it.find(exp.Select))["c64"], {}, tidx) is None
 
     assert [a.status for a in _reports(chain(rt._MAX_CTE_CHAIN))] == [rt.MULTIPLIED]
     assert [a.status for a in _reports(chain(rt._MAX_CTE_CHAIN + 1))] == [rt.UNDETERMINED]

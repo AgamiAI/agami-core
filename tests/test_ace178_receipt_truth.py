@@ -28,7 +28,7 @@ import pytest
 
 pytest.importorskip("pydantic")
 pytest.importorskip("sqlglot")
-pytest.importorskip("yaml")
+yaml = pytest.importorskip("yaml")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PKG_SRC = REPO_ROOT / "packages" / "agami-core" / "src"
@@ -44,6 +44,7 @@ from test_ace177_filters_on_a_matched_metric import (  # noqa: E402
     UNFILTERED,
     _write_model,
 )
+from test_ace178_metrics_traced_through_steps import DECLARED  # noqa: E402
 
 # The table each metric is defined over, as the model declares it.
 TABLE = {name: sources[0] for name, (_, sources) in ALL_METRICS.items()}
@@ -456,6 +457,34 @@ CASES = [
         None,
         None,
     ),
+    # ACE-178 item 7: a join to a step that hands a table back row for row is the declared join to
+    # that table, so the number reads as a plain match, or lists only the step's own restriction.
+    (
+        "rel",
+        "WITH c AS (SELECT * FROM customers) SELECT SUM(o.total_amount) AS n FROM orders o "
+        "JOIN c ON c.id = o.customer_id",
+        [],
+        [],
+        "matched",
+        "total_sales",
+        [],
+        [],
+        "orders o JOIN customers c ON c.id = o.customer_id",
+        None,
+    ),
+    (
+        "rel",
+        "WITH c AS (SELECT id, region FROM customers WHERE region = 'EU') SELECT o.status, "
+        "SUM(o.total_amount) AS n FROM orders o JOIN c ON c.id = o.customer_id GROUP BY o.status",
+        ["status"],
+        ["o.status"],
+        "matched",
+        "total_sales",
+        ["region = 'EU'"],
+        [],
+        "orders o JOIN customers c ON c.id = o.customer_id",
+        "c.region = 'EU'",
+    ),
 ]
 
 # What each engine must compare, and of that how many with a join on the path. Every `matched` case
@@ -464,11 +493,24 @@ MATCHED = sum(1 for c in CASES if c[4] == "matched")
 JOINED = sum(1 for c in CASES if c[4] == "matched" and c[7])
 
 
-def _org(tmp_path, name: str, storage_type: str, metrics: dict):
+def _org(tmp_path, name: str, storage_type: str, metrics: dict, relationships: "list | None" = None):
     root = tmp_path / name
     root.mkdir(parents=True)
     _write_model(root, storage_type=storage_type, metrics=metrics)
+    if relationships:
+        (root / "subject_areas" / "s" / "relationships.yaml").write_text(
+            yaml.safe_dump({"relationships": relationships}))
     return L.load_datasource(root)
+
+
+def _orgs(tmp_path, storage_type: str) -> dict:
+    """The models the cases name: every metric, the unfiltered ones, and every metric with the
+    `orders → customers` join declared (ACE-178 item 7: a join through a step to it is declared)."""
+    return {
+        "all": _org(tmp_path, "all", storage_type, ALL_METRICS),
+        "unf": _org(tmp_path, "unf", storage_type, UNFILTERED),
+        "rel": _org(tmp_path, "rel", storage_type, ALL_METRICS, DECLARED),
+    }
 
 
 def _connect(engine: str):
@@ -527,10 +569,7 @@ def _runs_here(engine: str, sql: str) -> bool:
 @pytest.mark.parametrize("engine", ["sqlite", "duckdb", "postgres"])
 def test_every_matched_claim_through_a_step_agrees_with_the_numbers(tmp_path, engine):
     conn, storage_type = _connect(engine)
-    orgs = {
-        "all": _org(tmp_path, "all", storage_type, ALL_METRICS),
-        "unf": _org(tmp_path, "unf", storage_type, UNFILTERED),
-    }
+    orgs = _orgs(tmp_path, storage_type)
     compared = joined = 0
     try:
         for model, sql, keys, base_keys, status, metric, restrictions, joins, frm, where in CASES:
@@ -555,10 +594,7 @@ def _disagreements(tmp_path, monkeypatch, plant) -> list:
     or makes a plain `matched` claim the numbers refute (the metric's binding over its table)."""
     plant(monkeypatch)
     conn, storage_type = _connect("duckdb")
-    orgs = {
-        "all": _org(tmp_path, "all", storage_type, ALL_METRICS),
-        "unf": _org(tmp_path, "unf", storage_type, UNFILTERED),
-    }
+    orgs = _orgs(tmp_path, storage_type)
     found = []
     try:
         for model, sql, keys, base_keys, status, metric, restrictions, joins, frm, where in CASES:

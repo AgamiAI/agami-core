@@ -44,6 +44,22 @@ below corresponds to one such version.
   number did not all read is not its match, and `missing_tables` names the metric and the table. A
   number that read an extra table can still match, with that table's joins and conditions shown;
   of a one-table metric and its two-table twin, the twin wins when both tables were read.
+- **The joins, aggregates and tables sections read a WITH step by one rule (#204, #200, #462,
+  #429).** Each section answered "what does this name read" its own way, so one receipt could
+  describe one step two ways. Every section now binds a WITH name where it is written, by the scope
+  gate's rule, and a step stands for a declared table only when it hands that table back row for
+  row with every column under its own name. A join to such a step is reported as the join to the
+  table: `o → order_items` over `WITH o AS (SELECT * FROM orders)` reads `declared`, with a new
+  `resolves_to` key on the joins item (`orders → order_items`; null when nothing was resolved), the
+  same edge the aggregates section names, and a number counted through it no longer lists it in
+  `joins_not_declared`. A step that renames or computes a column no longer stands for its table in
+  the aggregates section either: one that renamed its join key read `not_multiplied` over a real
+  fan. A grouped step named like a declared table no longer borrows that table's relationships, so
+  a step grouped to the join key reads `not_multiplied` instead of a fan it does not have. A join
+  inside a step only downgrades the numbers of the query arms that read that step. A `tables` item
+  resolves its own reference by schema: `staging.orders` gets staging's row estimate and filters,
+  a schema-qualified table read beside a WITH of its name is the table, and an unqualified name the
+  model declares in two schemas borrows no row and is counted on the section's marker.
 
 - **A matched metric says which rows it was counted over (#656).** The receipt's `columns`
   section compared an output column's expression with each metric's binding and nothing else, so
