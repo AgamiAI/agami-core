@@ -254,10 +254,13 @@ class ExecuteSqlFailure(RuntimeError):
 
 
 def _refusal_rule(stderr: str) -> Optional[str]:
-    """The rule a refusal names, when `stderr` is the one JSON object `execute_sql` writes for it."""
+    """The rule a refusal names, from the JSON object `execute_sql` writes for it as stderr's last
+    line. The last line, not the whole stream: a driver warning printed above it would otherwise
+    make the refusal unreadable, and discovery would report an empty catalog again (#668)."""
+    lines = [ln for ln in stderr.splitlines() if ln.strip()]
     try:
-        refusal = json.loads(stderr).get("refusal")
-    except (ValueError, AttributeError):
+        refusal = json.loads(lines[-1]).get("refusal")
+    except (IndexError, ValueError, AttributeError):
         return None
     return refusal.get("rule") if isinstance(refusal, dict) else None
 
@@ -1166,9 +1169,9 @@ def _catalog_read(runner: Runner, sql: str) -> Optional[list[dict]]:
     except ExecuteSqlFailure as e:
         if e.refusal_rule:
             raise RuntimeError(
-                f"agami's SQL guard refused its own catalog read (rule: {e.refusal_rule}), so no "
-                "tables could be listed. This is a defect in agami, not a locked-down catalog: "
-                f"please report it. Refusal: {e}"
+                f"agami's SQL guard refused the catalog read that lists tables (rule: "
+                f"{e.refusal_rule}), so none could be discovered. Refusal: {e}. To build anyway, "
+                "pass an explicit table list (schema.table) so discovery skips the catalog."
             ) from e
         return None
     except Exception:

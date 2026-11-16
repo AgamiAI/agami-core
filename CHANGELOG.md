@@ -102,8 +102,9 @@ below corresponds to one such version.
   tables discovered" on a warehouse the login could read. The query is now on the list, matched by
   fingerprint as before, so a statement an AI writes that calls the function is still refused, and a
   hosted server still never takes `--build-profile`. A test now fails when any dialect's catalog read
-  would be refused and is missing from the list. A refused catalog read during discovery is now an
-  error naming the rule, not an empty catalog.
+  would be refused and is missing from the list. When the guard refuses discovery's schema or table
+  list, discovery now fails with the rule and the workaround (an explicit `schema.table` list)
+  instead of reporting an empty catalog.
 - **Rebuilding a model keeps `datasource.yaml` keys this agami-core does not know (#589).**
   Re-introspection and applying a model spec rewrote `datasource.yaml` from the fields this core
   reads, so a top-level key written by a newer agami-core was deleted from disk without a word. Those

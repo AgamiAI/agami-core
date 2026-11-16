@@ -8,7 +8,9 @@ has no way to ask for it, so what the tool accepts and refuses is unchanged.
 
 from __future__ import annotations
 
+import inspect
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -25,6 +27,7 @@ if str(PKG_SRC) not in sys.path:
 
 import execute_sql  # noqa: E402
 import guardrail  # noqa: E402
+import sql_guard  # noqa: E402
 import tools  # noqa: E402
 from semantic_model import dialects as D  # noqa: E402
 from semantic_model import introspect as INTRO  # noqa: E402
@@ -865,8 +868,6 @@ REDSHIFT_SCHEMAS = D.Redshift().sql_schemas()
 
 def _catalog_reads(dialect: D.Dialect) -> dict[str, str]:
     """Every built-in catalog statement `dialect` renders, by method name, with stand-in names."""
-    import inspect
-
     stand_in = {"schemas": ["sales", "ops"], "schema": "sales", "table": "orders"}
     out = {}
     for name, method in inspect.getmembers(dialect, inspect.ismethod):
@@ -881,8 +882,6 @@ def _catalog_reads(dialect: D.Dialect) -> dict[str, str]:
 def test_every_built_in_catalog_read_the_recon_gate_refuses_is_on_the_build_allow_list():
     """The drift test: a dialect change that makes one of agami's own catalog reads call a function
     the recon gate refuses must put it on the list, or the build sees an empty catalog (#668)."""
-    import sql_guard
-
     allowed = {sql_guard.statement_fingerprint(q) for q in D.catalog_function_queries()}
     refused = {}
     for db_type in D.supported_db_types():
@@ -963,8 +962,6 @@ class _RedshiftCatalog:
 def _runner_through_the_command_line(monkeypatch, capsys, executor):
     """The build-time runner, with the subprocess replaced by `execute_sql.main` in this process:
     the flags the runner adds and every gate are the real ones; only the database is not."""
-    import subprocess
-
     class _Done:
         def __init__(self, returncode, out, err):  # noqa: ANN001
             self.returncode, self.stdout, self.stderr = returncode, out, err
@@ -1003,7 +1000,20 @@ def test_a_refused_catalog_read_fails_discovery_naming_the_rule(model, monkeypat
             INTRO.introspect(PROFILE, "redshift", runner=runner, artifacts_dir=tmp_path, dry_run=True)
     assert guardrail.RULE_RECON in str(err.value)
     assert "no tables discovered" not in str(err.value)
+    # The workaround that holds on every surface, hosted included, where the build profile is dropped.
+    assert "schema.table" in str(err.value) and "defect" not in str(err.value)
     assert not executor.seen
+
+
+def test_a_refusal_after_a_warning_line_still_fails_discovery_naming_the_rule(model):
+    """A driver warning above the refusal's JSON must not turn it back into an empty catalog."""
+    stderr = "WARNING: connection pool is nearly full\n" + json.dumps({"refusal": {"rule": "recon"}}) + "\n"
+
+    def runner(sql):  # noqa: ANN001, ANN202
+        raise INTRO.ExecuteSqlFailure(stderr.strip(), 1)
+
+    with pytest.raises(RuntimeError, match="recon"):
+        INTRO.discover_inventory(PROFILE, "redshift", runner=runner)
 
 
 def test_a_refused_table_list_fails_discovery_naming_the_rule(model, monkeypatch):
