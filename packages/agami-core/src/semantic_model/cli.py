@@ -581,6 +581,15 @@ def cmd_set_description(args) -> int:
     return 0 if res.validated else 1
 
 
+def cmd_set_fiscal_year(args) -> int:
+    """Record the month the fiscal year starts in, as the person answered it (ACE-182)."""
+    from . import curate
+    res = curate.set_fiscal_year_start(args.root, args.month)
+    _print_json({"applied": res.applied, "validated": res.validated,
+                 "committed": res.committed, **_commit_note(res), "errors": res.errors})
+    return 0 if res.validated else 1
+
+
 def _candidate_ops(doc: dict, wanted: list[str]) -> list[dict]:
     """The `add` ops of the named join candidates in a join_candidates.json (#512), or a JSON error."""
     listed = {c.get("id"): c.get("op") for key in ("candidates", "low_overlap")
@@ -2126,6 +2135,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.add_argument("--description", required=True, help="one line: what this datasource holds and when to query it")
     sp.set_defaults(func=cmd_set_description)
+
+    sp = sub.add_parser("set-fiscal-year", help="record the month the fiscal year starts in, as the person answered it")
+    sp.add_argument("root")
+    sp.add_argument("--month", type=int, required=True, help="1 (January) to 12 (December)")
+    sp.set_defaults(func=cmd_set_fiscal_year)
 
     sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit/move/add ops (validated)")
     sp.add_argument("root")
