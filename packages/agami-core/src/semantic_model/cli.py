@@ -35,7 +35,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from . import introspect as INTRO
 from . import loader as L
+from . import metadata_sources as MS
+from . import platform_joins as PJ
 from . import runtime as RT
 from . import validator as V
 from .plain_names import column_label, distinct_labels
@@ -1722,8 +1725,6 @@ def cmd_enrich_metadata(args) -> int:
     or takes --preset; the authoritative platform metadata becomes the model's enrichment."""
     from . import curate
     from . import dialects as D
-    from . import introspect as INTRO
-    from . import metadata_sources as MS
     from .loader import load_datasource
 
     root = Path(args.root).expanduser()
@@ -1733,8 +1734,9 @@ def cmd_enrich_metadata(args) -> int:
 
     dialect = D.get_dialect(args.db_type)
     # Build mode: the dictionary is read where it lies, never modelled, so the model-scope pass that
-    # confines a statement to modelled tables would refuse every read of it (ACE-181). A hosted
-    # server never honours build mode, so there the reads stay confined as before.
+    # confines a statement to modelled tables would refuse every read of it (ACE-181). On a hosted
+    # server the runner still passes --no-safety but drops --build-profile, so the recon gate refuses
+    # the catalog reads that would find an unmodelled dictionary; there only a modelled one is read.
     runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
     preset, sources = _metadata_sources(org, runner, dialect, args.preset)
     if not preset:
@@ -1776,7 +1778,6 @@ def cmd_enrich_metadata(args) -> int:
 
     # A renamed export: its tables carry the platform's classes under other names, and its link
     # columns the fields under `<field>_sys_id` (ACE-181). Value labels follow the mapping.
-    from . import platform_joins as PJ
     spec = MS.PRESETS.get(preset, {})
     key, suffix = spec.get("key", ""), spec.get("link_suffix", "")
     mapping = PJ.map_model(org, preset, dict_rows, dict_cfg, parents)
@@ -1835,19 +1836,21 @@ def cmd_enrich_metadata(args) -> int:
     if not args.skip_references:
         found = PJ.find_reference_joins(org, runner, dialect, preset, dictionary_rows=dict_rows,
                                         dictionary_cfg=dict_cfg, parents=parents)
-        intra, cross, skipped = _route_references(org, found.trusted)
+        intra, cross, skipped = _route_references(org, found.written)
         found.skipped_target += skipped
+        written: set[tuple[str, str]] = set()
         if intra or cross:
             rres = curate.add_relationships(root, intra=intra, cross=cross)
             refs_added = len(rres.applied)
             errors += rres.errors
-        written = ({(s["from_table"].lower(), s["from_column"].lower()) for s in found.trusted}
-                   if refs_added else set())
+            # what curate actually added: a join it refused keeps its stored candidate
+            written = {_applied_column(a) for a in rres.applied}
         if found.review or written:
             PJ.store_for_review(root, found.review, written)
     refs = ({"relationships_added": refs_added,
+             "relationships_approved": len([s for s in found.written if s["review_state"] == "approved"]),
              "relationships_for_review": len(found.review),
-             "tables_mapped_to_platform": len(found.mapping),
+             "tables_mapped_to_platform": {t: m["class"] for t, m in found.mapping.items()},
              "reference_checks": found.probes,
              "relationships_skipped_target_not_modelled": found.skipped_target,
              "reference_notes": found.notes} if found is not None else {})
@@ -1862,33 +1865,59 @@ def cmd_enrich_metadata(args) -> int:
     return 0 if not errors else 1
 
 
+def _applied_column(applied: str) -> tuple[str, str]:
+    """(from table, from column), lower-cased, of one `curate.add_relationships` applied entry:
+    `rel <area>/<table>.<column>→<table>` or `xrel <table>.<column>→<table>`."""
+    label = applied.split(" ", 1)[1]
+    label = label.split("/", 1)[1] if applied.startswith("rel ") else label
+    table, column = label.split("→", 1)[0].rsplit(".", 1)
+    return table.lower(), column.lower()
+
+
 def _metadata_sources(org, runner, dialect, preset: Optional[str]) -> tuple[Optional[str], dict]:
     """The preset and `{role: (config, (schema, table))}` for each of its sources found: a modelled
-    table first, else the catalog, in any schema and under a renamed layer's name (ACE-181). The
-    catalog is read only when the model doesn't carry a source."""
-    from . import introspect as INTRO
-    from . import metadata_sources as MS
+    table first, else the catalog, in any schema and under a renamed layer's name (ACE-181).
 
+    The catalog is read only for a platform whose shape the model shows (its record-id column, or
+    a column named the way an export names a link), or one named with --preset: a database with no
+    platform behind it costs no query, as before."""
     modelled = {t.name.lower(): (t.schema_name, t.name) for sa in org.subject_areas for t in sa.tables_defined}
+    columns = {c.name.lower() for sa in org.subject_areas for t in sa.tables_defined for c in t.columns}
     schemas = {s for s, _ in modelled.values()}
     catalog: Optional[list] = None
 
-    def where(source: str):
+    def shaped(spec: dict) -> bool:
+        key, suffix = spec.get("key", "").lower(), spec.get("link_suffix", "").lower()
+        return bool(key and key in columns) or bool(suffix and any(c.endswith(suffix) for c in columns))
+
+    def fits(cfg: dict):
+        wanted = {v.lower() for k, v in cfg.items() if k.endswith("_col")}
+
+        def check(schema: Optional[str], table: str) -> bool:
+            rows = INTRO._try(runner, dialect.sql_columns(schema, table)) or []
+            return wanted <= {str(r.get("column_name", "")).lower() for r in rows}
+        return check
+
+    def where(cfg: dict, look: bool):
         nonlocal catalog
-        if source.lower() in modelled:
-            return modelled[source.lower()]
+        if cfg["source"].lower() in modelled:
+            return modelled[cfg["source"].lower()]
+        if not look:
+            return None
         if catalog is None:
             catalog = []
             for r in INTRO._try(runner, dialect.sql_schemas()) or []:
                 s = r.get("schema_name")
                 catalog += [(t.get("schema_name") or s, t["table_name"])
                             for t in INTRO._try(runner, dialect.sql_tables(s)) or [] if t.get("table_name")]
-        return MS.locate(source, catalog, schemas)
+        return MS.locate(cfg["source"], catalog, schemas, fits(cfg))
 
     for name in [preset] if preset else list(MS.PRESETS):
+        spec = MS.PRESETS.get(name, {})
+        look = bool(preset) or shaped(spec)
         found = {}
-        for role, cfg in MS.PRESETS.get(name, {}).items():
-            if isinstance(cfg, dict) and cfg.get("source") and (at := where(cfg["source"])):
+        for role, cfg in spec.items():
+            if isinstance(cfg, dict) and cfg.get("source") and (at := where(cfg, look)):
                 found[role] = (cfg, at)
         if found or preset:
             return name, found

@@ -9,8 +9,11 @@ Candidates come instead from four places, and every one is checked on the data b
 - a child class's record to its parent class's record (an incident is also a task, same id);
 - a link column no signal reached, against every table keyed by the platform's record id.
 
-Only a join the dictionary declares AND the data bears out is written, approved like a declared
-foreign key. The rest go to `join_candidates.json` for a person, each with why it is there.
+Every join the data bears out is written. One the dictionary declares too is approved like a declared
+foreign key; any other is written inferred and unreviewed, usable now and approved by use. A person
+sees, in `join_candidates.json` with why: a partial match, a column the data ties to two unrelated
+tables, a second link between the same two tables, and a declared reference that could not be
+checked. Conditional joins (a discriminator column, several key columns) are not generated here.
 """
 
 from __future__ import annotations
@@ -44,7 +47,7 @@ class _Pair:
 
 @dataclass
 class Found:
-    trusted: list[dict] = field(default_factory=list)   # specs for `cli._route_references`
+    written: list[dict] = field(default_factory=list)   # specs for `cli._route_references`
     review: list[dict] = field(default_factory=list)    # candidates, as join_candidates.json holds them
     mapping: dict[str, dict] = field(default_factory=dict)
     probes: int = 0
@@ -62,18 +65,32 @@ def _probeable(c: Column) -> bool:
             and not INTRO._personal_column(c))
 
 
-def _run(dialect: D.Dialect, runner, pairs: list[_Pair], found: Found) -> None:
-    """Check each pair on the data, up to the cap; a pair that can't be checked keeps no check."""
+def _run(dialect: D.Dialect, runner, pairs: list[_Pair], found: Found, what: str) -> None:
+    """Check each pair on the data in the order given, up to the cap; a pair that can't be checked
+    keeps no check, and the note says which of the two reasons held."""
     todo = []
+    unsized = capped = 0
     for p in pairs:
-        if PF.checkable(dialect, p.t, p.u, [p.c.name]) is None and len(todo) < REFERENCE_PROBE_CAP:
+        if PF.checkable(dialect, p.t, p.u, [p.c.name]) is not None:
+            unsized += 1
+        elif len(todo) >= REFERENCE_PROBE_CAP:
+            capped += 1
+        else:
             p.check = PF.JoinCheck(p.t, [p.c.name], p.u, [p.u.grain[0]])
             todo.append(p.check)
-    if len(todo) < len(pairs):
-        found.notes.append(f"{len(pairs) - len(todo)} reference candidate(s) not checked on the data "
-                           "(a table of unknown size, or the check cap was reached)")
+    if unsized:
+        found.notes.append(f"{what}: {unsized} not checked on the data (a table of unknown size)")
+    if capped:
+        found.notes.append(f"{what}: {capped} not checked on the data (the cap of {REFERENCE_PROBE_CAP} "
+                           "checks was reached)")
     PF.run_checks(dialect, runner, todo)
     found.probes += len(todo)
+
+
+def _round_robin(per_column: list[list[_Pair]]) -> list[_Pair]:
+    """Each column's first target, then each one's second, ...: a cap that binds leaves every link
+    column some targets tried rather than the first columns all of theirs."""
+    return [col[i] for i in range(max(map(len, per_column), default=0)) for col in per_column if i < len(col)]
 
 
 def _rate(p: _Pair) -> float:
@@ -111,7 +128,8 @@ def find_reference_joins(org: Datasource, runner, dialect: D.Dialect, preset: st
     cfg = dictionary_cfg
     tables = _tables(org)
     found = Found()
-    refs = by_field = {}
+    refs: dict[tuple[str, str], str] = {}
+    by_field: dict[str, str] = {}
     if dictionary_rows and "reference_col" in cfg:
         kw = dict(column_col=cfg["column_col"], type_col=cfg["type_col"], reference_col=cfg["reference_col"],
                   reference_type=cfg.get("reference_type", "reference"))
@@ -169,16 +187,18 @@ def find_reference_joins(org: Datasource, runner, dialect: D.Dialect, preset: st
                 links.append((t, c))
                 for u in of_stem.get(f, []):
                     propose(t, c, u, "name", False)
-    _run(dialect, runner, list(planned.values()), found)
+    # declared pairs take the check budget first
+    _run(dialect, runner, sorted(planned.values(), key=lambda p: not p.declared), found, "reference candidates")
 
     # A link column nothing above bore out: try every table keyed by the platform's record id. Ids
     # are unique across the platform, so the table its values are found in is the one it points at.
     settled = {(INTRO._qualified(p.t), p.c.name.lower()) for p in planned.values() if _rate(p) >= REVIEW_MIN_MATCH}
     keyed = [u for u in tables if key and u.grain[0].lower() == key.lower()]
-    scan = [_Pair(t, c, u, "values", False) for t, c in links
-            if (INTRO._qualified(t), c.name.lower()) not in settled for u in keyed
-            if (INTRO._qualified(t), c.name.lower(), INTRO._qualified(u)) not in planned]
-    _run(dialect, runner, scan, found)
+    per_column = [[_Pair(t, c, u, "values", False) for u in keyed
+                   if (INTRO._qualified(t), c.name.lower(), INTRO._qualified(u)) not in planned]
+                  for t, c in links if (INTRO._qualified(t), c.name.lower()) not in settled]
+    scan = _round_robin(per_column)
+    _run(dialect, runner, scan, found, "value scan")
     _settle([*planned.values(), *scan], found, parents)
     return found
 
@@ -204,7 +224,7 @@ def _settle(pairs: list[_Pair], found: Found, parents: dict[str, str]) -> None:
         else:
             win = _most_specific(passing, found.mapping, parents) if passing else None
         if win is not None:
-            kept.append((win, None if win.declared else f"found by {win.found_by}; the dictionary does not declare it"))
+            kept.append((win, None))
         elif passing:
             kept += [(p, "points at several tables that are not one class inside another") for p in passing]
         else:
@@ -217,17 +237,25 @@ def _settle(pairs: list[_Pair], found: Found, parents: dict[str, str]) -> None:
         k = (INTRO._qualified(p.t), INTRO._qualified(p.u))
         links_between[k] = links_between.get(k, 0) + 1
     for p, why in kept:
-        if why is None:
-            found.trusted.append({
+        second = links_between[(INTRO._qualified(p.t), INTRO._qualified(p.u))] > 1
+        if why is None and p.declared:
+            found.written.append({
                 "from_table": p.t.name, "from_column": p.c.name, "to_table": p.u.name,
                 "confidence": "confirmed", "review_state": "approved", "signed_off_by": "agami_enrich",
                 "signed_off_role": "system", "signed_off_at": INTRO._NOW,
                 "description": f"reference: {p.c.name} → {p.u.name}.{p.u.grain[0]} "
                                "(declared by the platform's dictionary, confirmed on the data)"})
-            continue
-        if links_between[(INTRO._qualified(p.t), INTRO._qualified(p.u))] > 1:
-            why += "; another link joins the same two tables"
-        found.review.append(_review(p, why))
+        elif why is None and not second:
+            # borne out but not declared: usable now, approved by use (the pre-#509 rule)
+            found.written.append({
+                "from_table": p.t.name, "from_column": p.c.name, "to_table": p.u.name,
+                "confidence": "inferred", "review_state": "unreviewed",
+                "description": f"reference: {p.c.name} → {p.u.name}.{p.u.grain[0]} (found by {p.found_by}, "
+                               "confirmed on the data; the dictionary does not declare it)"})
+        elif why is None:
+            found.review.append(_review(p, f"found by {p.found_by}; another link joins the same two tables"))
+        else:
+            found.review.append(_review(p, why + ("; another link joins the same two tables" if second else "")))
 
 
 def store_for_review(root: Path, review: list[dict], written: set[tuple[str, str]]) -> Optional[Path]:

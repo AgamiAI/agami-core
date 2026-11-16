@@ -20,7 +20,7 @@ job — this module never touches the DB or disk.
 from __future__ import annotations
 
 import re
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 # A (table, column) pair, lower-cased, used to filter source rows down to columns the model
 # actually has — a dictionary table describes the whole platform, most of which isn't modelled.
@@ -101,25 +101,18 @@ def self_evident_pattern(preset: Optional[str]):
 
 
 # A preset value carries the platform's facts as dicts ("choice"/"dictionary"/"reference_graph")
-# OR scalars ("self_evident" is a regex string). Only the dict roles name a source TABLE, so the
-# detection/usability helpers consider dict values only.
+# OR scalars ("self_evident" is a regex string). Only the dict roles name a source TABLE, so
+# detection considers dict values only.
 def detect_preset(table_names: Iterable[str]) -> Optional[str]:
     """The preset whose source table(s) are present in the model, else None. Matches if ANY of a
     preset's sources exist (a model might carry `sys_dictionary` but not `sys_choice`, or vice
-    versa) — the caller then uses whichever roles are actually available via `usable_sources`."""
+    versa); `sm enrich-metadata` then reads whichever of its roles it finds."""
     have = {t.lower() for t in table_names}
     for key, spec in PRESETS.items():
         if any(isinstance(role, dict) and role.get("source", "").lower() in have
                for role in spec.values()):
             return key
     return None
-
-
-def usable_sources(preset: str, table_names: Iterable[str]) -> dict[str, dict]:
-    """The preset's roles whose source table is actually present in the model."""
-    have = {t.lower() for t in table_names}
-    return {role: cfg for role, cfg in PRESETS.get(preset, {}).items()
-            if isinstance(cfg, dict) and cfg.get("source", "").lower() in have}
 
 
 # ---------------------------------------------------------------------------
@@ -279,14 +272,16 @@ def stems(name: str, prefixes: set[str], suffixes: set[str]) -> list[str]:
 
 
 def locate(source: str, catalog: Iterable[tuple[Optional[str], str]],
-           prefer_schemas: Iterable[Optional[str]] = ()) -> Optional[tuple[Optional[str], str]]:
+           prefer_schemas: Iterable[Optional[str]] = (),
+           fits: Optional[Callable[[Optional[str], str], bool]] = None) -> Optional[tuple[Optional[str], str]]:
     """The catalog object a preset's source table is, in any schema: its own name, else the name a
-    renamed layer gave it. The least-renamed match wins; a tie between schemas goes to one the model
-    already reads, and is otherwise left unresolved rather than guessed."""
+    renamed layer gave it, and only one that `fits` (has the columns the role reads), so a sibling
+    such as `sys_choice_set` is never taken for `sys_choice`. The least-renamed match wins; a tie
+    between schemas goes to one the model already reads, and is otherwise left unresolved."""
     catalog = list(catalog)
     pre, suf = common_affixes(t for _, t in catalog)
     best = [(0 if t.lower() == source.lower() else 1, (s, t)) for s, t in catalog
-            if source.lower() in stems(t, pre, suf)]
+            if source.lower() in stems(t, pre, suf) and (fits is None or fits(s, t))]
     if not best:
         return None
     top = [x for c, x in best if c == min(c for c, _ in best)]
@@ -359,14 +354,22 @@ def map_tables(tables: dict[str, set[str]], fields: dict[str, set[str]], parents
     classes: by name once the layer's words are stripped, else by the fields its columns carry (a
     class's own and its parents'), when one class clearly leads."""
     pre, suf = common_affixes(tables, min_share=0.25)
-    full = {c: set(f).union(*(fields.get(a, set()) for a in ancestors(c, parents))) for c, f in fields.items()}
+    # A field most classes declare is bookkeeping (created on, updated by): sharing it says nothing
+    # about which class a table is, and let a custom table map to a class that has little else.
+    declared_by: dict[str, int] = {}
+    for f in fields.values():
+        for name in f:
+            declared_by[name] = declared_by.get(name, 0) + 1
+    common = {n for n, k in declared_by.items() if len(fields) >= 3 and k * 2 > len(fields)}
+    full = {c: set(f).union(*(fields.get(a, set()) for a in ancestors(c, parents))) - common
+            for c, f in fields.items()}
     out: dict[str, dict] = {}
     for t, cols in tables.items():
         named = next((s for s in stems(t, pre, suf) if s in fields), None)
         if named:
             out[t] = {"class": named, "by": "name"}
             continue
-        have = {f for f in (column_field(c, key, link_suffix) for c in cols) if f}
+        have = {f for f in (column_field(c, key, link_suffix) for c in cols) if f} - common
         scored = sorted(((len(have & f) / len(have | f), len(have & f), c) for c, f in full.items() if have & f),
                         reverse=True)
         if not scored or scored[0][1] < MAP_MIN_SHARED:

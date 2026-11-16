@@ -114,13 +114,9 @@ def test_descriptions_by_element_propagates_parent_declarations():
     assert by_el == {"priority": "Priority", "business_impact": "Business impact"}  # `state` dropped (conflict)
 
 
-def test_detect_preset_and_usable_sources():
+def test_detect_preset():
     assert M.detect_preset(["incident", "sys_choice", "sys_user"]) == "servicenow"
     assert M.detect_preset(["orders", "customers"]) is None
-    # only sys_choice present → only the choice role is usable
-    usable = M.usable_sources("servicenow", ["incident", "sys_choice"])
-    assert set(usable) == {"choice"}
-    assert M.usable_sources("servicenow", ["incident", "sys_dictionary"]).keys() == {"dictionary"}
 
 
 # --- integration: ops actually apply, metadata provenance persists ----------
@@ -330,12 +326,10 @@ def test_enrich_metadata_with_no_preset_is_nothing_to_do(tmp_path, monkeypatch, 
         (itsm / "tables" / f"{meta}.yaml").unlink()
     from semantic_model import introspect as INTRO
 
+    ran: list[str] = []
+
     def no_db(profile, python=None, **kw):
-        def run(sql):
-            # the catalog is listed to look for the platform's tables; nothing else is read
-            assert "information_schema" in sql.lower() or "pg_namespace" in sql.lower(), sql
-            return []
-        return run
+        return lambda sql: ran.append(sql) or []
 
     monkeypatch.setattr(INTRO, "make_execute_sql_runner", no_db)
     from semantic_model import cli
@@ -344,6 +338,7 @@ def test_enrich_metadata_with_no_preset_is_nothing_to_do(tmp_path, monkeypatch, 
     assert ns.func(ns) == 0
     out = capsys.readouterr().out
     assert '"enriched": false' in out and "nothing to do" in out
+    assert ran == []   # a model with no platform's shape costs no query, not even the catalog
 
 
 def test_enrich_metadata_explicit_preset_without_sources_fails(tmp_path, monkeypatch):
@@ -415,20 +410,57 @@ def test_a_declared_reference_that_cannot_be_checked_goes_to_review_unprobed():
     found = PJ.find_reference_joins(_two_area_org(), lambda sql: probed.append(sql) or [], D.get_dialect("mysql"),
                                     "servicenow", dictionary_rows=DECLARES_CALLER,
                                     dictionary_cfg=M.PRESETS["servicenow"]["dictionary"], parents={})
-    assert probed == [] and found.trusted == []
+    assert probed == [] and found.written == []
     assert [c["review_reason"] for c in found.review] == [
         "declared by the dictionary, but could not be checked on the data"]
 
 
-def test_a_preset_only_reference_is_reviewed_even_when_values_overlap():
+def test_a_preset_only_reference_is_written_unreviewed_when_values_overlap():
     # #509: matching values are evidence, not a declaration. Only a reference this database's own
-    # dictionary declares is engine-approved; one only the preset assumes waits for review.
+    # dictionary declares is engine-approved; one only the preset assumes is usable but unreviewed.
     from semantic_model import dialects as D
     from semantic_model import platform_joins as PJ
     found = PJ.find_reference_joins(_two_area_org(), lambda sql: [_CHECK_ROW(5)], D.get_dialect("redshift"),
                                     "servicenow", dictionary_rows=DECLARES_CALLER,
                                     dictionary_cfg=M.PRESETS["servicenow"]["dictionary"], parents={})
-    assert [(s["from_column"], s["review_state"], s["signed_off_role"]) for s in found.trusted] == [
-        ("caller_id", "approved", "system")]
-    assert [(c["op"]["from_column"], c["evidence"]["found_by"]) for c in found.review] == [
-        ("assignment_group", "preset")]
+    by_col = {s["from_column"]: s for s in found.written}
+    assert (by_col["caller_id"]["review_state"], by_col["caller_id"]["signed_off_role"]) == ("approved", "system")
+    preset_only = by_col["assignment_group"]
+    assert (preset_only["review_state"], preset_only["confidence"]) == ("unreviewed", "inferred")
+    assert "signed_off_by" not in preset_only and "found by preset" in preset_only["description"]
+    assert found.review == []
+
+
+def test_the_check_budget_goes_to_declared_pairs_first_and_says_why_others_wait(monkeypatch):
+    from semantic_model import dialects as D
+    from semantic_model import platform_joins as PJ
+    monkeypatch.setattr(PJ, "REFERENCE_PROBE_CAP", 1)
+    found = PJ.find_reference_joins(_two_area_org(), lambda sql: [_CHECK_ROW(5)], D.get_dialect("redshift"),
+                                    "servicenow", dictionary_rows=DECLARES_CALLER,
+                                    dictionary_cfg=M.PRESETS["servicenow"]["dictionary"], parents={})
+    assert [s["from_column"] for s in found.written] == ["caller_id"]
+    assert found.notes == ["reference candidates: 1 not checked on the data (the cap of 1 checks was reached)"]
+    unsized = PJ.find_reference_joins(_two_area_org(), lambda sql: [], D.get_dialect("mysql"), "servicenow",
+                                      dictionary_rows=DECLARES_CALLER,
+                                      dictionary_cfg=M.PRESETS["servicenow"]["dictionary"], parents={})
+    assert unsized.notes == ["reference candidates: 2 not checked on the data (a table of unknown size)"]
+
+
+def test_a_value_scan_spreads_a_binding_cap_across_link_columns():
+    from semantic_model import models as mm
+    from semantic_model import platform_joins as PJ
+
+    def t(name):
+        return mm.Table(name=name, schema="s", storage_connection="c", grain=["sys_id"],
+                        columns=[mm.Column(name="sys_id", type="string", primary_key=True)])
+    a, b = t("a"), t("b")
+    c1, c2 = mm.Column(name="x_sys_id", type="string"), mm.Column(name="y_sys_id", type="string")
+    order = [(p.c.name, p.u.name) for p in PJ._round_robin([[PJ._Pair(a, c1, u, "values", False) for u in (a, b)],
+                                                          [PJ._Pair(a, c2, u, "values", False) for u in (a, b)]])]
+    assert order == [("x_sys_id", "a"), ("y_sys_id", "a"), ("x_sys_id", "b"), ("y_sys_id", "b")]
+
+
+def test_the_columns_a_join_was_written_from_come_from_what_curate_applied():
+    from semantic_model import cli
+    assert cli._applied_column("rel itsm/incident.caller_id→sys_user") == ("incident", "caller_id")
+    assert cli._applied_column("xrel Incident.Parent_Sys_Id→task") == ("incident", "parent_sys_id")

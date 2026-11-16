@@ -33,7 +33,7 @@ from semantic_model import loader as L  # noqa: E402
 from semantic_model import metadata_sources as M  # noqa: E402
 
 VIEWS = ["person_v", "team_v", "config_item_v", "acme_cmdb_ci_service_v", "acme_task_v",
-         "acme_incident_v", "audit_v"]
+         "acme_incident_v", "audit_v", "widget_v"]
 
 
 def sid(kind: str, n: int) -> str:
@@ -64,8 +64,12 @@ DICTIONARY = [  # (class, field, type, reference)
     ("cmdb_ci", "owned_by", "reference", "sys_user"),
     ("cmdb_ci_service", "busines_criticality", "string", ""),
 ]
+# bookkeeping fields every class declares, and a tiny class that has nothing else
+AUDIT = ("sys_created_on", "sys_created_by", "sys_updated_by")
+DICTIONARY += [(cls, f, "string", "") for cls in ("task", "incident", "sys_user", "sys_user_group", "cmdb_ci",
+                                                   "cmdb_ci_service", "sys_tag") for f in AUDIT]
 CLASSES = [("task", "c1", ""), ("incident", "c2", "c1"), ("sys_user", "c3", ""), ("sys_user_group", "c4", ""),
-           ("cmdb_ci", "c5", ""), ("cmdb_ci_service", "c6", "c5")]
+           ("cmdb_ci", "c5", ""), ("cmdb_ci_service", "c6", "c5"), ("sys_tag", "c7", "")]
 CHOICES = [("incident", "state", "new", "New"), ("incident", "state", "closed", "Closed"),
            ("incident", "severity", "1", "High"), ("incident", "severity", "2", "Low")]
 
@@ -105,6 +109,13 @@ def _warehouse(db: Path) -> None:
     ex("CREATE TABLE audit_v(sys_id TEXT PRIMARY KEY, note TEXT)")
     for u in U:
         ex("INSERT INTO audit_v VALUES (?, 'seen')", (u,))
+    # a custom table: it shares only the bookkeeping columns with any class
+    ex("CREATE TABLE widget_v(sys_id TEXT PRIMARY KEY, widget_name TEXT, sys_created_on TEXT, "
+       "sys_created_by TEXT, sys_updated_by TEXT)")
+    ex("INSERT INTO widget_v VALUES ('w1', 'dial', '2026-01-01', 'admin', 'admin')")
+    # decoys a name match alone would take for the choice table: a second `_set` layer
+    ex("CREATE TABLE sys_choice_set(name TEXT, sys_id TEXT)")
+    ex("CREATE TABLE audit_set(id TEXT)")
     # the platform's own metadata, under the raw layer's suffix and never modelled
     ex("CREATE TABLE sys_dictionary_raw(name TEXT, element TEXT, column_label TEXT, comments TEXT, "
        "internal_type TEXT, reference TEXT)")
@@ -168,12 +179,24 @@ PLANTED = {
 }
 
 
-def test_every_declared_and_confirmed_reference_is_written_trusted(built):
-    assert set(built["rels"]) == PLANTED
-    for r in built["rels"].values():
-        assert (r.confidence, r.review_state, r.signed_off_role) == ("confirmed", "approved", "system")
+# borne out but not declared: written usable and unreviewed, approved by use
+INFERRED = {
+    ("acme_incident_v", "sys_id", "acme_task_v"),                  # a child record is its parent class's
+    ("acme_cmdb_ci_service_v", "sys_id", "config_item_v"),
+    ("person_v", "team_sys_id", "team_v"),                         # by name
+}
+
+
+def test_every_borne_out_reference_is_written_and_only_declared_ones_approved(built):
+    assert set(built["rels"]) == PLANTED | INFERRED
+    for k, r in built["rels"].items():
         assert r.to_column == "sys_id"
-    assert built["out"]["relationships_added"] == len(PLANTED)
+        if k in PLANTED:
+            assert (r.confidence, r.review_state, r.signed_off_role) == ("confirmed", "approved", "system")
+        else:
+            assert (r.confidence, r.review_state, r.signed_off_by) == ("inferred", "unreviewed", None)
+    assert built["out"]["relationships_added"] == len(PLANTED | INFERRED)
+    assert built["out"]["relationships_approved"] == len(PLANTED)
 
 
 def test_a_field_two_classes_point_at_different_targets_is_kept_for_each(built):
@@ -183,20 +206,17 @@ def test_a_field_two_classes_point_at_different_targets_is_kept_for_each(built):
     assert ("acme_task_v", "parent_sys_id", "acme_task_v") in built["rels"]
 
 
-def test_what_is_not_declared_or_not_certain_goes_to_review_with_its_reason(built):
+def test_only_what_a_person_must_settle_goes_to_review_with_its_reason(built):
     reasons = {i: c["review_reason"] for i, c in built["review"].items()}
     assert set(reasons) == {
-        "acme_incident_v.sys_id->acme_task_v.sys_id",                         # child record -> parent class
-        "acme_cmdb_ci_service_v.sys_id->config_item_v.sys_id",
-        "person_v.team_sys_id->team_v.sys_id",                                # by name
         "acme_incident_v.opened_by_sys_id->person_v.sys_id",                  # declared, but 80%
-        "acme_incident_v.affected_item_sys_id->acme_cmdb_ci_service_v.sys_id",  # by values, most specific
+        "acme_incident_v.affected_item_sys_id->acme_cmdb_ci_service_v.sys_id",  # a second link, same tables
         "acme_task_v.approver_sys_id->person_v.sys_id",                       # by values, two unrelated tables
         "acme_task_v.approver_sys_id->audit_v.sys_id",
     }, reasons
-    assert reasons["acme_incident_v.sys_id->acme_task_v.sys_id"].startswith("found by parent_class")
     assert reasons["acme_incident_v.opened_by_sys_id->person_v.sys_id"].startswith("partial match (80%")
-    assert "another link joins the same two tables" in reasons["acme_incident_v.opened_by_sys_id->person_v.sys_id"]
+    assert reasons["acme_incident_v.affected_item_sys_id->acme_cmdb_ci_service_v.sys_id"] == (
+        "found by values; another link joins the same two tables")
     assert reasons["acme_task_v.approver_sys_id->audit_v.sys_id"].startswith("points at several tables")
     # the item it also matches is the service's parent class: the most specific wins, alone
     assert "acme_incident_v.affected_item_sys_id->config_item_v.sys_id" not in built["candidates"]
@@ -209,6 +229,12 @@ def test_decoys_are_neither_written_nor_offered(built):
     assert not [i for i in built["candidates"] if i.startswith(("audit_v.sys_id", "person_v.sys_id"))]
     # declared by the dictionary, but only 60% of rows find a partner
     assert not [k for k in everything if "requested_by" in str(k)]
+
+
+def test_a_table_sharing_only_bookkeeping_fields_maps_to_no_class(built):
+    assert built["out"]["tables_mapped_to_platform"] == {
+        "person_v": "sys_user", "team_v": "sys_user_group", "config_item_v": "cmdb_ci",
+        "acme_cmdb_ci_service_v": "cmdb_ci_service", "acme_task_v": "task", "acme_incident_v": "incident"}
 
 
 def test_the_metadata_is_read_where_it_lies_and_never_modelled(built):
@@ -251,6 +277,10 @@ def test_a_source_is_found_under_a_renamed_layer_in_any_schema():
     two = [("a", "sys_choice"), ("b", "sys_choice")]
     assert M.locate("sys_choice", two) is None
     assert M.locate("sys_choice", two, ["b"]) == ("b", "sys_choice")
+    # a table that has the name but not the columns the role reads is not the source
+    layered = [("raw", "sys_choice_raw"), ("raw", "sys_choice_set"), ("raw", "x_raw"), ("raw", "y_set")]
+    assert M.locate("sys_choice", layered) is None
+    assert M.locate("sys_choice", layered, fits=lambda s, t: t != "sys_choice_set") == ("raw", "sys_choice_raw")
 
 
 def test_a_table_maps_by_its_fields_only_with_a_clear_lead():
@@ -260,6 +290,11 @@ def test_a_table_maps_by_its_fields_only_with_a_clear_lead():
     out = M.map_tables(cols, fields, {}, key="sys_id", link_suffix="_sys_id")
     assert out["person_v"]["class"] == "user" and out["person_v"]["by"] == "fields"
     assert "unit_v" not in out                                  # two shared fields is not enough
+    # fields most classes declare (bookkeeping) say nothing about which class a table is
+    audit = {"created_on", "created_by", "updated_by"}
+    classes = {"user": {"user_name", *audit}, "group": {"name", *audit}, "tag": set(audit)}
+    assert M.map_tables({"widget_v": {"sys_id", "widget_name", *audit}}, classes, {},
+                        key="sys_id", link_suffix="_sys_id") == {}
     tie = {"a": {"x", "y", "z"}, "b": {"x", "y", "z"}}
     assert M.map_tables({"t_v": {"x", "y", "z"}}, tie, {}, key="sys_id", link_suffix="_sys_id") == {}
 
