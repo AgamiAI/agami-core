@@ -10104,6 +10104,8 @@ class _JoinMatch(NamedTuple):
     text: str
     link: Optional[str] = None      # `via <relationship>`, the key of the conditions it carries
     nodes: tuple = ()
+    join_id: int = 0                # id() of the exp.Join it is the line of
+    outer: bool = False             # an outer join the number reads the optional side of
 
 
 class _Linked(NamedTuple):
@@ -10257,10 +10259,9 @@ def _inner_joins(s: "exp.Select", arm: _ArmRestrictions, wide: frozenset, tr: _T
         side = (join.args.get("side") or "").upper()
         optional = {here} if side == "LEFT" else before if side == "RIGHT" else set()
         prior |= {here}
-        # On the counted rows' path unless it is an outer join whose optional side they neither
-        # read nor need: a LEFT join counted by another column of the same SELECT is not.
-        if not optional or optional & (counted | rejected):
-            on_path.append(join)
+        # Every join stays on the path the joins and fan checks read: a LEFT join can still repeat
+        # the counted rows. Only its ON conditions are not the number's (`_path`).
+        on_path.append(join)
         named = _join_table_label(s, here, party_named, keys, arm, tr)
         if named:
             labels[id(join)] = named
@@ -10272,8 +10273,10 @@ def _inner_joins(s: "exp.Select", arm: _ArmRestrictions, wide: frozenset, tr: _T
                     and not natural)
                 or (side and not (optional & (counted | rejected)))):
             continue
-        inner.append((_join_line(s, join, here, party_named, keys, counted, natural, arm, tr),
-                      tables))
+        line = _join_line(s, join, here, party_named, keys, counted, natural, arm, tr)
+        if line is not None:
+            line = line._replace(join_id=id(join), outer=bool(optional & counted))
+        inner.append((line, tables))
 
 
 def _join_table_label(s: "exp.Select", here: str, party: set, keys: list,
@@ -10306,12 +10309,14 @@ def _required_refs(s: "exp.Select", arm: _ArmRestrictions,
                    wide: frozenset) -> "tuple[set, Optional[str]]":
     """(the references of `s` a counted row cannot exist without, why that cannot be told or None).
 
-    Required: those the number reads; those an inner join's key or ANY WHERE condition names (a
-    row whose outer join found no partner has NULLs there, and a condition on it drops the row);
+    Required: those the number reads; those an inner join's key or a WHERE condition that rejects
+    NULLs by its shape names (`_rejects_null`: a row whose outer join found no partner has NULLs
+    there, and such a condition drops it);
     and, closed over, every reference an outer join's key names when its optional side is one of
     them — a problem counted through `LEFT JOIN problems p ON p.id = inc.problem_id` exists only
-    where `inc` found a row. Not told, and the number undetermined: an `IS NULL` test on an
-    optional side (an anti-join, which keeps exactly the rows with no partner), an outer join's ON
+    where `inc` found a row. Not told, and the number undetermined: any other WHERE condition on an
+    optional side (an `IS NULL` anti-join, a COALESCE, an OR, a CASE: each may keep the rows with
+    no partner), an outer join's ON
     pairing two references by an equality that is not a plain `=` of two columns while its
     optional side is required, and a
     required optional side in a SELECT with a RIGHT join, where the order the joins are written in
@@ -10320,8 +10325,9 @@ def _required_refs(s: "exp.Select", arm: _ArmRestrictions,
     out = {ref for ref in arm.refs if _pref(s, ref) in wide} | _null_rejected(s, arm)
     for cond in _and_conjuncts(_where_predicate(s)):
         named = _condition_refs(cond, arm)
-        if named & optional_refs and isinstance(cond, exp.Is) and isinstance(
-                cond.expression, exp.Null):
+        if named & optional_refs and not _rejects_null(cond):
+            # It may keep the rows the outer join null-extended (`COALESCE(i.x, 'X') = 'X'`,
+            # `i.x IS NULL OR …`, an anti-join): which rows it keeps is not told.
             return out, _WHY_JOIN_ORDER
         out |= named
     frm = s.args.get("from_") or s.args.get("from")
@@ -10360,6 +10366,42 @@ def _required_refs(s: "exp.Select", arm: _ArmRestrictions,
     return out, None
 
 
+_REJECTING = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE) if _HAVE_SQLGLOT else ()
+
+
+def _rejects_null(cond: "exp.Expression") -> bool:
+    """Whether a WHERE condition is false for a row whose columns are NULL, by its shape alone: a
+    bare boolean column, `col IS NOT NULL`, or a comparison, IN, LIKE or BETWEEN of bare columns
+    and non-null literals. Anything else might keep a null-extended row."""
+    def plain(node: "exp.Expression") -> bool:
+        return isinstance(node, exp.Column) or (isinstance(node, exp.Literal)
+                                                and not isinstance(node, exp.Null))
+
+    if isinstance(cond, exp.Column):
+        return True
+    if isinstance(cond, exp.Is):            # `x IS NOT NULL`: a negated IS, or IS with NOT NULL
+        target = cond.expression
+        negated = bool(cond.args.get("negate"))
+        if isinstance(target, exp.Not):
+            target, negated = target.this, not negated
+        return isinstance(cond.this, exp.Column) and isinstance(target, exp.Null) and negated
+    if isinstance(cond, exp.Not):
+        inner = cond.this
+        return (isinstance(inner, exp.Is) and isinstance(inner.expression, exp.Null)
+                and isinstance(inner.this, exp.Column))
+    if isinstance(cond, _REJECTING):
+        return plain(cond.this) and plain(cond.expression)
+    if isinstance(cond, exp.In):
+        return (isinstance(cond.this, exp.Column) and bool(cond.expressions)
+                and all(plain(e) for e in cond.expressions))
+    if isinstance(cond, (exp.Like, exp.ILike)):
+        return isinstance(cond.this, exp.Column) and plain(cond.expression)
+    if isinstance(cond, exp.Between):
+        return (isinstance(cond.this, exp.Column) and plain(cond.args.get("low"))
+                and plain(cond.args.get("high")))
+    return False
+
+
 def _condition_refs(cond: "exp.Expression", arm: _ArmRestrictions) -> set:
     """The references a condition's own columns name, an unqualified one resolved through the
     model where it can be."""
@@ -10368,6 +10410,23 @@ def _condition_refs(cond: "exp.Expression", arm: _ArmRestrictions) -> set:
         ref = _endpoint(col, arm.amap, arm.columns)
         if ref is not None:
             out.add(ref)
+    return out
+
+
+def _optional_side_joins(sel: "exp.Select", wide: "set | frozenset") -> list:
+    """The outer joins of `sel` whose optional side the number reads: each keeps only the counted
+    rows that found a partner, so each must be listed (`_inner_joins`); checked apart from it, so a
+    line that did not come out reads undetermined rather than as a number over every row."""
+    out = []
+    frm = sel.args.get("from_") or sel.args.get("from")
+    prior = {_tkey(frm.this.alias_or_name)} if frm is not None and frm.this is not None else set()
+    for join in sel.args.get("joins") or []:
+        here = _tkey(join.this.alias_or_name)
+        side = (join.args.get("side") or "").upper()
+        optional = {here} if side == "LEFT" else set(prior) if side == "RIGHT" else set()
+        prior |= {here}
+        if any(_pref(sel, ref) in wide for ref in optional):
+            out.append(join)
     return out
 
 
@@ -10894,8 +10953,14 @@ def _match_output_column(oc: OutputColumn, unread: bool,
                     if jm is None:
                         return _ColumnMatch(UNDETERMINED, None, reason=_WHY_JOIN_UNNAMED,
                                             aggregating=aggregating)
-                    if not (tables and len(tables) > 1 and tables <= sources):
+                    # A join between two of the metric's own tables is part of what it counts —
+                    # never an outer join whose optional side the number is read from.
+                    if jm.outer or not (tables and len(tables) > 1 and tables <= sources):
                         joins.append(jm)
+                listed = {jm.join_id for jm in joins}
+                if any(id(j) not in listed for j in _optional_side_joins(sel, wide)):
+                    return _ColumnMatch(UNDETERMINED, None, reason=_WHY_JOIN_UNNAMED,
+                                        aggregating=aggregating)
             extras = _with_links(extras, linked, joins)
             return _ColumnMatch(MATCHED, cand, tuple(extras), tuple(path.after + upper_after),
                                 joins=_undeclared_joins(path.joins, tr, join_status or {},
@@ -11232,7 +11297,8 @@ def _inline_steps(orig: "exp.Expression", copied: "exp.Expression", budget: list
     """`copied` (a copy of `orig`) with every reference to a WITH step replaced by the step's own
     SELECT, under the same name, followed into the steps it reads. False — and the caller withholds
     the subquery — when a step cannot be shown: its body would have its own values withheld
-    (`_withholds`) or holds a whole-row reference, it is the step being inlined (a recursive one),
+    (`_withholds`) or holds a whole-row reference, it renames its columns with a list (`s(x)`,
+    which the body does not say), it is the step being inlined (a recursive one),
     the chain is deeper than `_MAX_INLINED_DEPTH`, or it outgrows `budget` nodes."""
     if depth >= _MAX_INLINED_DEPTH:
         return False
@@ -11242,7 +11308,7 @@ def _inline_steps(orig: "exp.Expression", copied: "exp.Expression", budget: list
             continue
         body = cte.this
         with_ = cte.parent
-        if (id(cte) in inlining or not isinstance(body, exp.Expression)
+        if (id(cte) in inlining or not isinstance(body, exp.Expression) or _alias_columns(cte)
                 or (isinstance(with_, exp.With) and with_.args.get("recursive"))
                 or _withholds(body, sensitive, statement_sensitive)
                 or any(_is_row_reference(col) for col in body.find_all(exp.Column))):

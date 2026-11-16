@@ -40,17 +40,21 @@ import receipt_truth as truth  # noqa: E402
 from receipt_trick_queries import (  # noqa: E402
     AUDIT_REAL_SHAPES,
     FAIL_CLOSED,
+    FANNING_OUTER_JOINS,
     GROUP_KEY_THROUGH_STEP,
     INLINE_WITHHELD,
     INNER_JOIN_TRICKS,
     LINK_TRICKS,
+    OPTIONAL_SIDE_COUNT,
     OPTIONAL_SIDE_FILTERED,
+    OPTIONAL_SIDE_WHERE,
     OR_GROUPS,
     READABLE_CONDITIONS,
     REAUDIT_JOIN_PATH,
     ROUND3_JOIN_PATH,
     SET_OP_TRICKS,
     STEP_BASE_TERMS,
+    STEP_COLUMN_LIST_SUBQUERY,
     STEP_UNSTATED,
 )
 from test_ace177_filters_on_a_matched_metric import UNFILTERED, _outputs  # noqa: E402
@@ -760,10 +764,13 @@ def test_a_real_shape_lists_everything_or_reads_undetermined(
     assert not any(line.startswith("only rows") for line in item["restrictions"])
     if column == "with_reason":
         # Joins it was counted through, named by their tables; the third step's join is not one.
+        # Every join stays on the path the joins check reads, the third step's included: its
+        # key is handed on renamed, so it keeps the joins section's own label.
         assert item["joins_not_declared"] == [
             "expense_lines → dates",
             "dates → fiscal_periods",
             "expense_lines → rejections",
+            "sub → apc",
         ]
         assert not any("requests" in line for line in item["restrictions"])
     # On the numbers: the claim, written over the tables, is the statement's number, group by
@@ -827,3 +834,68 @@ def test_not_of_a_column_the_model_does_not_type_boolean_stays_not(unf):
     assert _item(unf, "SELECT COUNT(*) AS n FROM orders o WHERE NOT o.status AND NOT o.is_deleted")[
         "restrictions"
     ] == ["NOT o.status", "o.is_deleted = FALSE"]
+
+
+def _fact_metric(tmp_path):
+    rels = [r for r in AUDIT_RELATIONSHIPS if r["from_table"] != "rejections"]
+    return _audit(
+        tmp_path,
+        metrics={"submitted": ("COUNT(DISTINCT request_id)", ["expense_lines"])},
+        relationships=rels,
+    )
+
+
+def test_a_count_off_an_optional_side_lists_the_join_that_keeps_it(tmp_path):
+    sql, expect = OPTIONAL_SIDE_COUNT
+    item = _item(_fact_metric(tmp_path), sql)
+    assert (item["status"], item["restrictions"]) == (rt.MATCHED, expect)
+
+
+def test_a_count_off_an_optional_side_without_its_join_line_reads_undetermined(
+    tmp_path, monkeypatch
+):
+    """Teeth for the guard: if the join line for the optional side is ever not produced, the
+    number reads undetermined rather than a match over every row."""
+    real = rt._inner_joins
+
+    def dropping(s, arm, wide, tr, inner, *rest):
+        real(s, arm, wide, tr, inner, *rest)
+        inner[:] = [(jm, t) for jm, t in inner if not (jm is not None and jm.outer)]
+
+    monkeypatch.setattr(rt, "_inner_joins", dropping)
+    item = _item(_fact_metric(tmp_path), OPTIONAL_SIDE_COUNT[0])
+    assert (item["status"], item["reason"]) == (rt.UNDETERMINED, rt._WHY_JOIN_UNNAMED)
+
+
+@pytest.mark.parametrize("sql,expect", OPTIONAL_SIDE_WHERE, ids=range(len(OPTIONAL_SIDE_WHERE)))
+def test_only_a_null_rejecting_where_makes_an_optional_side_required(tmp_path, sql, expect):
+    org = _audit(tmp_path, metrics={"problem_count": ("COUNT(DISTINCT id)", ["problems"])})
+    item = _item(org, sql)
+    if expect is None:
+        assert (item["status"], item["reason"]) == (rt.UNDETERMINED, rt._WHY_JOIN_ORDER)
+        return
+    assert (item["status"], item["restrictions"]) == (rt.MATCHED, expect)
+    # On the numbers: the claim over the tables, an inner join with the listed conditions.
+    conn = _audit_duckdb()
+    try:
+        where = sql.split(" WHERE ", 1)[1]
+        reference = (
+            "SELECT COUNT(DISTINCT p.id) FROM problems p JOIN incidents i "
+            f"ON i.problem_id = p.id AND i.opened > '2026-01-01' WHERE {where}"
+        )
+        assert conn.execute(sql).fetchall() == conn.execute(reference).fetchall()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("sql", FANNING_OUTER_JOINS, ids=["sum", "count", "step", "right"])
+def test_an_outer_join_the_number_does_not_read_is_still_checked_for_repeats(unf, sql):
+    item = _item(unf, sql)
+    assert item["restrictions"] in (None, [])
+    if item["status"] == rt.MATCHED:
+        assert item["joins_not_declared"], item
+
+
+def test_a_step_with_a_column_list_is_never_written_into_a_subquery(unf):
+    (line,) = _item(unf, STEP_COLUMN_LIST_SUBQUERY)["restrictions"]
+    assert line == "id IN (<withheld>)"
