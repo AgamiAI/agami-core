@@ -201,10 +201,9 @@ REJECT_HASH_AMBIGUOUS = [
     # 3. SQL Server temp tables. Newly refused, and note there is no comment anywhere in these.
     "SELECT a FROM #temp",
     "SELECT a FROM ##global_temp",
-    # 4. Backtick and bracket quoted identifiers containing `#`. This scan consumes neither
-    #    quoting form, so the `#` is seen as if bare. Refusing is the safe direction; making
-    #    these parse is the dialect work's job, not this branch's.
-    "SELECT `col#name` FROM t",
+    # 4. Bracket quoted identifiers containing `#`. This scan does not consume that form, so
+    #    the `#` is seen as if bare. Refusing is the safe direction. (A backtick-quoted name is
+    #    consumed now, so `#` inside one is data — see the test below.)
     "SELECT [col#name] FROM t",
 ]
 
@@ -220,7 +219,7 @@ def test_rejects_hash_as_dialect_ambiguous(sql: str) -> None:
     valid MySQL, and both naming a fix that would not have helped, since neither the DROP nor the
     second statement was ever going to run.
 
-    Asserting one exact detail across all twelve vectors is the point rather than a shortcut: the
+    Asserting one exact detail across all eleven vectors is the point rather than a shortcut: the
     defect was a refusal whose stated reason depended on what the unread text happened to contain,
     so the fix is only real if every one of these reports the same thing. That is also why the
     detail does not use the word "comment" — four of these vectors contain no comment at all.
@@ -245,7 +244,8 @@ def test_rejects_hash_as_dialect_ambiguous(sql: str) -> None:
         "SELECT '#' AS h FROM t",
         "SELECT a FROM t WHERE b = '# not a comment; really'",
         "SELECT a FROM t WHERE b = 'DROP TABLE t # nope'",
-        'SELECT "col#name" FROM t',        # DOUBLE-quoted identifier only, see below
+        'SELECT "col#name" FROM t',
+        "SELECT `col#name` FROM t",        # backtick-quoted identifier
         "SELECT $$ # not a comment $$ AS s FROM t",   # dollar-quoted body
         "SELECT a FROM t -- # inside a line comment\n",
         "SELECT a FROM t /* # inside a block comment */",
@@ -255,10 +255,9 @@ def test_hash_inside_a_consumed_span_is_still_data(sql: str) -> None:
     """Scoped deliberately to the spans `_neutralize` actually consumes: single quotes, double
     quotes, dollar quotes, and the two comment forms.
 
-    It is NOT true of every quoted identifier. There is no backtick or bracket branch in this
-    scan, so `` `col#name` `` and `[col#name]` are refused — they are in `REJECT_HASH_AMBIGUOUS`
-    above rather than here. That is the safe direction and it is recorded rather than implied,
-    because backtick is the quoting form of the one engine where `#` really is a comment.
+    It is NOT true of every quoted identifier. There is no bracket branch in this scan, so
+    `[col#name]` is refused — it is in `REJECT_HASH_AMBIGUOUS` above rather than here. That is
+    the safe direction and it is recorded rather than implied.
     """
     assert check_read_only(sql) is None, f"`#` in a consumed span must not be refused: {sql!r}"
 
@@ -797,6 +796,152 @@ def test_red_team_mysql_comment_lexing_blocked(sql: str) -> None:
 )
 def test_unambiguous_comments_still_pass(sql: str) -> None:
     assert check_read_only(sql) is None, f"Legit comment wrongly rejected: {sql!r}"
+
+
+# ---------------------------------------------------------------------------
+# Where a quoted span or comment ends must be the same on every engine. Text this scan blanks as
+# "inside a string" is executed by an engine that ends the string earlier — a second statement
+# included. Each vector below passed the gate before the fix; the first wrote rows on a Postgres
+# reading backslash escapes (standard_conforming_strings off, as Redshift always does).
+# ---------------------------------------------------------------------------
+
+REJECT_BACKSLASH_QUOTE = [
+    # The reproduced bypass: `\'` ends nothing to the engine, so its literal closes at the next
+    # quote and the INSERT after it is live.
+    r"SELECT o.id FROM sales.orders o WHERE o.id::text = 'a\' AND o.id::text = '; "
+    r"INSERT INTO sales.canary SELECT o2.id::text FROM sales.orders o2; --'",
+    # Two and three literals deep, so the odd quote is not the first one.
+    r"SELECT a FROM t WHERE b = 'x' AND c = 'y\' AND d = '; DELETE FROM t; --'",
+    r"SELECT a FROM t WHERE b = 'x' AND c = 'y' AND d = 'z\' OR 1 = '; DROP TABLE t; --'",
+    # Inside a CTE, a subquery and a UNION arm.
+    r"WITH c AS (SELECT a FROM t WHERE b = 'q\' ) SELECT * FROM c; DELETE FROM t; --') SELECT 1",
+    r"SELECT a FROM (SELECT a FROM t WHERE b = 'q\' ) s; UPDATE t SET a = 1; --') s",
+    r"SELECT a FROM t UNION SELECT b FROM u WHERE c = 'q\' UNION SELECT pg_sleep(9) --'",
+    # Hiding a dangerous call or keyword, not a second statement.
+    r"SELECT a FROM t WHERE b = 'a\' , pg_read_file('/etc/passwd') -- '",
+    r"SELECT a FROM t WHERE b = 'a\' INTO OUTFILE '/tmp/x",
+    # A comment opener the engine reads, after the backslash.
+    r"SELECT a FROM t WHERE b = 'a\' /* ' ; DELETE FROM t; --*/",
+    # Odd runs longer than one: `\\\'` is an escaped backslash then an escaped quote.
+    r"SELECT a FROM t WHERE b = 'a\\\' ; DELETE FROM t; --'",
+    r"SELECT a FROM t WHERE b = '\\\\\' ; DELETE FROM t; --'",
+    # Before a DOUBLED quote: this scan reads `''` as one escape, the engine reads `\'` then a
+    # closing `'`.
+    r"SELECT a FROM t WHERE b = 'a\'' ; DELETE FROM t; --'",
+    # Postgres E'' strings read backslash escapes whatever the server setting.
+    r"SELECT E'a\' ; DELETE FROM t; --' AS s",
+    r"SELECT e'\' ; DELETE FROM t; --' AS s",
+    # MySQL / BigQuery / Databricks double-quoted strings, and a backtick name on BigQuery.
+    r'SELECT "\"' + "'" + r'" , SLEEP(10) -- ' + "'",
+    r'SELECT "a\"b" , current_user FROM t',
+    r"SELECT `a\` , SLEEP(9) FROM t -- `",
+    # The known cost: `ESCAPE '\'` is valid Postgres, but a backslash-escaping engine never closes
+    # that literal, so it is refused too. Write it `ESCAPE '!'` (or any other character).
+    r"SELECT a FROM t WHERE b LIKE '%\%%' ESCAPE '\'",
+]
+
+
+@pytest.mark.parametrize("sql", REJECT_BACKSLASH_QUOTE)
+def test_rejects_a_quote_whose_end_depends_on_backslash_escaping(sql: str) -> None:
+    refusal = check_read_only(sql)
+    assert refusal is not None, f"backslash-escaped quote NOT caught: {sql!r}"
+    assert refusal.rule == RULE_READ_ONLY
+    assert refusal.remediation == _REMEDIATION["backslash_quote"]
+    # Static text: a refusal never echoes the statement back.
+    assert "\\" not in refusal.detail and "canary" not in refusal.detail
+
+
+REJECT_QUOTE_RUN = [
+    # BigQuery reads `'''`/`"""` as a triple-quoted string running to the next triple.
+    "SELECT '''a' b'''; DELETE FROM ds.t WHERE TRUE; SELECT '1'",
+    'SELECT """a" \'""" ; DELETE FROM t WHERE TRUE; SELECT \'1\'',
+    # Three in a row inside a literal, not at its opening.
+    "SELECT 'a''' , 1 FROM t",
+    "SELECT a FROM t WHERE b = ''''",
+]
+
+
+@pytest.mark.parametrize("sql", REJECT_QUOTE_RUN)
+def test_rejects_three_quotes_in_a_row(sql: str) -> None:
+    refusal = check_read_only(sql)
+    assert refusal is not None, f"quote run NOT caught: {sql!r}"
+    assert refusal.remediation == _REMEDIATION["quote_run"]
+
+
+REJECT_Q_QUOTE = [
+    # Oracle ends `q'[…]'` at `]'`, so the `'` inside is data and UTL_HTTP runs.
+    "SELECT q'[a']' , UTL_HTTP.REQUEST('http://x') FROM dual --'",
+    "SELECT Q'{a'}' , 1 FROM dual",
+    "SELECT nq'<a'>' FROM dual",
+    "SELECT a FROM t WHERE b =q'!x!'",
+]
+
+
+@pytest.mark.parametrize("sql", REJECT_Q_QUOTE)
+def test_rejects_oracle_alternative_quoting(sql: str) -> None:
+    refusal = check_read_only(sql)
+    assert refusal is not None, f"q-quote NOT caught: {sql!r}"
+    assert refusal.remediation == _REMEDIATION["q_quote"]
+
+
+REJECT_NESTED_COMMENT = [
+    # Postgres nests block comments, so its comment runs past the first `*/` and the `'` this
+    # scan opened a literal at is inside it: the DELETE runs on a stock Postgres.
+    "SELECT 1 /* /* */ ' */ ; DELETE FROM t; --'",
+    "SELECT 1 /* a /* b */ c */ FROM t",
+    "SELECT 1 /* unterminated /* nested",
+]
+
+
+@pytest.mark.parametrize("sql", REJECT_NESTED_COMMENT)
+def test_rejects_a_nested_block_comment(sql: str) -> None:
+    refusal = check_read_only(sql)
+    assert refusal is not None, f"nested comment NOT caught: {sql!r}"
+    assert refusal.remediation == _REMEDIATION["nested_comment"]
+
+
+REJECT_BACKTICK_HIDES_A_CALL = [
+    # A `'` inside a backtick name opened a literal here that blanked the SLEEP MySQL runs.
+    "SELECT `a'` , SLEEP(5) -- '",
+    "SELECT `x'` FROM t; DELETE FROM t -- '",
+]
+
+
+@pytest.mark.parametrize("sql", REJECT_BACKTICK_HIDES_A_CALL)
+def test_a_quote_inside_a_backtick_name_hides_nothing(sql: str) -> None:
+    assert check_read_only(sql) is not None, f"backtick name hid a call: {sql!r}"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # A backslash that moves no quote reads the same on every engine and must keep passing.
+        r"SELECT a FROM t WHERE b LIKE 'a\_b'",
+        r"SELECT REPLACE(a, '\n', ' ') FROM t",
+        r"SELECT a FROM t WHERE p = 'C:\\'",          # even run before the close
+        r"SELECT a FROM t WHERE p = 'C:\\path\\to'",
+        r"SELECT a FROM t WHERE p = '\\\\' AND q = 'x'",
+        r"SELECT E'tab\there' AS s",
+        r"SELECT E'a\\' AS s",
+        r"SELECT regexp_replace(a, '\s+', ' ') FROM t",
+        r"SELECT a FROM t WHERE b = 'it''s \d'",
+        r'SELECT "a\b" FROM t',
+        # Doubled quotes stay fine; only three in a row are refused.
+        "SELECT a FROM t WHERE b = 'it''s'",
+        "SELECT '' AS empty, 'x' AS y",
+        # Backtick names, as MySQL / BigQuery / Databricks write them.
+        "SELECT `order id`, COUNT(*) FROM `proj.ds.orders` GROUP BY 1",
+        "SELECT t.`a`, `b` FROM t",
+        # A comment that merely mentions `*/` or `/` is not nested.
+        "SELECT 1 /* a */ /* b */ FROM t",
+        "SELECT 1 /* path a/b */ FROM t",
+        # A name that ends in q is not Oracle's q-quote.
+        "SELECT seq FROM t WHERE seq = 'x'",
+        "SELECT q FROM t WHERE q = 'x'",
+    ],
+)
+def test_unambiguous_quoting_still_passes(sql: str) -> None:
+    assert check_read_only(sql) is None, f"unambiguous statement wrongly refused: {sql!r}"
 
 
 REJECT_STACKED_KEYWORDS = [

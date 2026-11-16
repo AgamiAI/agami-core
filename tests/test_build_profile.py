@@ -179,6 +179,40 @@ def test_pg_get_constraintdef_runs_only_as_agami_s_own_catalog_query(model):
             assert not executor.seen
 
 
+BACKSLASH_REPRO = (
+    r"SELECT o.id FROM orders o WHERE o.id::text = 'a\' AND o.id::text = '; "
+    r"INSERT INTO orders SELECT o2.id FROM orders o2; --'"
+)
+
+
+@pytest.mark.parametrize("kw", [{}, {"no_safety": True}, {"no_safety": True, "build_profile": True}])
+def test_a_backslash_escaped_quote_never_reaches_the_database(model, kw):
+    """The read-only gate sits above `no_safety`, so the refusal holds on every flag combination,
+    and the executor is never called."""
+    env, executor = _run(BACKSLASH_REPRO, **kw)
+    assert env.status == "refused" and env.refusal.rule == guardrail.RULE_READ_ONLY
+    assert not executor.seen
+    # The MCP tool's fail-fast pre-check is the same gate.
+    assert tools.check_read_only(BACKSLASH_REPRO).rule == guardrail.RULE_READ_ONLY
+
+
+def test_a_catalog_query_carrying_a_backslash_is_never_agami_s_own():
+    """The fingerprint ignores literal values, so a backslash that could move a literal's end must
+    keep a statement off the allow-list. An even run passes the read-only gate, which is exactly
+    why the matcher needs its own check."""
+    assert execute_sql._builtin_catalog_query(D.PostgreSQL().sql_constraint_definitions("public"))
+    assert not execute_sql._builtin_catalog_query(D.PostgreSQL().sql_constraint_definitions("a\\\\"))
+    smuggled = D.PostgreSQL().sql_constraint_definitions("a\\' , version() --")
+    assert not execute_sql._builtin_catalog_query(smuggled)
+
+
+@pytest.mark.parametrize("schema", ["a\\' , version() AS v --", "a\\\\"])
+def test_a_catalog_query_with_a_backslash_is_refused_end_to_end(model, schema):
+    env, executor = _run(D.PostgreSQL().sql_constraint_definitions(schema),
+                         no_safety=True, build_profile=True)
+    assert env.status == "refused" and not executor.seen
+
+
 def test_the_built_in_list_failing_to_load_keeps_the_gate_shut(model, monkeypatch):
     monkeypatch.setattr(D, "catalog_function_queries", lambda: 1 / 0)
     env, _ = _run(D.PostgreSQL().sql_constraint_definitions("public"), build_profile=True)

@@ -148,10 +148,9 @@ def test_no_false_positives(sql: str) -> None:
     "sql",
     [
         'SELECT "current_user',                      # runs to EOF
-        'SELECT "a\\"b" , current_user FROM t',       # MySQL re-opens a runaway identifier
         'SELECT o.id FROM orders o WHERE o.n = "x current_user',
     ],
-    ids=["eof", "mysql_backslash", "tail"],
+    ids=["eof", "tail"],
 )
 def test_an_unterminated_quote_does_not_suppress_the_keyword(sql: str) -> None:
     """The under-refusal direction, which is the only one that matters here.
@@ -159,14 +158,26 @@ def test_an_unterminated_quote_does_not_suppress_the_keyword(sql: str) -> None:
     An unterminated `"` swallows the rest of the statement into the identifier buffer. If that
     produced a span, the niladic matcher would treat every keyword inside it as quoted and skip
     it. Reachable rather than theoretical: MySQL's default sql_mode treats `"` as a STRING
-    delimiter with backslash escapes, so the second vector is a statement MySQL runs and answers
-    with CURRENT_USER() while the neutralizer reads a runaway identifier.
+    delimiter with backslash escapes, so `SELECT "a\\"b" , current_user FROM t` is a statement MySQL
+    runs and answers with CURRENT_USER() while the neutralizer reads a runaway identifier. That
+    vector is now refused earlier, for the backslash before the quote; see the test below.
 
     No closing delimiter means no span, so nothing is skipped and the gate refuses.
     """
     refusal = check_no_recon(sql)
     assert refusal is not None, f"an unterminated quote suppressed the keyword: {sql!r}"
     assert refusal.rule == guardrail.RULE_RECON
+
+
+def test_a_backslash_escaped_quote_is_refused_before_the_recon_gate_reads_it() -> None:
+    """MySQL reads `"a\\"b"` as one string, this scan as an identifier that never closes. Where the
+    two disagree the statement is refused by the read-only gate, which runs first at the
+    chokepoint; standalone, the recon gate reports it as unreadable rather than as recon."""
+    sql = 'SELECT "a\\"b" , current_user FROM t'
+    refusal = check_read_only(sql)
+    assert refusal is not None and refusal.rule == guardrail.RULE_READ_ONLY
+    refusal = check_no_recon(sql)
+    assert refusal is not None and refusal.rule == guardrail.RULE_UNPARSEABLE
 
 
 def test_a_quoted_bare_word_is_an_identifier_but_a_quoted_call_is_a_call() -> None:

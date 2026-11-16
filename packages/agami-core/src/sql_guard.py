@@ -57,6 +57,18 @@ _REMEDIATION: dict[str, str] = {
     "mysql_exec_comment": (
         "Remove the `/*! … */` executable comment; a plain `/* … */` comment is fine."
     ),
+    "nested_comment": (
+        "Remove the `/*` inside the block comment; block comments cannot be nested here."
+    ),
+    "backslash_quote": (
+        "Do not put a backslash directly before a quote inside a string or quoted name. Write a "
+        "quote in a string by doubling it (`'it''s'`), and an E'…' string as a plain one."
+    ),
+    "quote_run": (
+        "Do not write three quotes in a row: no triple-quoted strings, and no string that starts "
+        "or ends with a doubled quote. Compare with CHR(39) or the like instead."
+    ),
+    "q_quote": "Rewrite the q'…' alternative-quoted string as an ordinary '…' string.",
     "multi_statement": "Send exactly one statement.",
     "not_a_select": "Rewrite as a read-only SELECT or WITH…SELECT.",
     "denied_keyword": (
@@ -96,6 +108,76 @@ class _GuardReject(Exception):
         self.detail = detail
         self.remediation = remediation
         super().__init__(detail)
+
+
+def _scan_quoted(sql: str, i: int) -> tuple[int, bool, str]:
+    """Read the quoted span that opens at `sql[i]`, and refuse one whose end is not agreed.
+
+    Returns `(end, closed, content)`: the index just past the span, whether its closing delimiter
+    was found, and its content with each doubled delimiter collapsed to one. The delimiter is
+    `sql[i]` itself — `'` for a string, `"` or a backtick for a quoted name.
+
+    **Where a span ends must be the same on every engine, or the statement is refused.** This scan
+    reads only the doubled-delimiter escape, while MySQL, Redshift, Snowflake, BigQuery, Databricks,
+    and Postgres in an `E'…'` string (or anywhere with `standard_conforming_strings` off) also read
+    a backslash as an escape. Where they differ, text this scan blanks as "inside a string" is SQL
+    to the engine — a second statement included. The guard cannot know the engine's setting, so it
+    refuses on every dialect:
+
+      - a delimiter preceded by an ODD run of backslashes. One reading ends the span there and the
+        other does not. An even run (`'C:\\\\'`) pairs off and ends it on both, so it passes, as
+        does a backslash anywhere else (`'a\\_b'`, `'\\n'`).
+      - three delimiters in a row, at the opening or inside. BigQuery reads `'''`/`\"\"\"` as a
+        triple-quoted string that runs to the next triple; this scan reads a doubled escape. The
+        cost is a string that starts or ends with an escaped quote (`''''`), which is rare.
+    """
+    q, n = sql[i], len(sql)
+    if sql.startswith(q * 3, i):
+        raise _GuardReject(_QUOTE_RUN_DETAIL, _REMEDIATION["quote_run"])
+    j, buf, slashes = i + 1, [], 0
+    while j < n:
+        c = sql[j]
+        if c == q:
+            if slashes % 2:
+                raise _GuardReject(_BACKSLASH_QUOTE_DETAIL, _REMEDIATION["backslash_quote"])
+            if sql.startswith(q * 3, j):
+                raise _GuardReject(_QUOTE_RUN_DETAIL, _REMEDIATION["quote_run"])
+            if j + 1 < n and sql[j + 1] == q:  # doubled-delimiter escape
+                buf.append(q)
+                j += 2
+                slashes = 0
+                continue
+            return j + 1, True, "".join(buf)
+        slashes = slashes + 1 if c == "\\" else 0
+        buf.append(c)
+        j += 1
+    return n, False, "".join(buf)
+
+
+def _opens_q_quote(sql: str, i: int) -> bool:
+    """Whether the `'` at `sql[i]` opens an Oracle alternative-quoted string (`q'[…]'`, `nq'{…}'`).
+
+    Oracle ends one of those at the chosen bracket followed by `'`, so a `'` inside it is data:
+    `q'[a']'` is one string to Oracle and a string, a `]` and an unterminated string to this scan.
+    The prefix must be a whole word, so a name that merely ends in `q` is not one.
+    """
+    k = i
+    while k > 0 and (sql[k - 1].isalnum() or sql[k - 1] == "_"):
+        k -= 1
+    return sql[k:i].lower() in ("q", "nq")
+
+
+# Static on purpose: a refusal never echoes the statement, so neither detail names the text.
+_BACKSLASH_QUOTE_DETAIL = (
+    "a quote inside a string or quoted name follows a backslash, and engines disagree about "
+    "whether that backslash escapes it (MySQL, Redshift, Snowflake, BigQuery, Databricks and "
+    "Postgres E'' strings say yes), so where the string ends cannot be read the same way on all "
+    "of them"
+)
+_QUOTE_RUN_DETAIL = (
+    "three quotes in a row open a triple-quoted string in BigQuery but an escaped quote "
+    "elsewhere, so where the string ends cannot be read the same way on all engines"
+)
 
 
 class _Neutralized(NamedTuple):
@@ -153,8 +235,13 @@ def _neutralize(sql: str) -> _Neutralized:
 
     Escapes: `''` inside a single-quoted literal and `""` inside a double-quoted
     identifier are treated as doubled-delimiter escapes (standard SQL). Backslash is
-    deliberately NOT an escape here — engines disagree (MySQL yes, standard PG no),
-    and not honoring it can only stop a literal *early* (fail safe), never late.
+    NOT an escape here, and that is NOT safe on its own: an engine that honours it reads
+    `'a\\' … '` as one literal running past the quote this scan stops at, so the text
+    between would be blanked here and executed there. `_scan_quoted` therefore refuses
+    every span whose end depends on the backslash reading, and the same for the other
+    places where engines disagree about where a span ends: three quotes in a row
+    (BigQuery), Oracle's `q'[…]'`, and a nested `/*` (Postgres and Databricks nest block
+    comments, MySQL does not).
 
     Returns a `_Neutralized` — the stripped text plus the quoted-identifier spans. See
     that type for why the strip happens here rather than at the call site.
@@ -210,6 +297,18 @@ def _neutralize(sql: str) -> _Neutralized:
                     _REMEDIATION["mysql_exec_comment"],
                 )
             end = sql.find("*/", i + 2)
+            # Postgres (and Databricks) nest block comments; MySQL ends at the first `*/`. A
+            # `/*` inside a comment therefore moves where it ends on one engine and not the
+            # other, and `/* /* */ ' */ ; DROP …` runs the DROP on a stock Postgres while this
+            # scan sees a literal. Refuse rather than pick a reading.
+            inner = sql.find("/*", i + 2)
+            if inner != -1 and (end == -1 or inner < end):
+                raise _GuardReject(
+                    "a block comment contains another '/*', and engines disagree about whether "
+                    "block comments nest, so where it ends cannot be read the same way on all "
+                    "of them",
+                    _REMEDIATION["nested_comment"],
+                )
             i = n if end == -1 else end + 2
             emit(" ")
         elif sql[i] == "#":  # MySQL line comment, and nothing of the sort elsewhere
@@ -229,8 +328,8 @@ def _neutralize(sql: str) -> _Neutralized:
             #                                         intersection, and the jsonb path
             #                                         operators, which are ordinary analytics SQL)
             #   - a temp-table prefix                (SQL Server: `#local`, `##global`)
-            #   - a character inside a backtick or bracket quoted identifier, since this scan
-            #     consumes neither quoting form (that gap is ACE-079's, not fixed here)
+            #   - a character inside a bracket quoted identifier, since this scan does not
+            #     consume that form (a backtick-quoted one is consumed now, so `#` there is data)
             # Only the first is a comment, which is why neither this refusal's detail nor its
             # remediation calls it one. All four were allowed before this branch and are refused
             # now; a repo-wide grep found no golden query using any of them.
@@ -245,31 +344,21 @@ def _neutralize(sql: str) -> _Neutralized:
                 _REMEDIATION["hash_ambiguous"],
             )
         elif sql[i] == "'":  # single-quoted string literal
-            j = i + 1
-            while j < n:
-                if sql[j] == "'":
-                    if j + 1 < n and sql[j + 1] == "'":  # doubled '' escape
-                        j += 2
-                        continue
-                    j += 1
-                    break
-                j += 1
+            if _opens_q_quote(sql, i):
+                raise _GuardReject(
+                    "Oracle q'…' strings end at a bracket chosen by the writer rather than at a "
+                    "quote, so where one ends cannot be read the same way on all engines",
+                    _REMEDIATION["q_quote"],
+                )
+            i, _, _ = _scan_quoted(sql, i)
             emit(" ")
-            i = j
-        elif sql[i] == '"':  # double-quoted identifier — keep content, drop quotes
-            j, buf = i + 1, []
-            closed = False
-            while j < n:
-                if sql[j] == '"':
-                    if j + 1 < n and sql[j + 1] == '"':  # doubled "" escape
-                        buf.append('"')
-                        j += 2
-                        continue
-                    j += 1
-                    closed = True
-                    break
-                buf.append(sql[j])
-                j += 1
+        elif sql[i] in '"`':  # quoted identifier — keep content, drop quotes
+            # Backtick is the identifier quote of MySQL, Databricks, BigQuery, SQLite and DuckDB,
+            # and a syntax error on every other engine the executor speaks. Reading it as a quote is
+            # what stops `` `a'` , SLEEP(9) -- ' `` passing: as bare text, its `'` opened a
+            # literal here that blanked the SLEEP call those engines run. The content stays
+            # visible, as with `"`, so nothing inside one is hidden from the checks below.
+            j, closed, content = _scan_quoted(sql, i)
             # A pathological identifier like "a;b" reduces to a;b and trips the
             # multi-statement check — a deliberate, safe-direction hardening choice.
             #
@@ -294,15 +383,17 @@ def _neutralize(sql: str) -> _Neutralized:
             # Record the span AROUND the content only, between the two separator emits, so
             # `quoted` names the identifier and never the boundary this branch re-supplied.
             start = width
-            emit("".join(buf))
+            emit(content)
             # Record a span ONLY for an identifier whose closing delimiter we actually consumed.
             # An unterminated `"` swallows the rest of the statement into `buf`, and a span over
             # that tail would tell the niladic matcher to skip every keyword inside it — an
-            # UNDER-refusal, the one direction this design must never fail in. It is reachable:
-            # MySQL's default sql_mode treats `"` as a string delimiter with backslash escapes, so
-            # `SELECT "a\"b" , current_user FROM t` re-opens a runaway identifier here while MySQL
-            # executes it and returns CURRENT_USER(). No span means no skip, so the gate refuses.
-            if closed:
+            # UNDER-refusal, the one direction this design must never fail in. (MySQL's
+            # `SELECT "a\"b" , current_user FROM t` once reached here as a runaway identifier;
+            # `_scan_quoted` now refuses it first, for the backslash before the quote.)
+            #
+            # Backtick spans are not recorded: only a double-quoted bare word is known to be an
+            # identifier on every engine, and an unrecorded span can only over-refuse.
+            if closed and sql[i] == '"':
                 spans.append((start, width))
             nxt = sql[j] if j < n else ""
             if nxt.isalnum() or nxt == "_":
