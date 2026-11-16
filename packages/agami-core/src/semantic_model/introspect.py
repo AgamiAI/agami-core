@@ -646,7 +646,7 @@ def introspect(
     _progress(pp, "join candidates: testing columns no join covers…")
     prior = _stored_candidates(out) if refreshing else {}
     _scan_join_candidates(dialect, runner, rels, built, report, sg, read=read,
-                          offered_columns=_offered_columns(prior))
+                          offered_columns=_offered_columns(prior, read))
     if refreshing:
         _merge_candidates(prior, report, read or set(), rels, built, sg)
     _progress(pp, f"join candidates: {len(report.join_candidates)} found "
@@ -2356,13 +2356,27 @@ def _own_key(t: Table, column: str) -> bool:
     return len(t.grain) == 1 and t.grain[0].lower() == column.lower()
 
 
+def _named_for(column: str, target: Table) -> bool:
+    """The column's name, less a key suffix, names the target table: `customer_id` -> `customers`,
+    `acct_no` -> `accounts` (an abbreviation: its letters in order, from the first)."""
+    low = column.lower()
+    stem = next((low[: -len(s)] for s in _KEY_SUFFIXES if low.endswith(s) and len(low) > len(s)), None)
+    tn = target.name.lower()
+    if not stem:
+        return False
+    if stem in tn or tn.rstrip("s") == stem.rstrip("s"):
+        return True
+    rest = iter(tn)
+    return stem[0] == tn[0] and all(ch in rest for ch in stem)
+
+
 def _candidate_pairs(rels: list[Relationship], tables: list[Table], dialect: Optional[str],
                      read: Optional[set[str]] = None) -> Iterator[tuple[int, Table, Column, Table, str]]:
     """Every (priority, table, column, target, key) the wider scan tests: a column no join reads from,
     against another table's one-column key, when the name matches the key's or the type does. With
     `read` (an append), only pairs touching a table this run read: the rest were tested when theirs was.
-    Yielded lazily in priority order (name matches first, then by name), so stopping at the probe
-    cap also stops the enumeration."""
+    Yielded lazily in priority order (name matches first, then by name), so the scan draws only as
+    many as it tests; listing the rest when the cap stops it costs no statement."""
     covered = {(table_key(r.from_table, r.from_schema), fc.lower())
                for r in rels for fc, _tc in _column_pairs(r, dialect) or []}
     served = sorted((t for t in tables if t.review_state not in _UNSERVED),
@@ -2393,14 +2407,15 @@ def _candidate_pairs(rels: list[Relationship], tables: list[Table], dialect: Opt
             # value list) or a member of a composite key (`line_no`), which a name must back instead.
             measure = (c.aggregation in ("additive", "averageable") or c.date_format
                        or _looks_time_named(c.name) or _NOT_A_REFERENCE_RE.search(c.name))
-            own = _own_key(t, c.name) or (len(t.grain) != 1 and per_name.get(c.name.lower(), 0) > 1)
-            columns.append((t, c, measure, bool(c.choice_field or c.primary_key), own))
+            shared = len(t.grain) != 1 and per_name.get(c.name.lower(), 0) > 1
+            columns.append((t, c, measure, bool(c.choice_field or c.primary_key), _own_key(t, c.name), shared))
     for level in (0, 1, 2):
-        for t, c, measure, needs_name, own in columns:
+        for t, c, measure, needs_name, own, shared in columns:
             for u, k, kc in keys:
                 # A table's own key never points at another table's own key: two record ids match
-                # only by chance, and between same-named ids that is every pair of tables.
-                if u is t or (own and _own_key(u, k)):
+                # only by chance, and between same-named ids that is every pair of tables. A shared
+                # name on a table of unknown key is a reference only when it names the target table.
+                if u is t or (_own_key(u, k) and (own or (shared and not _named_for(c.name, u)))):
                     continue
                 if read is not None and _qualified(t) not in read and _qualified(u) not in read:
                     continue
@@ -2653,10 +2668,23 @@ def _stored_candidates(out: Path) -> dict:
     return _read_introspect_file(out, JOIN_CANDIDATES_FILE)
 
 
-def _offered_columns(doc: dict) -> set[tuple]:
-    """(schema, table, column) of each column a stored candidate offers a join from."""
-    ops = [c.get("op") for c in doc.get("candidates") or [] if isinstance(c, dict)]
-    return {(op.get("from_schema"), op.get("from_table"), op.get("from_column")) for op in ops if isinstance(op, dict)}
+def _listed(doc: dict, name: str) -> list:
+    v = doc.get(name)
+    return v if isinstance(v, list) else []
+
+
+def _op_tables(op: dict) -> set[str]:
+    """The two tables a candidate's op joins, spelled as `_qualified` spells them."""
+    return {f"{op.get(f'{e}_schema')}.{op.get(f'{e}_table')}" if op.get(f"{e}_schema") else str(op.get(f"{e}_table"))
+            for e in ("from", "to")}
+
+
+def _offered_columns(doc: dict, read: Optional[set[str]]) -> set[tuple]:
+    """(schema, table, column) of each column a stored candidate offers a join from, except where
+    the candidate touches a table this run read: its data may have changed, so it is tested again."""
+    ops = [c.get("op") for c in _listed(doc, "candidates") if isinstance(c, dict)]
+    return {(op.get("from_schema"), op.get("from_table"), op.get("from_column")) for op in ops
+            if isinstance(op, dict) and not (read and _op_tables(op) & read)}
 
 
 def _merge_candidates(prior: dict, report: IntrospectReport, read: set[str], rels: list[Relationship],
@@ -2665,14 +2693,15 @@ def _merge_candidates(prior: dict, report: IntrospectReport, read: set[str], rel
 
     One entry per id (its two columns); an offered candidate beats a near miss, and between two of a
     kind this run's evidence, read from the data as it is now, wins. A stored candidate is dropped
-    only when the model no longer serves an end of it, or a join now reads from its column (it was
-    accepted). The tables a capped scan left untested stay listed until a run reads them again."""
+    when the model no longer serves an end of it, a join now reads from its column (it was accepted),
+    or an end is a table this run read: that pair was tested again, and this run's result decides.
+    The tables a capped scan left untested stay listed until a run reads them again."""
     covered = {(table_key(r.from_table, r.from_schema), fc.lower())
                for r in rels for fc, _tc in _column_pairs(r, sg) or []}
 
     def live(c: dict) -> bool:
         op = c.get("op") if isinstance(c, dict) else None
-        if not isinstance(op, dict) or "id" not in c:
+        if not isinstance(op, dict) or "id" not in c or _op_tables(op) & read:
             return False
         for side in ("from", "to"):
             t = _endpoint(tables, op.get(f"{side}_table", ""), op.get(f"{side}_schema"))
@@ -2683,8 +2712,10 @@ def _merge_candidates(prior: dict, report: IntrospectReport, read: set[str], rel
         tk = table_key(op["from_table"], op.get("from_schema"))
         return not {(tk, op["from_column"].lower()), (("", tk[1]), op["from_column"].lower())} & covered
 
+    # One per id: an offered candidate outranks a near miss, then this run's evidence a stored one.
+    # A stored pair on a table this run read is dropped above, so the two seldom meet; a damaged file can.
     best: dict[str, tuple[int, int, dict]] = {}   # id -> (offered?, this run?, candidate)
-    for now, offered, cands in ((0, 1, prior.get("candidates")), (0, 0, prior.get("low_overlap")),
+    for now, offered, cands in ((0, 1, _listed(prior, "candidates")), (0, 0, _listed(prior, "low_overlap")),
                                 (1, 1, report.join_candidates), (1, 0, report.join_candidates_low)):
         for c in cands or []:
             if now or live(c):
@@ -2693,7 +2724,7 @@ def _merge_candidates(prior: dict, report: IntrospectReport, read: set[str], rel
                     best[c["id"]] = (*rank, c)
     report.join_candidates = [c for o, _, c in best.values() if o]
     report.join_candidates_low = [c for o, _, c in best.values() if not o]
-    kept = {t for t in prior.get("unchecked_tables") or [] if isinstance(t, str) and t not in read}
+    kept = {t for t in _listed(prior, "unchecked_tables") if isinstance(t, str) and t not in read}
     report.join_candidate_unchecked = sorted(kept | set(report.join_candidate_unchecked))
 
 
