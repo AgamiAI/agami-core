@@ -1317,9 +1317,12 @@ _REGISTRY: dict[str, Callable[[], Dialect]] = {
 
 # Agami's own catalog queries that call a catalog function the recon gate refuses (#523). Each is
 # rendered with a stand-in literal: `execute_sql` compares fingerprints, which ignore literal values,
-# so the same query for any schema matches while any other statement does not.
+# so the same query for any schema matches while any other statement does not. A catalog read missing
+# here is refused on every build, and discovery saw an empty warehouse (#668);
+# `test_every_built_in_catalog_read_the_recon_gate_refuses_is_on_the_build_allow_list` catches the next one.
 _CATALOG_FUNCTION_QUERIES: tuple[Callable[[], str], ...] = (
     lambda: PostgreSQL().sql_constraint_definitions("schema"),
+    lambda: Redshift().sql_schemas(),  # has_schema_privilege (#588)
 )
 
 

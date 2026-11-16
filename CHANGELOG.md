@@ -121,6 +121,15 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Redshift builds found no tables (#668).** Since #588 the Redshift schema list filters on
+  `has_schema_privilege`, which the SQL guard refuses as a privilege probe, and the query was never
+  added to the build's allow-list of agami's own catalog reads. Every Redshift build reported "no
+  tables discovered" on a warehouse the login could read. The query is now on the list, matched by
+  fingerprint as before, so a statement an AI writes that calls the function is still refused, and a
+  hosted server still never takes `--build-profile`. A test now fails when any dialect's catalog read
+  would be refused and is missing from the list. When the guard refuses discovery's schema or table
+  list, discovery now fails with the rule and the workaround (an explicit `schema.table` list)
+  instead of reporting an empty catalog.
 - **Rebuilding a model keeps `datasource.yaml` keys this agami-core does not know (#589).**
   Re-introspection and applying a model spec rewrote `datasource.yaml` from the fields this core
   reads, so a top-level key written by a newer agami-core was deleted from disk without a word. Those
