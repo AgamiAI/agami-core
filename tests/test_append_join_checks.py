@@ -298,3 +298,23 @@ def test_the_cap_names_the_tables_it_left_unchecked(tmp_path, monkeypatch):
         append=True,
     )
     assert _candidates(out)["unchecked_tables"] == ["main.b2", "main.b3"]
+
+
+def test_an_unreadable_candidates_file_is_read_as_empty(tmp_path):
+    out, _, _ = _six_batches(tmp_path)
+    (out / ".introspect" / "join_candidates.json").write_text(
+        '{"candidates": [{"op": 1}, 2], "unchecked_tables": [3]}'
+    )
+    db = tmp_path / "shop.db"
+    _, report = I.introspect(
+        "demo",
+        "sqlite",
+        runner=_runner(db),
+        artifacts_dir=tmp_path,
+        out_dir=out,
+        tables=["main.b1"],
+        append=True,
+    )
+    assert report.join_candidate_unchecked == []
+    (out / ".introspect" / "join_candidates.json").write_text("not json")
+    assert I._stored_candidates(out) == {}

@@ -2655,8 +2655,8 @@ def _stored_candidates(out: Path) -> dict:
 
 def _offered_columns(doc: dict) -> set[tuple]:
     """(schema, table, column) of each column a stored candidate offers a join from."""
-    return {(c["op"].get("from_schema"), c["op"]["from_table"], c["op"]["from_column"])
-            for c in doc.get("candidates") or [] if isinstance(c.get("op"), dict) and "from_column" in c["op"]}
+    ops = [c.get("op") for c in doc.get("candidates") or [] if isinstance(c, dict)]
+    return {(op.get("from_schema"), op.get("from_table"), op.get("from_column")) for op in ops if isinstance(op, dict)}
 
 
 def _merge_candidates(prior: dict, report: IntrospectReport, read: set[str], rels: list[Relationship],
