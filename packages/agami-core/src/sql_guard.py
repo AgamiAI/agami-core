@@ -69,7 +69,10 @@ _REMEDIATION: dict[str, str] = {
         "or ends with a doubled quote. Compare with CHR(39) or the like instead."
     ),
     "q_quote": "Rewrite the q'…' alternative-quoted string as an ordinary '…' string.",
-    "multi_statement": "Send exactly one statement.",
+    "multi_statement": (
+        "Send exactly one statement, with a `;` only at its end — not inside a string, name or "
+        "comment either. Write a semicolon in a string as CHR(59)."
+    ),
     "not_a_select": "Rewrite as a read-only SELECT or WITH…SELECT.",
     "denied_keyword": (
         "Rewrite as a read-only SELECT — this connection executes no writes, DDL, "
@@ -94,6 +97,44 @@ _REMEDIATION: dict[str, str] = {
 # literal only ever neutralizes *more*, so it can never hide a token the database
 # would execute — it just refuses to let a `$1$`-looking region desync the scan.
 _DOLLAR_OPEN_RE = re.compile(r"\$\w*\$")
+
+# Characters a comment in the trailing run may not hold. With none of them in it, no engine can be
+# inside a string, name or dollar quote there and find its end, so the run is only separators and
+# comments on every reading — which is what lets the `;` rule stay free of any lexing.
+_TAIL_FORBIDDEN = frozenset(";'\"`$\\")
+
+
+def _without_trailing_separators(sql: str) -> str:
+    """`sql` with its trailing run of whitespace, `;` and plain comments removed.
+
+    A `-- ` comment on the last line and a `/* */` comment count only when their text holds none of
+    `_TAIL_FORBIDDEN`, no newline (for `--`) and no `/*`, and the block is not MySQL's `/*!`. Peeled
+    from the end one piece at a time with `rfind`, never a regex anchored at the end, which would
+    retry from every position and go quadratic on a long run of whitespace.
+    """
+    text = sql
+    while True:
+        text = text.rstrip().rstrip(";")
+        if text != text.rstrip():
+            continue
+        if text.endswith("*/"):
+            start = text.rfind("/*", 0, len(text) - 2)
+            body = text[start + 2 : -2] if start != -1 else ""
+            if start != -1 and not body.startswith("!") and not _TAIL_FORBIDDEN & set(body):
+                text = text[:start]
+                continue
+        start = text.rfind("--")
+        if start != -1:
+            body = text[start + 2 :]
+            if (
+                (not body or body[0] in " \t")
+                and "\n" not in body
+                and "\r" not in body
+                and not _TAIL_FORBIDDEN & set(body)
+            ):
+                text = text[:start]
+                continue
+        return text
 
 
 class _GuardReject(Exception):
@@ -172,11 +213,12 @@ _BACKSLASH_QUOTE_DETAIL = (
     "a quote inside a string or quoted name follows a backslash, and engines disagree about "
     "whether that backslash escapes it (MySQL, Redshift, Snowflake, BigQuery, Databricks and "
     "Postgres E'' strings say yes), so where the string ends cannot be read the same way on all "
-    "of them"
+    "of them; write that backslash as CHR(92) or that quote as CHR(39) and join the pieces with ||"
 )
 _QUOTE_RUN_DETAIL = (
     "three quotes in a row open a triple-quoted string in BigQuery but an escaped quote "
-    "elsewhere, so where the string ends cannot be read the same way on all engines"
+    "elsewhere, so where the string ends cannot be read the same way on all engines; write a "
+    "quote character as CHR(39) instead, e.g. CHR(39) for '''' and 'abc' || CHR(39) for 'abc'''"
 )
 
 
@@ -405,7 +447,12 @@ def _neutralize(sql: str) -> _Neutralized:
             # `; DROP ...` from the multi-statement check (fail-open). Treating it as a
             # bare `$` instead leaves everything after it visible, so the scan fails safe
             # (the DB rejects an unterminated dollar-quote anyway).
-            m = _DOLLAR_OPEN_RE.match(sql, i)
+            # `$` also continues an identifier in Postgres, Redshift and Snowflake, so `x$a$` is
+            # one name and opens nothing. Reading its `$a$` as an opener blanked everything up to
+            # the next `$a$`, a whole `; INSERT …;` included, while the engine ran it. A dollar
+            # quote opens only where a name cannot be continuing.
+            prev = sql[i - 1] if i else ""
+            m = None if (prev.isalnum() or prev in "_$") else _DOLLAR_OPEN_RE.match(sql, i)
             close = sql.find(m.group(0), m.end()) if m else -1
             if m and close != -1:
                 i = close + len(m.group(0))
@@ -644,6 +691,21 @@ def check_read_only(sql: str | None) -> Refusal | None:
                 "Real analytics SQL fits well under this."
             ),
             remediation=_REMEDIATION["too_long"],
+        )
+
+    # A `;` anywhere but the very end is refused on the RAW text, before any lexing. Every
+    # statement-stacking bypass this gate has had was a lexer that disagreed with an engine about
+    # where a string, name or comment ended, and each was closed one shape at a time. This closes
+    # the class: whatever the neutralizer gets wrong, it cannot hide a separator that is not
+    # there. The cost is a `;` inside a string or comment, which analytics SQL rarely carries.
+    if ";" in _without_trailing_separators(sql):
+        return refuse(
+            RULE_READ_ONLY,
+            detail=(
+                "a semicolon may only end the statement — one inside a string, name or comment "
+                "is refused too, so no reading of the statement can find a second one there"
+            ),
+            remediation=_REMEDIATION["multi_statement"],
         )
 
     # Blank out comments and string / dollar literals, and unwrap double-quoted
