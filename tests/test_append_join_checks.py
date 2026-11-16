@@ -318,3 +318,112 @@ def test_an_unreadable_candidates_file_is_read_as_empty(tmp_path):
     assert report.join_candidate_unchecked == []
     (out / ".introspect" / "join_candidates.json").write_text("not json")
     assert I._stored_candidates(out) == {}
+
+
+# --- review round: re-read tables, references named for their table, a key that arrives late ------
+
+
+def test_a_re_read_table_tests_its_candidates_again_on_its_new_data(tmp_path, monkeypatch):
+    out, _, _ = _six_batches(tmp_path)
+    assert "main.b1.ref->main.a1.id" in {c["id"] for c in _candidates(out)["candidates"]}
+    con = sqlite3.connect(tmp_path / "shop.db")
+    con.execute("UPDATE b1 SET ref = ref + 500")  # now matches no key at all
+    con.commit()
+    con.close()
+    counter = _Counter(monkeypatch)
+    I.introspect(
+        "demo",
+        "sqlite",
+        runner=_runner(tmp_path / "shop.db"),
+        artifacts_dir=tmp_path,
+        out_dir=out,
+        tables=["main.b1"],
+        append=True,
+    )
+    assert any(x[:3] == ("check", "b1", ("ref",)) for x in counter.take())
+    doc = _candidates(out)
+    assert not any(
+        c["id"].startswith("main.b1.ref->") for c in doc["candidates"] + doc["low_overlap"]
+    )
+    assert "main.b2.ref->main.a1.id" in {c["id"] for c in doc["candidates"]}  # others are kept
+
+
+def _pairs(tables: list[Table]) -> list[tuple]:
+    return [
+        (t.name, c.name, u.name, k) for _, t, c, u, k in I._candidate_pairs([], tables, "sqlite")
+    ]
+
+
+@pytest.mark.parametrize(
+    "ref, target, sibling",
+    [
+        ("customer_id", "customers", "customer_profiles"),
+        ("acct_no", "accounts", "account_limits"),
+    ],
+)
+def test_a_reference_named_for_its_table_is_tested_though_several_tables_share_the_key(
+    ref, target, sibling
+):
+    # Two tables keyed on the same name, and a third of unknown key holding it: it points at them.
+    key = {"name": ref, "type": "string", "primary_key": True}
+    pairs = _pairs(
+        [
+            _t(target, [key], [ref]),
+            _t(sibling, [key], [ref]),
+            _t("facts", [{"name": ref, "type": "string"}], []),
+        ]
+    )
+    assert ("facts", ref, target, ref) in pairs
+
+
+def test_a_shared_record_id_is_not_paired_between_unrelated_tables():
+    key = {"name": "rec_id", "type": "string", "primary_key": True}
+    pairs = _pairs(
+        [
+            _t("users", [key], ["rec_id"]),
+            _t("groups", [key], ["rec_id"]),
+            _t("events", [{"name": "rec_id", "type": "string"}], []),
+        ]
+    )
+    assert not [p for p in pairs if p[1] == "rec_id"], pairs
+
+
+def test_an_earlier_column_is_tested_against_a_key_that_arrives_later(tmp_path):
+    db = _db(
+        tmp_path,
+        "CREATE TABLE p(id INTEGER PRIMARY KEY, label TEXT);"
+        "CREATE TABLE q(id INTEGER PRIMARY KEY, far_ref INTEGER);"
+        "CREATE TABLE s(id INTEGER PRIMARY KEY, label TEXT);"
+        "CREATE TABLE r(id INTEGER PRIMARY KEY, label TEXT);"
+        "INSERT INTO p VALUES (1, 'x'), (2, 'y');"
+        "INSERT INTO q VALUES (1, 701), (2, 702), (3, 703);"
+        "INSERT INTO s VALUES (1, 'x');"
+        "INSERT INTO r VALUES (701, 'a'), (702, 'b'), (703, 'c');",
+    )
+    out = tmp_path / "demo"
+    for k, batch in enumerate((["main.p", "main.q"], ["main.s"], ["main.r"])):
+        I.introspect(
+            "demo",
+            "sqlite",
+            runner=_runner(db),
+            artifacts_dir=tmp_path,
+            out_dir=out,
+            tables=batch,
+            append=k > 0,
+        )
+        ids = {c["id"] for c in _candidates(out)["candidates"]}
+        assert ("main.q.far_ref->main.r.id" in ids) == (k == 2)
+
+
+def test_a_candidates_file_of_the_wrong_shape_is_read_as_empty(tmp_path):
+    report = I.IntrospectReport(
+        profile="demo", db_type="sqlite", out_dir=str(tmp_path), dry_run=False
+    )
+    bad = {"candidates": {"a": 1}, "low_overlap": "x", "unchecked_tables": "main.b1"}
+    assert I._offered_columns(bad, set()) == set()
+    I._merge_candidates(bad, report, set(), [], [], "sqlite")
+    assert (
+        report.join_candidates,
+        report.join_candidates_low,
+        report.join_candidate_unchecked,
+    ) == ([], [], [])
