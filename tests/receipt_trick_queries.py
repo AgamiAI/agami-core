@@ -778,3 +778,63 @@ INLINE_WITHHELD = [
                 for i in range(1, 45))
     + " SELECT SUM(total_amount) AS n FROM orders WHERE customer_id IN (SELECT id FROM c44)",
 ]
+
+
+# The real rejections receipt, exactly: two DISTINCT steps over one key named the same on both
+# sides, the metric defined over the fact table, the count read off the LEFT join's OPTIONAL side
+# (`n.request_id`), and no relationship between the rejections and the fact table. Only the
+# requests with a rejection are counted, so the tying line is listed. (statement, restrictions)
+OPTIONAL_SIDE_COUNT = (
+    "WITH sub AS (SELECT DISTINCT f.request_id FROM expense_lines f JOIN dates d "
+    "ON d.date_key = f.submit_date_key JOIN fiscal_periods p ON CAST(d.full_date AS DATE) "
+    "BETWEEN p.period_start AND p.period_end AND p.adjustment_flag = 'N' "
+    "WHERE p.fiscal_year = 2025), rsn AS (SELECT DISTINCT r.request_id FROM rejections r "
+    "WHERE r.request_id IS NOT NULL AND r.reason IS NOT NULL AND r.reason <> '') "
+    "SELECT COUNT(DISTINCT n.request_id) AS with_reason FROM sub s LEFT JOIN rsn n "
+    "ON n.request_id = s.request_id",
+    ["p.fiscal_year = 2025", "CAST(d.full_date AS DATE) BETWEEN p.period_start AND p.period_end",
+     "p.adjustment_flag = 'N'", "r.request_id IS NOT NULL", "r.reason IS NOT NULL",
+     "r.reason <> ''",
+     "only expense_lines rows that have a matching dates row "
+     "(on dates.date_key = expense_lines.submit_date_key)",
+     "only dates rows that have a matching fiscal_periods row",
+     "only rejections rows that have a matching expense_lines row (on request_id)"],
+)
+
+
+# Final fixes. A WHERE condition on an outer join's optional side makes that side required only
+# when its shape rejects NULLs; any other may keep the null-extended rows. Over the `audit` model
+# with `problem_count` its metric: (condition, None for undetermined, or the restrictions).
+_PROBLEMS_LEFT = ("SELECT COUNT(DISTINCT p.id) AS n FROM problems p LEFT JOIN incidents i "
+                  "ON i.problem_id = p.id AND i.opened > '2026-01-01' WHERE ")
+OPTIONAL_SIDE_WHERE = [
+    (_PROBLEMS_LEFT + "COALESCE(i.number, 'X') = 'X'", None),
+    (_PROBLEMS_LEFT + "(i.number = 'X' OR i.number IS NULL)", None),
+    (_PROBLEMS_LEFT + "(p.state = 's' OR i.number = 'Y')", None),
+    (_PROBLEMS_LEFT + "NOT (i.id IS NOT NULL)", None),
+    (_PROBLEMS_LEFT + "CASE WHEN i.id IS NULL THEN TRUE ELSE FALSE END", None),
+    (_PROBLEMS_LEFT + "i.number = 'I1'",
+     ["i.number = 'I1'", "i.opened > '2026-01-01'",
+      "only problems rows that have a matching incidents row (on incidents.problem_id = problems.id)"]),
+    (_PROBLEMS_LEFT + "i.number IS NOT NULL",
+     ["i.number IS NOT NULL", "i.opened > '2026-01-01'",
+      "only problems rows that have a matching incidents row (on incidents.problem_id = problems.id)"]),
+]
+
+# A LEFT join neither read nor needed by the number can still repeat its rows: it stays on the
+# path the joins and aggregates sections read (named in `joins_not_declared`), and only its ON
+# conditions are not the number's. Over the `acme` model, UNFILTERED.
+FANNING_OUTER_JOINS = [
+    "SELECT SUM(o.total_amount) AS n FROM orders o LEFT JOIN payments p ON p.status = o.status",
+    "SELECT COUNT(*) AS n FROM orders o LEFT JOIN payments p ON p.status = o.status",
+    "WITH s AS (SELECT status FROM payments) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "LEFT JOIN s ON s.status = o.status",
+    "SELECT SUM(o.total_amount) AS n FROM payments p RIGHT JOIN orders o ON p.status = o.status",
+]
+
+# A step that renames its columns with a list (`s(x)`) is never written into a subquery: its body
+# does not say the new names. Withheld whole. Over the `acme` model.
+STEP_COLUMN_LIST_SUBQUERY = (
+    "WITH s(x) AS (SELECT id FROM orders WHERE status = 'paid') SELECT COUNT(*) AS n FROM orders "
+    "WHERE id IN (SELECT x FROM s)"
+)
