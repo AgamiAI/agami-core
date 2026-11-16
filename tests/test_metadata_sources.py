@@ -46,6 +46,13 @@ SYS_DICTIONARY = [
 ]
 
 
+def _CHECK_ROW(matched: int) -> dict:
+    """One join check's row: five rows read, `matched` of them finding their partner."""
+    return {"probe": "0", "rows_read": "5", "rows_keyed": "5", "rows_matched": str(matched), "vals": "5",
+            "vals_matched": str(matched), "to_keys": str(matched), "to_rows": str(matched),
+            "to_rows_matched": str(matched)}
+
+
 # --- pure transforms --------------------------------------------------------
 
 def test_choice_field_ops_groups_and_skips_blanks():
@@ -260,15 +267,15 @@ def test_cmd_enrich_metadata_applies_from_canned_db(tmp_path, monkeypatch):
     _servicenow_model(tmp_path)
     from semantic_model import introspect as INTRO
 
-    def fake_factory(profile, python=None):
+    def fake_factory(profile, python=None, **kw):
         def run(sql):
             s = sql.lower()
             if "sys_choice" in s:
                 return SYS_CHOICE
             if "sys_dictionary" in s:
                 return SYS_DICTIONARY
-            if "matched" in s:                 # the value-overlap verification probe
-                return [{"matched": "5"}]
+            if "rows_matched" in s:            # the join check on the data
+                return [_CHECK_ROW(5)]
             return []
         return run
 
@@ -301,7 +308,7 @@ def test_enrich_metadata_reports_a_description_whose_provenance_it_replaced(tmp_
 
     curate.apply(tmp_path, [{"op": "edit", "kind": "table", "name": "incident", "column": "severity",
                              "field": "description", "value": "How bad it is", "source": "ai"}])
-    monkeypatch.setattr(INTRO, "make_execute_sql_runner", lambda profile, python=None: (
+    monkeypatch.setattr(INTRO, "make_execute_sql_runner", lambda profile, python=None, **kw: (
         lambda sql: SYS_DICTIONARY if "sys_dictionary" in sql.lower() else []))
     from semantic_model import cli
 
@@ -323,8 +330,12 @@ def test_enrich_metadata_with_no_preset_is_nothing_to_do(tmp_path, monkeypatch, 
         (itsm / "tables" / f"{meta}.yaml").unlink()
     from semantic_model import introspect as INTRO
 
-    def no_db(profile, python=None):
-        raise AssertionError("nothing to do must not touch the database")
+    def no_db(profile, python=None, **kw):
+        def run(sql):
+            # the catalog is listed to look for the platform's tables; nothing else is read
+            assert "information_schema" in sql.lower() or "pg_namespace" in sql.lower(), sql
+            return []
+        return run
 
     monkeypatch.setattr(INTRO, "make_execute_sql_runner", no_db)
     from semantic_model import cli
@@ -357,15 +368,15 @@ def test_enrich_metadata_drops_unverified_preset_reference(tmp_path, monkeypatch
     _servicenow_model(tmp_path)
     from semantic_model import introspect as INTRO
 
-    def fake_factory(profile, python=None):
+    def fake_factory(profile, python=None, **kw):
         def run(sql):
             s = sql.lower()
             if "sys_choice" in s:
                 return SYS_CHOICE
             if "sys_dictionary" in s:
                 return SYS_DICTIONARY
-            if "matched" in s:
-                return [{"matched": "0"}]          # NO overlap
+            if "rows_matched" in s:
+                return [_CHECK_ROW(0)]             # NO overlap
             return []
         return run
 
@@ -378,63 +389,46 @@ def test_enrich_metadata_drops_unverified_preset_reference(tmp_path, monkeypatch
     assert not [r for r in org.cross_subject_area_relationships if r.to_table == "sys_user"]
 
 
-def test_verified_references_unverified_when_table_too_big():
-    # the #7 guard: a FROM table above the row threshold must NOT be overlap-scanned — the ref is
-    # kept UNVERIFIED (inferred/unreviewed), not dropped, not probed.
-    from semantic_model import cli
-    from semantic_model import dialects as D
-    from semantic_model import introspect as INTRO
+def _two_area_org(perf=None):
     from semantic_model import models as mm
-    big = mm.PerformanceHints(estimated_row_count=INTRO._OVERLAP_PROBE_MAX_ROWS + 1)
 
-    def tbl(name, cols, perf=None):
+    def tbl(name, cols, hints=None):
         return mm.Table(name=name, schema="public", storage_connection="c", grain=["sys_id"],
-                        performance_hints=perf,
+                        performance_hints=hints,
                         columns=[mm.Column(name="sys_id", type="integer", primary_key=True)]
                                 + [mm.Column(name=c, type="integer") for c in cols])
-    itsm = mm.SubjectArea(name="itsm", description="d", tables_defined=[tbl("incident", ["caller_id"], big)])
-    sysa = mm.SubjectArea(name="sys", description="d", tables_defined=[tbl("sys_user", [])])
-    org = mm.Datasource(datasource="o", version=1, subject_areas=[itsm, sysa])
-    probed = {"n": 0}
-
-    def runner(sql):
-        if "matched" in sql:
-            probed["n"] += 1
-            return [{"matched": "5"}]
-        return []
-    intra, cross, skipped, unverified = cli._build_verified_references(
-        org, runner, D.get_dialect("redshift"), {"caller_id": "sys_user"})
-    assert probed["n"] == 0          # too big → not scanned
-    assert unverified == 1 and len(cross) == 1
-    assert cross[0]["review_state"] == "unreviewed" and cross[0]["confidence"] == "inferred"
+    return mm.Datasource(datasource="o", version=1, subject_areas=[
+        mm.SubjectArea(name="itsm", description="d",
+                       tables_defined=[tbl("incident", ["caller_id", "assignment_group"], perf)]),
+        mm.SubjectArea(name="sys", description="d",
+                       tables_defined=[tbl("sys_user", [], perf), tbl("sys_user_group", [], perf)])])
 
 
-def test_a_preset_only_reference_is_unreviewed_even_when_values_overlap():
+DECLARES_CALLER = [{"name": "incident", "element": "caller_id", "internal_type": "reference", "reference": "sys_user"}]
+
+
+def test_a_declared_reference_that_cannot_be_checked_goes_to_review_unprobed():
+    # an engine that can't bound a read of a table of unknown size: nothing is probed, nothing written
+    from semantic_model import dialects as D
+    from semantic_model import platform_joins as PJ
+    probed = []
+    found = PJ.find_reference_joins(_two_area_org(), lambda sql: probed.append(sql) or [], D.get_dialect("mysql"),
+                                    "servicenow", dictionary_rows=DECLARES_CALLER,
+                                    dictionary_cfg=M.PRESETS["servicenow"]["dictionary"], parents={})
+    assert probed == [] and found.trusted == []
+    assert [c["review_reason"] for c in found.review] == [
+        "declared by the dictionary, but could not be checked on the data"]
+
+
+def test_a_preset_only_reference_is_reviewed_even_when_values_overlap():
     # #509: matching values are evidence, not a declaration. Only a reference this database's own
     # dictionary declares is engine-approved; one only the preset assumes waits for review.
-    from semantic_model import cli
     from semantic_model import dialects as D
-    from semantic_model import models as mm
-
-    def tbl(name, cols):
-        return mm.Table(name=name, schema="public", storage_connection="c", grain=["sys_id"],
-                        columns=[mm.Column(name="sys_id", type="integer", primary_key=True)]
-                                + [mm.Column(name=c, type="integer") for c in cols])
-    org = mm.Datasource(datasource="o", version=1, subject_areas=[
-        mm.SubjectArea(name="itsm", description="d",
-                       tables_defined=[tbl("incident", ["caller_id", "assignment_group"])]),
-        mm.SubjectArea(name="sys", description="d",
-                       tables_defined=[tbl("sys_user", []), tbl("sys_user_group", [])])])
-
-    def runner(sql):
-        return [{"matched": "5"}] if "matched" in sql else []
-    _, cross, _, unverified = cli._build_verified_references(
-        org, runner, D.get_dialect("redshift"),
-        {"caller_id": "sys_user", "assignment_group": "sys_user_group"}, declared={"caller_id"})
-    by_col = {r["from_column"]: r for r in cross}
-    assert by_col["caller_id"]["review_state"] == "approved"
-    assert by_col["caller_id"]["signed_off_role"] == "system"
-    preset_only = by_col["assignment_group"]
-    assert (preset_only["review_state"], preset_only["confidence"]) == ("unreviewed", "inferred")
-    assert "signed_off_by" not in preset_only and "not declared" in preset_only["description"]
-    assert unverified == 0   # it was verified — it is unreviewed because it is undeclared
+    from semantic_model import platform_joins as PJ
+    found = PJ.find_reference_joins(_two_area_org(), lambda sql: [_CHECK_ROW(5)], D.get_dialect("redshift"),
+                                    "servicenow", dictionary_rows=DECLARES_CALLER,
+                                    dictionary_cfg=M.PRESETS["servicenow"]["dictionary"], parents={})
+    assert [(s["from_column"], s["review_state"], s["signed_off_role"]) for s in found.trusted] == [
+        ("caller_id", "approved", "system")]
+    assert [(c["op"]["from_column"], c["evidence"]["found_by"]) for c in found.review] == [
+        ("assignment_group", "preset")]

@@ -1728,42 +1728,41 @@ def cmd_enrich_metadata(args) -> int:
 
     root = Path(args.root).expanduser()
     org = load_datasource(root)
-    model_tables = [t.name for sa in org.subject_areas for t in sa.tables_defined]
     valid = {(t.name.lower(), c.name.lower())
              for sa in org.subject_areas for t in sa.tables_defined for c in t.columns}
-    schema_of: dict[str, str] = {}
-    for sa in org.subject_areas:
-        for t in sa.tables_defined:
-            schema_of.setdefault(t.name.lower(), t.schema_name)
 
-    preset = args.preset or MS.detect_preset(model_tables)
+    dialect = D.get_dialect(args.db_type)
+    # Build mode: the dictionary is read where it lies, never modelled, so the model-scope pass that
+    # confines a statement to modelled tables would refuse every read of it (ACE-181). A hosted
+    # server never honours build mode, so there the reads stay confined as before.
+    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
+    preset, sources = _metadata_sources(org, runner, dialect, args.preset)
     if not preset:
         # most databases carry no in-DB dictionary; that is nothing to do, not a failure (#526)
         _print_json({"enriched": False,
                      "reason": "no metadata preset applies to this database — nothing to do "
                                "(pass --preset to name one)"})
         return 0
-    sources = MS.usable_sources(preset, model_tables)
     if not sources:
         _print_json({"enriched": False, "preset": preset,
-                     "reason": "preset's source table(s) are not in the model"})
+                     "reason": "preset's source table(s) are neither in the model nor in the catalog"})
         return 1
 
-    dialect = D.get_dialect(args.db_type)
-    runner = INTRO.make_execute_sql_runner(args.profile)
     ops: list[dict] = []
     fetched: dict[str, int] = {}
     dict_rows: list[dict] = []
     dict_cfg: dict = {}
-    for role, cfg in sources.items():
-        src = cfg["source"]
-        sch = schema_of.get(src.lower())
+    parents: dict[str, str] = {}
+    choice_rows: list[dict] = []
+    choice_cfg: dict = {}
+    for role, (cfg, (sch, src)) in sources.items():
         fq = dialect.qualified(sch, src) if sch else dialect.quote_ident(src)
         col_names = [v for k, v in cfg.items() if k.endswith("_col")]
         sel = ", ".join(dialect.quote_ident(c) for c in col_names)
         rows = runner(f"SELECT {sel} FROM {fq}") or []
         fetched[role] = len(rows)
         if role == "choice":
+            choice_rows, choice_cfg = rows, cfg
             ops += MS.choice_field_ops(rows, table_col=cfg["table_col"], column_col=cfg["column_col"],
                                        value_col=cfg["value_col"], label_col=cfg["label_col"], valid=valid)
         elif role == "dictionary":
@@ -1771,6 +1770,26 @@ def cmd_enrich_metadata(args) -> int:
                                       label_col=cfg.get("label_col"), comment_col=cfg.get("comment_col"),
                                       valid=valid)
             dict_rows, dict_cfg = rows, cfg
+        elif role == "hierarchy":
+            parents = MS.class_parents(rows, table_col=cfg["table_col"], id_col=cfg["id_col"],
+                                       parent_col=cfg["parent_col"])
+
+    # A renamed export: its tables carry the platform's classes under other names, and its link
+    # columns the fields under `<field>_sys_id` (ACE-181). Value labels follow the mapping.
+    from . import platform_joins as PJ
+    spec = MS.PRESETS.get(preset, {})
+    key, suffix = spec.get("key", ""), spec.get("link_suffix", "")
+    mapping = PJ.map_model(org, preset, dict_rows, dict_cfg, parents)
+    if choice_rows and mapping:
+        labelled = {(o["name"].lower(), o["column"].lower()) for o in ops if o.get("field") == "choice_field"}
+        held = {t.name: {c.name: list(c.choice_field) for c in t.columns
+                         if c.choice_field and (t.name.lower(), c.name.lower()) not in labelled}
+                for sa in org.subject_areas for t in sa.tables_defined if t.name in mapping}
+        chains = {t: [m["class"], *MS.ancestors(m["class"], parents)] for t, m in mapping.items()}
+        ops += MS.view_choice_ops(choice_rows, table_col=choice_cfg["table_col"],
+                                  column_col=choice_cfg["column_col"], value_col=choice_cfg["value_col"],
+                                  label_col=choice_cfg["label_col"], held=held, chains=chains, key=key,
+                                  link_suffix=suffix)
 
     # Inheritance: ServiceNow (and any table-inheritance platform) declares a shared field's
     # description ONCE under the parent table (`task`), but the column physically lives on every
@@ -1791,7 +1810,8 @@ def cmd_enrich_metadata(args) -> int:
                         continue  # don't override an existing description
                     if (t.name.lower(), c.name.lower()) in direct:
                         continue  # already got a table-specific dictionary description
-                    d = by_el.get(c.name.lower())
+                    d = by_el.get(c.name.lower()) or (
+                        by_el.get(MS.column_field(c.name, key, suffix) or "") if key else None)
                     if d:
                         ops.append({"op": "edit", "kind": "table", "name": t.name, "column": c.name,
                                     "field": "description", "value": d, "source": "metadata"})
@@ -1810,96 +1830,69 @@ def cmd_enrich_metadata(args) -> int:
     # 2) reference/FK edges from the dictionary — the join-graph half. The table/area structure
     # the curate batch above touched only descriptions/choices, so the loaded `org` is still
     # valid for routing references (names, schemas, grain, areas unchanged).
-    refs_added = refs_skipped_target = refs_declared = refs_unverified = 0
+    refs_added = 0
+    found = None
     if not args.skip_references:
-        # field-name → target, from this instance's dictionary AND the preset's KNOWN reference
-        # graph (declarative config). Instance declarations override the preset on conflict.
-        decls = (MS.reference_declarations(
-                    dict_rows, column_col=dict_cfg["column_col"], type_col=dict_cfg["type_col"],
-                    reference_col=dict_cfg["reference_col"],
-                    reference_type=dict_cfg.get("reference_type", "reference"))
-                 if (dict_rows and "reference_col" in dict_cfg) else {})
-        ref_map = {**MS.known_reference_graph(preset), **decls}
-        refs_declared = len(ref_map)
-        if ref_map:
-            intra, cross, refs_skipped_target, refs_unverified = _build_verified_references(
-                org, runner, dialect, ref_map, declared=set(decls))
-            if intra or cross:
-                rres = curate.add_relationships(root, intra=intra, cross=cross)
-                refs_added = len(rres.applied)
-                errors += rres.errors
+        found = PJ.find_reference_joins(org, runner, dialect, preset, dictionary_rows=dict_rows,
+                                        dictionary_cfg=dict_cfg, parents=parents)
+        intra, cross, skipped = _route_references(org, found.trusted)
+        found.skipped_target += skipped
+        if intra or cross:
+            rres = curate.add_relationships(root, intra=intra, cross=cross)
+            refs_added = len(rres.applied)
+            errors += rres.errors
+        written = ({(s["from_table"].lower(), s["from_column"].lower()) for s in found.trusted}
+                   if refs_added else set())
+        if found.review or written:
+            PJ.store_for_review(root, found.review, written)
+    refs = ({"relationships_added": refs_added,
+             "relationships_for_review": len(found.review),
+             "tables_mapped_to_platform": len(found.mapping),
+             "reference_checks": found.probes,
+             "relationships_skipped_target_not_modelled": found.skipped_target,
+             "reference_notes": found.notes} if found is not None else {})
 
-    if not cols_applied and not refs_added:
-        _print_json({"enriched": False, "preset": preset, "fetched": fetched,
-                     "reference_fields_known": refs_declared,
-                     "relationships_skipped_target_not_modelled": refs_skipped_target,
+    if not cols_applied and not refs_added and not refs.get("relationships_for_review"):
+        _print_json({"enriched": False, "preset": preset, "fetched": fetched, **refs,
                      "reason": "nothing applicable for modelled columns", "errors": errors})
         return 0
     _print_json({"enriched": not errors, "preset": preset, "fetched": fetched,
                  "columns_enriched": cols_applied, "descriptions_inherited": inherited,
-                 "relationships_added": refs_added,
-                 "relationships_added_unverified": refs_unverified,
-                 "reference_fields_known": refs_declared,
-                 "relationships_skipped_target_not_modelled": refs_skipped_target,
-                 **provenance, "errors": errors})
+                 **refs, **provenance, "errors": errors})
     return 0 if not errors else 1
 
 
-def _build_verified_references(org, runner, dialect, ref_map: dict,
-                                declared: Optional[set[str]] = None) -> tuple[dict, list, int, int]:
-    """Turn a `field → target` map (preset known graph ∪ dictionary declarations) into reference
-    relationships, applied to EVERY modelled column with that name (inheritance-aware), and VERIFY
-    each candidate by value-overlap against the live data before keeping it:
-      overlap holds            → confirmed + system-approved when THIS database's dictionary declares
-                                 the reference (`declared`, its own foreign key); a reference only the
-                                 preset assumes stays inferred/unreviewed — matching values are
-                                 evidence, not a declaration (#509),
-      overlap can't be checked → inferred/unreviewed (target/from too big to scan, or probe cap hit),
-      overlap FAILS            → DROPPED (the standard join doesn't apply to this export — never
-                                 blindly trust the preset).
-    Returns `(intra, cross, skipped_target_count, unverified_count)`."""
+def _metadata_sources(org, runner, dialect, preset: Optional[str]) -> tuple[Optional[str], dict]:
+    """The preset and `{role: (config, (schema, table))}` for each of its sources found: a modelled
+    table first, else the catalog, in any schema and under a renamed layer's name (ACE-181). The
+    catalog is read only when the model doesn't carry a source."""
     from . import introspect as INTRO
-    specs: list[dict] = []
-    skipped_target = unverified = probes = 0
-    # resolve targets up front so we can verify before routing
-    tindex = {t.name.lower(): t for sa in org.subject_areas for t in sa.tables_defined}
-    for sa in org.subject_areas:
-        for t in sa.tables_defined:
-            for c in t.columns:
-                tgt = ref_map.get(c.name.lower())
-                if not tgt:
-                    continue
-                ttab = tindex.get(tgt.lower())
-                if ttab is None:
-                    skipped_target += 1
-                    continue
-                if not ttab.grain:
-                    continue
-                verified = None  # None = couldn't check
-                if INTRO._too_big_to_probe(t) or INTRO._too_big_to_probe(ttab):
-                    verified = None
-                elif probes < INTRO.FK_OVERLAP_PROBE_CAP:
-                    probes += 1
-                    verified = INTRO._overlaps(dialect, runner, t, c.name, ttab, ttab.grain[0])
-                if verified is False:
-                    continue  # standard join doesn't hold in this data → drop
-                spec = {"from_table": t.name, "from_column": c.name, "to_table": ttab.name}
-                if verified and c.name.lower() in (declared or set()):
-                    spec.update(confidence="confirmed", review_state="approved",
-                                signed_off_by="agami_enrich", signed_off_role="system",
-                                signed_off_at=INTRO._NOW,
-                                description=f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} (value-overlap verified)")
-                elif verified:
-                    spec.update(confidence="inferred", review_state="unreviewed",
-                                description=f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} "
-                                            "(preset's standard join, values overlap; not declared "
-                                            "by this database — confirm)")
-                else:
-                    unverified += 1
-                    spec["description"] = f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} (not overlap-verified — confirm)"
-                specs.append(spec)
-    intra, cross, skipped_more = _route_references(org, specs)
-    return intra, cross, skipped_target + skipped_more, unverified
+    from . import metadata_sources as MS
+
+    modelled = {t.name.lower(): (t.schema_name, t.name) for sa in org.subject_areas for t in sa.tables_defined}
+    schemas = {s for s, _ in modelled.values()}
+    catalog: Optional[list] = None
+
+    def where(source: str):
+        nonlocal catalog
+        if source.lower() in modelled:
+            return modelled[source.lower()]
+        if catalog is None:
+            catalog = []
+            for r in INTRO._try(runner, dialect.sql_schemas()) or []:
+                s = r.get("schema_name")
+                catalog += [(t.get("schema_name") or s, t["table_name"])
+                            for t in INTRO._try(runner, dialect.sql_tables(s)) or [] if t.get("table_name")]
+        return MS.locate(source, catalog, schemas)
+
+    for name in [preset] if preset else list(MS.PRESETS):
+        found = {}
+        for role, cfg in MS.PRESETS.get(name, {}).items():
+            if isinstance(cfg, dict) and cfg.get("source") and (at := where(cfg["source"])):
+                found[role] = (cfg, at)
+        if found or preset:
+            return name, found
+    return None, {}
 
 
 def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
