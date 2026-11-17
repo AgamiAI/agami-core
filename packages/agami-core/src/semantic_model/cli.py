@@ -746,6 +746,7 @@ def _metric_test_runs(root: str, profile: str, items: list) -> tuple[dict[str, d
     `WHERE 1 = 0` reads no rows and still makes the database resolve every column and operator.
     A metric over several tables needs their join to run, so it is reported `not_test_run`.
     """
+    from . import derived as DV
     from . import dialects as D
     from . import introspect as INTRO
     from .models import table_key
@@ -758,6 +759,8 @@ def _metric_test_runs(root: str, profile: str, items: list) -> tuple[dict[str, d
     # Keyed by (schema, name): two same-named tables in different schemas stay apart.
     defs = list({table_key(t.name, t.schema_name): t for sa in org.subject_areas for t in sa.tables_defined}.items())
     runner = INTRO.make_execute_sql_runner(profile, building_the_model=True)
+    batch = _metric_batch(items)
+    idx = {**DV.metric_index(org), **batch} if batch else {}
     out: dict[str, dict] = {}
     for it in items:
         if not isinstance(it, dict):
@@ -768,6 +771,17 @@ def _metric_test_runs(root: str, profile: str, items: list) -> tuple[dict[str, d
         if not binding:
             out[name] = {"not_test_run": f"no binding for {storage_type}"}
             continue
+        met = batch.get(name)
+        if met is not None and (DV.is_derived(met) or DV.is_second_order(met)):
+            # A `{base}` placeholder is model syntax, not SQL: sent as written, every database
+            # refuses it as a syntax error. Run the SQL the metric resolves to at query time.
+            try:
+                binding = DV.resolve_metric_sql(met, storage_type, idx, org)
+            except DV.DerivedError as e:
+                out[name] = {"error": f"its SQL could not be built from its base metrics: {e}"}
+                continue
+            if not sources:
+                sources = _base_sources(met, storage_type, idx)
         hits = _tables_named(defs, str(sources[0])) if len(sources) == 1 else []
         if len(sources) != 1 or not hits:
             out[name] = {"not_test_run": "reads more than one table, or a table the model doesn't have"}
@@ -787,6 +801,30 @@ def _metric_test_runs(root: str, profile: str, items: list) -> tuple[dict[str, d
                 return {"connection": {"error": reason}}, reason
             out[name] = {"error": reason}
     return out, None
+
+
+def _metric_batch(items: list) -> dict:
+    """The structurally valid metrics of an add batch by name, so a derived one can be resolved
+    against a base written alongside it; one that does not parse is the validator's to report."""
+    from .models import Metric
+    out: dict = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        try:
+            met = Metric.model_validate({k: v for k, v in it.items() if k not in ("area", "qname")})
+        except Exception:  # noqa: BLE001 — structural problems are reported by the write
+            continue
+        out[met.name] = met
+    return out
+
+
+def _base_sources(met, storage_type: str, idx: dict) -> list:
+    """The tables a derived metric reads through its bases, when it names none itself."""
+    from . import derived as DV
+    names = DV.binding_refs((met.bindings or {}).get(storage_type))
+    tables = [t for n in names if n in idx for t in (idx[n].source_tables or [])]
+    return list(dict.fromkeys(tables))
 
 
 def cmd_add(args) -> int:
@@ -1648,25 +1686,63 @@ def _commit_notes(per_area: list[dict]) -> dict:
     return {"commit_note": " ".join(notes)} if notes else {}
 
 
-def _match_question(known: dict[str, set[str]], question: str) -> tuple[list[str], str]:
-    """The areas `question` names an example in, and the question text to reject there.
-    `<area>/<question>` (the label `rejected` prints) names the area outright, even when that area
-    has no such question: another area's example is never the one meant."""
+def _area_prefix(question: str, areas: list[str]) -> tuple[Optional[str], str]:
+    """The area a `<area>/<question>` names (the label `rejected` prints), and the question after it;
+    (None, question) when the text before the first `/` is no area. Matched ignoring case and the
+    spaces around the slash, so `Request / q` names `request` instead of being looked up whole."""
     q = question.strip()
     head, _, rest = q.partition("/")
-    if rest.strip() and head in known:
-        return [head], rest.strip()
+    by_key = {a.strip().casefold(): a for a in areas}
+    area = by_key.get(head.strip().casefold())
+    if rest.strip() and area is not None:
+        return area, rest.strip()
+    return None, q
+
+
+def _match_question(known: dict[str, set[str]], question: str) -> tuple[list[str], str]:
+    """The areas `question` names an example in, and the question text to reject there.
+    `<area>/<question>` names the area outright, even when that area has no such question: another
+    area's example is never the one meant."""
+    area, rest = _area_prefix(question, list(known))
+    if area is not None:
+        return [area], rest
+    q = question.strip()
     return [a for a, questions in known.items() if q in questions], q
+
+
+def _model_area_names(root: str) -> list[str]:
+    """Every subject area the model declares; empty when it does not load."""
+    try:
+        return [sa.name for sa in L.load_datasource(root, include_rejected=True).subject_areas]
+    except Exception:  # noqa: BLE001 — a model that won't load is reported by _resolve_areas
+        return []
 
 
 def cmd_remove_example_areas(args) -> int:
     areas = _resolve_areas(args)
     if areas is None:
         return 1
-    if len(args.area or []) == 1:
-        return cmd_remove_example(argparse.Namespace(**{**vars(args), "area": areas[0]}))
     known = {a: {(e or {}).get("question", "").strip()
                  for e in L.list_prompt_examples(args.root, a, include_rejected=True)} for a in areas}
+    model_areas = _model_area_names(args.root)
+    outside = []
+    for question in args.question:
+        named, _ = _area_prefix(question, model_areas)
+        literal = any(question.strip() in qs for qs in known.values())
+        if named is not None and named not in areas and not literal:
+            outside.append({"question": question, "area": named})
+    if outside:
+        # The prefix names an area this call does not cover: looking the text up whole in the
+        # covered areas would miss it and report nothing about the area that was meant.
+        _print_json({"refused": "area_not_covered", "questions": outside, "areas": areas,
+                     "message": "these questions name an area this call does not cover; nothing was "
+                                "rejected. Add that --area, or drop --area to cover every area."})
+        return 1
+    if len(args.area or []) == 1:
+        # `<area>/<question>` for the one area named is that area's question, as across several.
+        qs = [question if question.strip() in known[areas[0]] else _area_prefix(question, areas)[1]
+              for question in args.question]
+        return cmd_remove_example(argparse.Namespace(**{**vars(args), "area": areas[0], "question": qs}))
     by_area: dict[str, list[str]] = {}
     ambiguous, missing = [], []
     for question in args.question:
