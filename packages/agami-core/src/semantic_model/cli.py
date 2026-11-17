@@ -848,6 +848,7 @@ def cmd_open_questions(args) -> int:
     different answers, then coded values and columns the build couldn't read. Read-only: each probe
     is a bounded aggregate through `execute_sql`'s gates, and nothing is declared; each candidate
     carries the `curate` op a person's answer completes."""
+    from . import curate
     from . import dialects as D
     from . import introspect as INTRO
     from . import open_questions as OQ
@@ -856,7 +857,10 @@ def cmd_open_questions(args) -> int:
         _print_json({"error": "the model declares no storage connection, so there is nothing to probe"})
         return 2
     dialect = D.get_dialect(org.storage_connections[0].storage_type)
-    _print_json(OQ.open_questions(org, INTRO.make_execute_sql_runner(args.profile), dialect))
+    # `--all` is the review page's list (#676): every item, the build's guesses, sample values.
+    confirmed = OQ.confirmed_code_lists(curate.read_log(args.root)) if args.all else frozenset()
+    _print_json(OQ.open_questions(org, INTRO.make_execute_sql_runner(args.profile), dialect,
+                                  page=args.all, confirmed=confirmed))
     return 0
 
 
@@ -2314,6 +2318,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("open-questions", help="what the data can't settle: candidate ambiguities checked by running both readings, plus coded values and columns the build couldn't read (read-only; nothing is declared)")
     sp.add_argument("root")
     sp.add_argument("--profile", required=True, help="the database to probe (bounded aggregates only)")
+    sp.add_argument("--all", action="store_true",
+                    help="the review page's list: every item, uncapped and without cards, the build's own "
+                         "guesses to confirm, and a few sample values of each unclear column")
     sp.set_defaults(func=cmd_open_questions)
 
     sp = sub.add_parser("suggest-units", help="list numeric money columns (for currency-unit stamping) via the tested name matcher")

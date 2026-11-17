@@ -814,6 +814,54 @@ def test_2g_passes_the_engines_cards_unchanged_and_never_claims_settled_after_a_
     assert "never say the data settled anything while `counts.failed` is not 0" in s
     assert "**Don't sign anything yet** on that card writes nothing" in s
 
+def _2g_how() -> str:
+    s = _section_2g()
+    return s[s.index("**Cards or a page.**"):s.index("**Then the cards:")]
+
+
+def _2g_page() -> str:
+    s = _section_2g()
+    return s[s.index("**Review on a page** (#676)"):]
+
+
+def test_2g_offers_review_on_a_page_beside_the_cards_recommended_past_8():
+    how = _2g_how()
+    card = next(ln for ln in how.splitlines() if "(header `Answer how`)" in ln)
+    assert "**Review on a page**" in card and "**Answer on cards**" in card
+    assert "more than 8" in how and "(Recommended)" in how
+    # one recommendation at a time, and a remote session goes straight to the cards
+    assert "8 or fewer" in how and "SSH_CONNECTION" in how
+    assert len("Answer how") <= 12
+
+
+def test_2g_page_uses_the_saving_helper_and_its_parser_never_the_file_by_hand():
+    page = _2g_page()
+    for step in ('open-questions "$ROOT" --profile <profile> --all', "render_open_questions_page.py",
+                 "--save-to-helper --artifacts-dir", "serve_page.py", "--decisions", "run_in_background",
+                 "question-cards.md#6a-a-page-that-saves-its-decisions",
+                 "**I've saved it** / **Back to the cards**",
+                 "parse_open_questions_decisions.py --decisions-file", "--expect-profile <profile>",
+                 '--ops-out', 'curate "$ROOT" --ops-file', '{"status": "expired"}', "Never read it by hand"):
+        assert step in page, step
+
+
+def test_2g_page_records_for_the_saved_identity_and_reports_who():
+    page = _2g_page()
+    assert "identity card" in page and "before rendering" in page
+    assert '--signer "<reviewer_email>" --role "<reviewer_role>"' in page
+    # what was recorded, and for whom, the way the other saving pages report back
+    assert "as yours (<reviewer_email>)" in page
+    assert "is said back and not applied" in page
+    assert "blank is undecided" in page.lower()
+
+
+def test_2g_page_rows_are_the_three_kinds_with_their_choices():
+    page = _2g_page()
+    for choice in ("**Ask each time**", "**Don't know**", "**Hide this column**", "**Both are in use**",
+                   "sample values", "the build's guess"):
+        assert choice in page, choice
+
+
 # --- pages that save their own decisions (#651) -------------------------------------------------
 
 
