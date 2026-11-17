@@ -341,6 +341,7 @@ below corresponds to one such version.
 - Suggested "average days" metrics keep the fraction of a day. Some warehouses, Redshift among them, average whole numbers to a whole number, so 2.7 days read as 2.
 - A table measured at 5,000,000 rows or more reads as "at least 5,000,000 rows" in the receipt and in what Claude is told about the table, not as one exact number.
 - No metric is suggested on a record key that was removed from the model.
+- The table picker no longer unticks a table that exists only in two backup or staging schemas. Each was named a copy of the other, so a default save left the table out.
 - **A receipt names a `GROUP BY 1` grouping by what it groups.** A number built from a metric per group (an
   average of a per-day count) reported its grouping as `by: ["1"]`. A position is now read as the
   expression it points at in that query's own select list; when it points at nothing, or the list

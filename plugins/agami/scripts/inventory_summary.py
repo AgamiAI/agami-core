@@ -161,10 +161,12 @@ def noise_reason(table: str, schema: str = "", names: set[str] | None = None) ->
     return None
 
 
-def copy_of(t: dict, tables: list[dict]) -> str | None:
+def copy_of(t: dict, tables: list[dict], flagged: frozenset[int] = frozenset()) -> str | None:
     """The table a flagged table copies (`orders_bak` -> `sales.orders`), same schema first; None
     when no other table has its name without the markers. A table in a noise-named schema copies
-    the same-named table in another schema."""
+    the same-named table in another schema. A table that is itself flagged (`flagged`, by `id`) is
+    never the original: two backups of a table with no plain copy would each name the other, both
+    start unticked, and the table would drop out of a default save."""
     schema = t.get("schema") or ""
     base = _base(t["table"])
     if base is None:
@@ -172,7 +174,8 @@ def copy_of(t: dict, tables: list[dict]) -> str | None:
             return None
         base = _words(t["table"])
     key = _norm(base)
-    hits = [o for o in tables if o is not t and _norm(_words(o["table"])) == key]
+    hits = [o for o in tables
+            if o is not t and id(o) not in flagged and _norm(_words(o["table"])) == key]
     hits.sort(key=lambda o: (o.get("schema") or "") != schema)
     return _qualified(hits[0]) if hits else None
 
@@ -210,10 +213,12 @@ def summarise(inventory: dict) -> dict:
     shown, rest = ranked[:MAX_SCHEMA_ROWS], ranked[MAX_SCHEMA_ROWS:]
     names = {_norm(_words(t["table"])) for t in tables}
     noise, by_pattern = [], {}
+    reasons = {id(t): noise_reason(t["table"], t.get("schema") or "", names) for t in tables}
+    flagged = frozenset(k for k, why in reasons.items() if why)
     for t in tables:
-        why = noise_reason(t["table"], t.get("schema") or "", names)
+        why = reasons[id(t)]
         if why:
-            noise.append({"table": _qualified(t), "why": why, "copy_of": copy_of(t, tables)})
+            noise.append({"table": _qualified(t), "why": why, "copy_of": copy_of(t, tables, flagged)})
             key = why.split("'")[1] if "'" in why else "date or year"
             by_pattern[key] = by_pattern.get(key, 0) + 1
     return {
@@ -430,9 +435,11 @@ def picker_rows(inventory: dict) -> list[dict]:
     column count, row estimate (None when the catalog keeps none) and, for a likely copy, why."""
     tables = inventory.get("tables") or []
     names = {_norm(_words(t["table"])) for t in tables}
+    reasons = {id(t): noise_reason(t["table"], t.get("schema") or "", names) for t in tables}
+    flagged = frozenset(k for k, why in reasons.items() if why)
     rows = []
     for n, t in enumerate(_in_list_order(tables), 1):
-        why = noise_reason(t["table"], t.get("schema") or "", names)
+        why = reasons[id(t)]
         rows.append(
             {
                 "n": n,
@@ -442,7 +449,7 @@ def picker_rows(inventory: dict) -> list[dict]:
                 "columns": len(t.get("columns") or []),
                 "rows": t.get("rows") if isinstance(t.get("rows"), int) else None,
                 "why": why,
-                "copy_of": copy_of(t, tables) if why else None,
+                "copy_of": copy_of(t, tables, flagged) if why else None,
             }
         )
     return rows
