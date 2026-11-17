@@ -35,6 +35,8 @@ from semantic_model import introspect as INTRO  # noqa: E402
 
 from test_build_profile import PROFILE, _run, _write_model  # noqa: E402
 
+_REAL_RUN = subprocess.run
+
 
 @pytest.fixture
 def model(tmp_path, monkeypatch):
@@ -59,11 +61,24 @@ def _build_argv(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         seen.append(cmd)
         return _Done()
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    INTRO.make_execute_sql_runner(PROFILE, building_the_model=True)("SELECT id FROM orders")
-    monkeypatch.undo()
+    # A scoped context, not `monkeypatch.undo()`: undo would also revert conftest's HOME isolation.
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "run", fake_run)
+        INTRO.make_execute_sql_runner(PROFILE, building_the_model=True)("SELECT id FROM orders")
     (cmd,) = seen
     return cmd
+
+
+def test_capturing_the_build_argv_keeps_the_suite_away_from_the_real_home(monkeypatch):
+    """The capture undoes only its own stub: the suite's `HOME` isolation in `conftest.py` stays on,
+    so the real child started next cannot migrate a developer's `~/.agami` or rewrite their pointer."""
+    home, profile = os.environ["HOME"], os.environ.get("USERPROFILE")
+
+    _build_argv(monkeypatch)
+
+    assert os.environ["HOME"] == home
+    assert os.environ.get("USERPROFILE") == profile
+    assert subprocess.run is _REAL_RUN
 
 
 def test_a_build_statement_never_imports_the_runtime(tmp_path, monkeypatch):
