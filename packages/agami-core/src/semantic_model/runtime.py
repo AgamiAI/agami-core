@@ -11224,9 +11224,49 @@ def _match_output_column(oc: OutputColumn, unread: bool,
     else:
         status = UNMATCHED
     reason = None if status != UNDETERMINED else (_WHY_UNREAD if unread else _WHY_UNREADABLE)
+    if status in (UNMATCHED, COMPUTED_DIFFERENTLY) and aggregating:
+        reason = _repeat_reason(reduced, read_tables, by_binding, tr.tidx)
     return _ColumnMatch(status, None, missing=tuple(missing),
                         missing_tables=tuple(lacking_tables), reason=reason,
                         aggregating=aggregating)
+
+
+_WHY_ROWS_REPEAT = ("counts rows; each record appears several times on this table; the agreed "
+                    "metric counts each record once")
+
+
+def _distinct_count_of(node: "exp.Expression | None") -> "str | None":
+    """The folded column a `COUNT(DISTINCT col)` counts, or None for any other shape."""
+    if not isinstance(node, exp.Count) or not isinstance(node.this, exp.Distinct):
+        return None
+    cols = node.this.expressions
+    return _tkey(cols[0].name) if len(cols) == 1 and isinstance(cols[0], exp.Column) else None
+
+
+def _repeat_reason(reduced: "exp.Expression", read_tables: set, by_binding: dict,
+                   tidx: "dict | None") -> "str | None":
+    """Why a row count is not the agreed record count, when the model records it: the number counts
+    rows (`COUNT(*)`, or a COUNT of a column without DISTINCT) over ONE table whose rows the model
+    says repeat per record (its repeat caveat, `build.repeated_key`), and a metric over that table
+    counts `COUNT(DISTINCT <that key>)`. None otherwise — the existing reason stands."""
+    from .build import repeated_key
+
+    count = _peeled(reduced.copy())[0]
+    if not isinstance(count, exp.Count) or isinstance(count.this, exp.Distinct) \
+            or len(read_tables) != 1 or not tidx:
+        return None
+    (table,) = read_tables
+    info = tidx.get(table)
+    repeat = repeated_key(info[0]) if info is not None else None
+    if repeat is None:
+        return None
+    key = _tkey(repeat[0].split(".")[-1])
+    for cands in by_binding.values():
+        for cand in cands:
+            if ({_tkey(_bare(s)) for s in (cand.metric.source_tables or [])} == {table}
+                    and _distinct_count_of(cand.peeled[0]) == key):
+                return _WHY_ROWS_REPEAT
+    return None
 
 
 def _arms_contributing(tree: "exp.Expression", columns: list, results: list) -> list:

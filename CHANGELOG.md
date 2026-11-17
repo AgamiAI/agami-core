@@ -351,6 +351,13 @@ below corresponds to one such version.
   <column>". Both are null when there is one link, or when the links cannot be told apart by
   their columns.
 
+- **A row count on a table whose rows repeat says so.** `COUNT(*)` (or a COUNT without DISTINCT)
+  over a table the model records as repeating each record on several rows, where the agreed metric
+  counts `COUNT(DISTINCT <key>)` on it, now carries the reason "counts rows; each record appears
+  several times on this table; the agreed metric counts each record once". Read from the repeat
+  fact a build writes on the table; without it the item is unchanged. Reconcile reports such a row
+  as open with that reason, never as a gap or a count by design.
+
 - **`sm introspect` says why the database couldn't be used.** A credentials profile missing its
   password read every table, got no columns, and ended with "every name yielded zero columns. Check
   the --tables list", pointing at shell quoting. A failure about the connection (missing

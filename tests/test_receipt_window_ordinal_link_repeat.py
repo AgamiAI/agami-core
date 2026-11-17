@@ -28,9 +28,15 @@ PKG_SRC = REPO_ROOT / "packages" / "agami-core" / "src"
 if str(PKG_SRC) not in sys.path:
     sys.path.insert(0, str(PKG_SRC))
 
+from semantic_model import build  # noqa: E402
+from semantic_model import loader as L  # noqa: E402
 from semantic_model import runtime as rt  # noqa: E402
 
-from test_ace178_metrics_traced_through_steps import _org  # noqa: E402
+from test_ace178_metrics_traced_through_steps import (  # noqa: E402
+    ALL_METRICS,
+    _org,
+    _write_model,
+)
 from test_ace178_receipt_audit_fixes import _audit, _rel  # noqa: E402
 
 
@@ -253,3 +259,55 @@ def test_an_undeclared_join_names_no_link(tmp_path):
     item = _join(org, "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.status")
     assert item["status"] != rt.DECLARED
     assert (item["via"], item["summary"]) == (None, None)
+
+
+# --- 4. a row count on a table whose rows repeat per record -------------------------------------
+
+
+def _repeating(tmp_path, caveat: "str | None"):
+    root = tmp_path / "rep"
+    root.mkdir()
+    _write_model(root, ALL_METRICS)
+    path = root / "subject_areas" / "s" / "tables" / "incidents.yaml"
+    doc = yaml.safe_load(path.read_text())
+    if caveat:
+        doc["caveats"] = [caveat]
+    path.write_text(yaml.safe_dump(doc))
+    return L.load_datasource(root)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT COUNT(*) AS v FROM incidents",
+        "SELECT month, COUNT(number) AS v FROM incidents GROUP BY month",
+        "SELECT COUNT(state) AS v FROM incidents",
+    ],
+    ids=["count-star", "count-key", "count-other-column"],
+)
+def test_a_row_count_on_a_repeating_table_says_why_it_is_not_the_metric(tmp_path, sql):
+    org = _repeating(tmp_path, build.repeat_caveat("number", 4.0))
+    item = _one(org, sql, "v")
+    assert item["status"] in (rt.UNMATCHED, rt.COMPUTED_DIFFERENTLY)
+    assert item["reason"] == (
+        "counts rows; each record appears several times on this table; "
+        "the agreed metric counts each record once"
+    )
+
+
+def test_without_the_recorded_repeat_the_reason_is_unchanged(tmp_path):
+    org = _repeating(tmp_path, None)
+    item = _one(org, "SELECT COUNT(*) AS v FROM incidents", "v")
+    assert (item["status"], item["reason"]) == (rt.UNMATCHED, None)
+
+
+def test_a_repeat_on_another_key_says_nothing(tmp_path):
+    """The repeat is per `month`, the metric counts distinct `number`: not the fact to state."""
+    org = _repeating(tmp_path, build.repeat_caveat("month", 4.0))
+    assert _one(org, "SELECT COUNT(*) AS v FROM incidents", "v")["reason"] is None
+
+
+def test_a_distinct_count_on_a_repeating_table_still_matches(tmp_path):
+    org = _repeating(tmp_path, build.repeat_caveat("number", 4.0))
+    item = _one(org, "SELECT COUNT(DISTINCT number) AS v FROM incidents", "v")
+    assert (item["status"], item["name"], item["reason"]) == (rt.MATCHED, "incident_count", None)

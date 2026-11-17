@@ -1309,6 +1309,11 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
             # the output aggregates; an older receipt without the key is read through the
             # pre-flight, which lists the statement's aggregates.
             continue
+        elif status in ("unmatched", "computed_differently") and item.get("reason"):
+            # The receipt says why this is not the metric (a row count on a table whose rows
+            # repeat per record): neither a gap in the semantic model nor a count by design.
+            rows.append(_part(f"metric:{column}", UNRESOLVED, evidence={"column": column, "status": status},
+                              note="not the defined metric: " + str(item["reason"])))
         elif status == "computed_differently":
             # A declared metric reads the same columns and is written differently (#655). Neither a
             # match nor a gap: the two were not compared, so it is not judged either way.

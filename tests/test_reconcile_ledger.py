@@ -1154,6 +1154,18 @@ def test_a_number_built_from_a_metric_is_open_and_says_how():
     assert "built from the metric 'total_sales': avg of it per opened" in row["note"]
 
 
+def test_an_unmatched_count_with_a_reason_is_open_and_says_why():
+    """A row count on a table whose rows repeat per record is neither a gap nor a count by design."""
+    reason = ("counts rows; each record appears several times on this table; the agreed metric "
+              "counts each record once")
+    receipt = {"columns": {"items": [{"kind": "output", "column": "n", "status": "unmatched",
+                                      "aggregate": True, "reason": reason}]},
+               "tables": {"items": [{"qname": "incidents"}]}}
+    [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "COUNT(*)"}]})
+    assert (row["part"], row["verdict"]) == ("metric:n", "unresolved")
+    assert row["note"] == "not the defined metric: " + reason
+
+
 def test_a_built_from_number_whose_grouping_could_not_be_read_says_so():
     """A null `by` (a `GROUP BY <position>` pointing at nothing) is never shown as a grouping."""
     receipt = {"columns": {"items": [{"kind": "output", "column": "a", "status": "unmatched",
