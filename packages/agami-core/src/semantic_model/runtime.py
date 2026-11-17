@@ -46,6 +46,7 @@ exposure. So the analysis stays, and both the authoring and the refusing go.
 
 from __future__ import annotations
 
+import contextvars
 import decimal
 import functools
 import re
@@ -211,8 +212,8 @@ def _quote_ambiguous(sql: str, dialect: "str | None", tree: "exp.Expression | No
         # judge. Deliberately the permissive branch, and narrow: the statement still has to pass
         # every scope gate on that reading.
         return False
-    native_cols = {c.name.lower() for c in tree.find_all(exp.Column)}
-    ansi_cols = {c.name.lower() for c in ansi.find_all(exp.Column)}
+    native_cols = {c.name.lower() for c in _find_all(tree, exp.Column)}
+    ansi_cols = {c.name.lower() for c in _find_all(ansi, exp.Column)}
     return bool(ansi_cols - native_cols)
 
 
@@ -268,6 +269,67 @@ def _parse_reporting(
         return None, "the statement could not be parsed as SQL for this datasource's engine"
     except Exception:
         return None, "the statement could not be read"
+
+
+# The statement tree `assemble_receipt` is reading, walked once: (root, its nodes in `find_all`'s
+# breadth-first order, node kinds -> the nodes of those kinds, `_per_statement`'s answers). The
+# receipt's sections each ask the whole tree for its CTEs, tables, joins or columns, some of them
+# several times — about forty walks of a 50,000-character statement, most of the receipt's cost.
+# Every analysis copies before it rewrites, so the tree does not change while the receipt is
+# assembled, and a walk's answer is the same the second time. Only that one tree, and only during
+# that one call: any other node, or the same tree read outside the call, is walked as before. A
+# context variable, so two requests on two threads never read each other's statement.
+_WALK_INDEX: "contextvars.ContextVar[tuple | None]" = contextvars.ContextVar(
+    "_walk_index", default=None)
+
+
+def _find_all(node: "exp.Expression", *kinds: type) -> "Iterator[exp.Expression]":
+    """`node.find_all(*kinds)`, read from `_WALK_INDEX` when `node` is the tree it holds."""
+    index = _WALK_INDEX.get()
+    if index is None or index[0] is not node:
+        return node.find_all(*kinds)
+    found = index[2].get(kinds)
+    if found is None:
+        found = index[2][kinds] = tuple(n for n in index[1] if isinstance(n, kinds))
+    return iter(found)
+
+
+def _find(node: "exp.Expression", *kinds: type) -> "exp.Expression | None":
+    """`node.find(*kinds)`, the first node `_find_all` yields."""
+    return next(_find_all(node, *kinds), None)
+
+
+def _has(node: "exp.Expression", *kinds: type) -> bool:
+    """`node.find(*kinds) is not None`, without the breadth-first walk's per-node generators."""
+    index = _WALK_INDEX.get()
+    if index is not None and index[0] is node:
+        return _find(node, *kinds) is not None
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, kinds):
+            return True
+        for value in cur.args.values():
+            if isinstance(value, exp.Expression):
+                stack.append(value)
+            elif isinstance(value, list):
+                stack.extend(v for v in value if isinstance(v, exp.Expression))
+    return False
+
+
+def _per_statement(kind: Any, node: "exp.Expression", compute: Callable) -> Any:
+    """`compute(node)`, remembered for the call `_WALK_INDEX` covers. The entry keeps `node` itself,
+    so an id a later node reuses never reads another node's answer."""
+    index = _WALK_INDEX.get()
+    if index is None:
+        return compute(node)
+    key = (kind, id(node))
+    hit = index[3].get(key)
+    if hit is not None and hit[0] is node:
+        return hit[1]
+    found = compute(node)
+    index[3][key] = (node, found)
+    return found
 
 
 def _why_unreadable(
@@ -400,7 +462,7 @@ def check_readable(
         )
     # A statement with no FROM (`SELECT 1`) reads nothing and is left alone; one that reads from
     # something and names no table cannot be attributed to the declared surface at all.
-    if tree.find(exp.From) is not None and tree.find(exp.Table) is None:
+    if _has(tree, exp.From) and not _has(tree, exp.Table):
         return guardrail.refuse(
             guardrail.RULE_UNSCOPABLE,
             detail="the query reads from a source that resolves to no named table",
@@ -457,7 +519,7 @@ _INFORMATION_SCHEMA_STRUCTURE = frozenset({
 def _expands_a_column(node: "exp.Expression | None") -> bool:
     """A profiling table function over a column: on the list, naming a column, and holding no
     subquery that could read some other table's rows."""
-    if node is None or node.find(exp.Column) is None or node.find(exp.Select) is not None:
+    if node is None or not _has(node, exp.Column) or _has(node, exp.Select):
         return False
     if isinstance(node, exp.Unnest):
         name = "unnest"
@@ -549,12 +611,12 @@ def _bare_column_beside_a_model_table(tree: "exp.Expression", org: Datasource,
     sidx = ctx.schema_index if ctx is not None and ctx.schema_index is not None else _schema_index(org)
     dialect = ctx.dialect if ctx is not None else _dialect_of(org)[0]
     cte_refs = _cte_references(tree)
-    named = [t for t in tree.find_all(exp.Table) if t.name and id(t) not in cte_refs]
+    named = [t for t in _find_all(tree, exp.Table) if t.name and id(t) not in cte_refs]
     catalog = any(_is_catalog_relation(t, dialect) for t in named)
     declared = any(isinstance(_resolve_table(sidx, t), tuple) for t in named
                    if not _is_catalog_relation(t, dialect))
-    expands = (any(not t.name for t in tree.find_all(exp.Table))
-               or tree.find(exp.Lateral, exp.Unnest) is not None)
+    expands = (any(not t.name for t in _find_all(tree, exp.Table))
+               or _has(tree, exp.Lateral, exp.Unnest))
     if not declared:
         return None
     if catalog:
@@ -567,7 +629,7 @@ def _bare_column_beside_a_model_table(tree: "exp.Expression", org: Datasource,
                    "together: which of them a column is read from cannot be checked",
             remediation="Run the catalog read and the model table read as two statements.",
         )
-    if tree.find(exp.Columns) is not None:
+    if _has(tree, exp.Columns):
         # DuckDB's COLUMNS() picks columns by pattern, so column scope never sees their names.
         return guardrail.refuse(
             guardrail.RULE_UNSCOPABLE,
@@ -575,7 +637,7 @@ def _bare_column_beside_a_model_table(tree: "exp.Expression", org: Datasource,
             remediation="Name each column (alias.column), then run it again.",
         )
     bindings = _cte_bindings(tree)
-    dotted = sorted({".".join(p.name for p in c.parts) for c in tree.find_all(exp.Column)
+    dotted = sorted({".".join(p.name for p in c.parts) for c in _find_all(tree, exp.Column)
                      if c.table and _unsourced_qualifier(c, bindings, dialect)})
     if dotted:
         return guardrail.refuse(
@@ -586,7 +648,7 @@ def _bare_column_beside_a_model_table(tree: "exp.Expression", org: Datasource,
         )
     if not expands:
         return None
-    bare = sorted({c.name for c in tree.find_all(exp.Column)
+    bare = sorted({c.name for c in _find_all(tree, exp.Column)
                    if c.name and not c.table and not _ordered_by_own_alias(c, dialect)
                    and not _bound_by_expansion(c, dialect)})
     if not bare:
@@ -644,7 +706,7 @@ def _unsourced_qualifier(col: "exp.Column", cte_refs: dict, dialect: "str | None
 def _implicit_join_columns(tree: "exp.Expression") -> "guardrail.Refusal | None":
     """Under the build profile, a `USING` or `NATURAL` join reads columns the statement never names,
     so column scope cannot see them (#523)."""
-    for join in tree.find_all(exp.Join):
+    for join in _find_all(tree, exp.Join):
         if join.args.get("using") or (join.method or "").upper() == "NATURAL":
             return guardrail.refuse(
                 guardrail.RULE_UNSCOPABLE,
@@ -709,12 +771,12 @@ def check_scopable(sql: str, org: Datasource,
     tree = ctx.tree if ctx is not None else _parse_sql(sql, _dialect_of(org)[0])
     # An unparseable statement and a non-SELECT are both somebody else's refusal — `check_readable`
     # above and the read-only guard respectively. Passing here says nothing about them.
-    if tree is None or tree.find(exp.Select) is None:
+    if tree is None or not _has(tree, exp.Select):
         return None
     # A table function and `ROWS FROM` parse to an `exp.Table` whose name is empty, the function
     # sitting in `.this`. Checked first because it is the shape the two gates above each look
     # straight through.
-    for tbl in tree.find_all(exp.Table):
+    for tbl in _find_all(tree, exp.Table):
         if not tbl.name and not (build_profile and _expands_a_column(tbl.this)):
             return _unscopable(
                 "a FROM/JOIN source is a table function rather than a named table, so there is "
@@ -722,7 +784,7 @@ def check_scopable(sql: str, org: Datasource,
             )
     # sqlglot attaches a LATERAL under the From/Join for Postgres' `LATERAL (...)` and as a Select
     # property for Hive's `LATERAL VIEW`, so sweep the whole tree rather than the sources alone.
-    for lateral in tree.find_all(exp.Lateral):
+    for lateral in _find_all(tree, exp.Lateral):
         if not (build_profile and _expands_a_column(lateral.this)):
             return _unscopable(
                 "a FROM/JOIN source is a LATERAL rather than a named table, so there is nothing to "
@@ -735,7 +797,7 @@ def check_scopable(sql: str, org: Datasource,
     # an arm reading a table would. Found by review, and it executed against a real engine with all
     # three gates silent. A read-only SELECT over declared tables carries no `Values` node —
     # `IN (1, 2, 3)` is an `exp.In` over expressions, not this — so the sweep costs no false refusal.
-    if tree.find(exp.Values) is not None:
+    if _has(tree, exp.Values):
         return _unscopable(
             "the query builds rows from a VALUES list rather than reading a named table, so there "
             "is nothing to check against the declared surface"
@@ -743,7 +805,7 @@ def check_scopable(sql: str, org: Datasource,
     # Every remaining non-`Table`, non-derived-subquery source. `From.expressions` carries the extra
     # sources of a comma-join on the sqlglot versions that do not normalize them into a `Join`, so a
     # declared table written first cannot shield what follows it.
-    for node in tree.find_all(exp.From, exp.Join):
+    for node in _find_all(tree, exp.From, exp.Join):
         for src in [node.this, *(node.args.get("expressions") or [])]:
             if build_profile and isinstance(src, exp.Lateral) and _expands_a_column(src.this):
                 continue
@@ -785,7 +847,7 @@ def statement_shape(ctx: "GuardContext | None") -> "str | None":
     """
     if ctx is None or ctx.tree is None:
         return None
-    return "aggregate" if ctx.tree.find(exp.Group) is not None else "listing"
+    return "aggregate" if _has(ctx.tree, exp.Group) else "listing"
 
 
 # A table this large is worth narrowing before it is scanned. The same line introspection draws for
@@ -875,7 +937,7 @@ def _outer_joins(tree: "exp.Expression") -> "Iterator[tuple[exp.Table, list[exp.
     joins carry a side too but are not outer joins."""
     budget = _SCAN_MAX_PAIRS
     ctes = _cte_references(tree)  # a CTE reference is an `exp.Table` too, but not a plain table
-    for sel in tree.find_all(exp.Select):
+    for sel in _find_all(tree, exp.Select):
         frm = sel.args.get("from_") or sel.args.get("from")  # sqlglot 30 keys FROM as `from_`
         seen: list["exp.Expression"] = [frm.this] if frm is not None else []
         for join in sel.args.get("joins") or []:
@@ -1487,7 +1549,7 @@ def _direct_from_tables(tree: "exp.Select") -> set[str]:
     subquery) — the tables a bare `*` would expand. A table is "direct" iff its
     nearest enclosing SELECT is `tree` itself."""
     names: set[str] = set()
-    for tbl in tree.find_all(exp.Table):
+    for tbl in _find_all(tree, exp.Table):
         anc = tbl.parent
         while anc is not None and not isinstance(anc, exp.Select):
             anc = anc.parent
@@ -1598,7 +1660,7 @@ def _projected_sensitive(tree, org: Datasource,
     # A set operation (UNION/INTERSECT/EXCEPT) parses to exp.SetOperation, not
     # exp.Select — gate on "contains a SELECT" and scan every OUTPUT-bearing arm, else
     # `… UNION SELECT ssn FROM customers` would project a sensitive column past this gate.
-    if tree is None or tree.find(exp.Select) is None:
+    if tree is None or not _has(tree, exp.Select):
         return []
 
     offending: set[str] = set()
@@ -1607,7 +1669,7 @@ def _projected_sensitive(tree, org: Datasource,
         direct = _direct_from_tables(sel)
         for proj in sel.expressions:
             # (a) a raw projection of a sensitive column, not protected by COUNT
-            for col in proj.find_all(exp.Column):
+            for col in _find_all(proj, exp.Column):
                 if _tkey(col.name) not in folded_names or _count_protects(col):
                     continue
                 if col.table:
@@ -1827,7 +1889,7 @@ def _cte_names(tree: "exp.Expression") -> set[str]:
     shadows a declared table (`WITH orders AS (…)`) would otherwise be reported as declared and
     credited with the real table's row estimate, which is a fact about a table nothing read.
     """
-    return {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
+    return {c.alias_or_name.lower() for c in _find_all(tree, exp.CTE)}
 
 
 def _identifier_key(ident: object) -> Optional[tuple[bool, str]]:
@@ -1880,6 +1942,11 @@ def _cte_references(tree: "exp.Expression") -> set[int]:
 
 
 def _cte_bindings(tree: "exp.Expression") -> "dict[int, exp.CTE]":
+    """`_walked_cte_bindings(tree)`, walked once per statement (`_per_statement`)."""
+    return dict(_per_statement("cte_bindings", tree, _walked_cte_bindings))
+
+
+def _walked_cte_bindings(tree: "exp.Expression") -> "dict[int, exp.CTE]":
     """Each `exp.Table` node (by id) that names a CTE VISIBLE where it is written -> that CTE.
 
     The scope gates used to skip every table whose name ANY WITH bound, anywhere in the statement,
@@ -2110,7 +2177,7 @@ def check_table_scope(sql: str, org: Datasource,
     # so gate on "contains a SELECT" rather than "is a SELECT" — otherwise every
     # set-operation arm would bypass the guard. A non-SELECT statement has no SELECT
     # node and still degrades to allow (the upstream read-only guard owns those).
-    if tree is None or tree.find(exp.Select) is None:
+    if tree is None or not _has(tree, exp.Select):
         return None
 
     sidx = (ctx.schema_index if ctx is not None and ctx.schema_index is not None
@@ -2122,7 +2189,7 @@ def check_table_scope(sql: str, org: Datasource,
     offending: set[str] = set()
     ambiguous: dict[str, str] = {}  # folded name -> the caller's first spelling, for the echo
     defaulted: set[str] = set()
-    for tbl in tree.find_all(exp.Table):
+    for tbl in _find_all(tree, exp.Table):
         name = tbl.name
         if not name or id(tbl) in cte_refs:
             continue  # a CTE an enclosing WITH defines, not a physical table
@@ -2193,7 +2260,7 @@ def check_catalog_scope(sql: str, org: Datasource,
     sidx, decls = _schema_index(org), _table_decls(org)
     cte_refs = _cte_references(tree)
     offending: set[str] = set()
-    for tbl in tree.find_all(exp.Table):
+    for tbl in _find_all(tree, exp.Table):
         written = tbl.args.get("catalog")
         if written is None or not tbl.name or id(tbl) in cte_refs:
             continue
@@ -2282,9 +2349,9 @@ def check_no_select_star(sql: str,
         tree = ctx.tree
     else:
         tree = _parse_sql(sql, dialect)
-    if tree is None or tree.find(exp.Select) is None:
+    if tree is None or not _has(tree, exp.Select):
         return None
-    for select in tree.find_all(exp.Select):
+    for select in _find_all(tree, exp.Select):
         for proj in select.expressions:
             if isinstance(proj, exp.Star) or (isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star)):
                 # Wholly static text — this refusal names no identifier at all, because the
@@ -2312,14 +2379,14 @@ def _star_expansion_refusal(tree: "exp.Expression") -> "guardrail.Refusal | None
     """Refuse the star's other spellings anywhere in the tree: DuckDB's `COLUMNS()`, and a `*` passed
     to any call but COUNT (Snowflake `OBJECT_CONSTRUCT(*)`, Oracle `JSON_OBJECT(*)`, Databricks
     `struct(*)`). Each returns columns the statement never names (#615)."""
-    if tree.find(exp.Columns) is not None:
+    if _has(tree, exp.Columns):
         return guardrail.refuse(
             guardrail.RULE_SELECT_STAR,
             detail="query uses COLUMNS() — it returns columns the statement never names, so they "
                    "cannot be checked against the semantic model.",
             remediation="List the columns explicitly instead of COLUMNS(), naming each one.",
         )
-    for star in tree.find_all(exp.Star):
+    for star in _find_all(tree, exp.Star):
         arg = star.parent if isinstance(star.parent, exp.Column) else star
         # Only COUNT is exempt: another aggregate (OBJECT_AGG, ARRAY_AGG) can return the values.
         if isinstance(arg.parent, exp.Count):
@@ -2382,7 +2449,7 @@ def check_column_scope(sql: str, org: Datasource,
         return None
     dialect = ctx.dialect if ctx is not None else _dialect_of(org)[0]
     tree = ctx.tree if ctx is not None else _parse_sql(sql, dialect)
-    if tree is None or tree.find(exp.Select) is None:
+    if tree is None or not _has(tree, exp.Select):
         return None
 
     # The table-scope resolver, so a reference that gate refuses never binds a column here either.
@@ -2452,7 +2519,7 @@ def check_column_scope(sql: str, org: Datasource,
     source_cols: dict[int, set[str]] = {}            # id(select) -> {column a non-physical source names}
     output_by_select: dict[int, set[str]] = {}       # id(select) -> {select-list output alias}
     groups_by_select: dict[int, list] = {}           # id(select) -> leaves of each FROM / JOIN item
-    for tbl in tree.find_all(exp.Table):
+    for tbl in _find_all(tree, exp.Table):
         name = (tbl.name or "").lower()
         if not name:
             continue
@@ -2558,7 +2625,7 @@ def check_column_scope(sql: str, org: Datasource,
                 bind_alias(id(sel), w.alias.lower(), _JoinAlias(leaves), (w.args["alias"].this,))
         return leaves
 
-    for sel in tree.find_all(exp.Select):
+    for sel in _find_all(tree, exp.Select):
         groups = [leaves_of(sel, src) for src in _from_sources(sel)]
         groups_by_select[id(sel)] = groups
         judge_joins(sel, sel.args.get("joins") or [], groups)
@@ -2570,7 +2637,7 @@ def check_column_scope(sql: str, org: Datasource,
         output_by_select[id(sel)] = {e.alias.lower() for e in sel.expressions
                                      if isinstance(e, exp.Alias) and e.alias}
 
-    for col in tree.find_all(exp.Column):
+    for col in _find_all(tree, exp.Column):
         name = col.name
         if not name:
             continue
@@ -2832,7 +2899,7 @@ def pre_flight_check(sql: str, org: Datasource,
     tree = ctx.tree if ctx is not None else _parse_sql(sql, _dialect_of(org)[0])
     if tree is None:
         return PreFlightResult(unchecked=UNCHECKED_UNPARSEABLE)
-    if tree.find(exp.Select) is None:
+    if not _has(tree, exp.Select):
         return PreFlightResult(unchecked=UNCHECKED_NO_SELECT)
     try:
         reports = _aggregate_reports(tree, org, ctx=ctx)
@@ -2873,7 +2940,7 @@ def _aggregate_reports(tree, org: Datasource,
     parsed STATEMENT is regenerated anywhere, and this walk is where the last one lived. An
     aggregate's label is a fragment serialized for the receipt, which rebinds nothing and runs
     nothing; see `_aggregate_sites`."""
-    if tree is None or tree.find(exp.Select) is None:
+    if tree is None or not _has(tree, exp.Select):
         return []
     suffixes = _arm_suffixes(tree)
     # Which names the analysis can actually see behind: a table the MODEL declares, minus any name
@@ -3475,14 +3542,14 @@ def _row_source(cte: "exp.CTE", smemo: dict) -> "exp.Table | None":
     if any(value and arg not in _GRAIN_PRESERVING_SELECT_ARGS
            for arg, value in body.args.items()):
         return None
-    if body.find(exp.AggFunc) is not None:
+    if _has(body, exp.AggFunc):
         return None
     frm = body.args.get("from_") or body.args.get("from")
     if not isinstance(frm, exp.From) or not isinstance(frm.this, exp.Table):
         return None
     if frm.this.args.get("pivots") or _alias_columns(frm.this):
         return None
-    if len(list(body.find_all(exp.Table))) != 1:
+    if len(list(_find_all(body, exp.Table))) != 1:
         return None
     if not body.expressions or not all(_passed_on(proj) for proj in body.expressions):
         return None
@@ -3860,7 +3927,7 @@ def _semi_additive_columns(org: Datasource) -> dict[tuple[str, str], "Metric"]:
             frag = _parse_sql(binding, dialect)
             if frag is None:
                 continue
-            for agg in frag.find_all(exp.Sum):
+            for agg in _find_all(frag, exp.Sum):
                 col = _bare_aggregate_column(agg)
                 if col is None:
                     continue
@@ -3880,7 +3947,7 @@ def _groups_by_time(tree: "exp.Select", scope: dict[str, str],
     grp = tree.args.get("group")
     if not grp:
         return False
-    for col in grp.find_all(exp.Column):
+    for col in _find_all(grp, exp.Column):
         c = _lookup_column(col, scope, colidx)
         if c and (c.type in ("date", "timestamp", "time") or c.date_format):
             return True
@@ -4130,7 +4197,7 @@ def _aggregates_marker(tree, reports: list[AggregateReport],
     output_ids = {id(agg) for agg in output}
     in_filter_or_sort = False
     in_nested_scope = False
-    for agg in tree.find_all(exp.AggFunc):
+    for agg in _find_all(tree, exp.AggFunc):
         if id(agg) in output_ids:
             continue
         if _within(agg, (exp.Having, exp.Order)):
@@ -4364,6 +4431,20 @@ def _pins(model_version: Optional[str]) -> dict[str, Any]:
     return {"model_version": model_version, "agami_core_version": guardrail.core_version()}
 
 
+def _walked_once(assemble: Callable) -> Callable:
+    """`assemble` with the statement tree it parses walked once for the whole call (`_WALK_INDEX`),
+    and forgotten when it returns."""
+    @functools.wraps(assemble)
+    def run(*args: Any, **kwargs: Any) -> Any:
+        token = _WALK_INDEX.set(None)
+        try:
+            return assemble(*args, **kwargs)
+        finally:
+            _WALK_INDEX.reset(token)
+    return run
+
+
+@_walked_once
 def assemble_receipt(
     org: Datasource,
     sql: str,
@@ -4419,6 +4500,7 @@ def assemble_receipt(
     if tree is None:
         return {**_pins(model_version),
                 **_undetermined_sections(UNDETERMINED_UNPARSEABLE)}
+    _WALK_INDEX.set((tree, tuple(tree.find_all(exp.Expression)), {}, {}))
 
     scope = _alias_map(tree)                  # alias/name -> bare table name
     cte_names = _cte_names(tree)
@@ -4563,7 +4645,7 @@ def assemble_receipt(
     # Whether the statement names a sensitive column anywhere: then a condition holding a subquery has
     # its values withheld too (`_withholds`).
     statement_sensitive = any(_tkey(col.name) in sensitive_names
-                              for col in tree.find_all(exp.Column))
+                              for col in _find_all(tree, exp.Column))
     # Output items whose condition lists did not fit (by position), counted onto the marker rather
     # than the item.
     truncated: set[int] = set()
@@ -4720,7 +4802,7 @@ def assemble_receipt(
         return out
 
     ref_cols: set[tuple] = set()
-    for col in tree.find_all(exp.Column):
+    for col in _find_all(tree, exp.Column):
         if not col.name:
             continue
         # RESOLVE the reference to a table name first, and let `_declared_table` decide separately
@@ -5194,7 +5276,7 @@ def _reads_output_alias(col: "exp.Column", sel: "exp.Select", dialect: "str | No
             return False
         if isinstance(p, exp.Qualify) and p.parent is sel:
             return any(isinstance(e, exp.Alias) and e.alias.lower() == col.name.lower()
-                       and e.find(exp.Window) is not None for e in sel.expressions)
+                       and _has(e, exp.Window) for e in sel.expressions)
         p = p.parent
     return False
 
@@ -5469,7 +5551,7 @@ def _cte_body_scopes(root: "exp.Expression") -> dict[int, str]:
     alike; `_reference_sites` composes the two labels.
     """
     out: dict[int, str] = {}
-    for cte in root.find_all(exp.CTE):
+    for cte in _find_all(root, exp.CTE):
         if cte.this is None:
             continue
         name = cte.alias_or_name
@@ -5509,7 +5591,7 @@ def _arm_suffixes(root: "exp.Expression") -> dict[int, str]:
     reach the result: CTE bodies are disjoint, so each iteration writes only keys it alone owns.
     """
     out: dict[int, str] = {}
-    bodies = (cte.this for cte in root.find_all(exp.CTE) if cte.this is not None)
+    bodies = (cte.this for cte in _find_all(root, exp.CTE) if cte.this is not None)
     for scope_root in (root, *bodies):
         arms = _output_select_arms(scope_root)
         if len(arms) < 2:
@@ -5676,7 +5758,7 @@ def _reference_sites(node: "exp.Expression", *,
     # both that JOIN's `this` and a member of the walk above.
     bound: set[int] = set()
     sites: list[_RefSite] = []
-    for found in node.find_all(*walk):
+    for found in _find_all(node, *walk):
         if isinstance(found, exp.Table):
             ref_node: "exp.Expression" = found
         elif isinstance(found, _ROW_MULTIPLYING_SOURCES):
@@ -5854,8 +5936,13 @@ def _own_table_refs(sel: "exp.Select | None") -> list["exp.Table"]:
     """The table references THIS SELECT reads itself, in order, repeats kept (see `_own_alias_map`)."""
     if sel is None:
         return []
+    return list(_per_statement("own_table_refs", sel, _walked_table_refs))
+
+
+def _walked_table_refs(sel: "exp.Select") -> tuple:
+    """`_own_table_refs`, walked."""
     boundary = sel.walk(prune=lambda node: isinstance(node, exp.Select) and node is not sel)
-    return [tbl for tbl in boundary if isinstance(tbl, exp.Table)]
+    return tuple(tbl for tbl in boundary if isinstance(tbl, exp.Table))
 
 
 def _own_sources(sel: "exp.Select") -> list["exp.Expression"]:
@@ -5997,7 +6084,16 @@ def _origin_through(source: "exp.Expression", cname: str,
 
 
 def _column_origin(col: "exp.Column", depth: int = 0) -> Optional[tuple[str, str]]:
-    """(table, column) a column reads, resolved in the scope it was written in, or None."""
+    """(table, column) a column reads, resolved in the scope it was written in, or None.
+
+    Remembered for the call `_WALK_INDEX` covers: a step's column is followed once however many
+    arms read that step, not once per arm down the whole chain. The entry keeps the column itself,
+    so an id another node reuses later never reads this answer."""
+    return _per_statement(("column_origin", depth), col, lambda c: _followed_origin(c, depth))
+
+
+def _followed_origin(col: "exp.Column", depth: int) -> Optional[tuple[str, str]]:
+    """`_column_origin`, worked out."""
     chain = _enclosing_selects(col)
     if not chain:
         return None
@@ -6427,7 +6523,7 @@ def _join_sites(node: "exp.Expression", visible: set[str], limit: int,
     written = 0
     smemo = smemo if smemo is not None else {}
     reach: "_Reach | None" = None
-    for join in node.find_all(exp.Join):
+    for join in _find_all(node, exp.Join):
         written += 1
         if len(sites) >= limit:
             # Counted and nothing more. The walk still has to finish, because the number of joins
@@ -6450,7 +6546,7 @@ def _join_sites(node: "exp.Expression", visible: set[str], limit: int,
         left_src = frm.this if frm is not None else None
         if on is not None:
             names = {scope_map.get(col.table, col.table)
-                     for col in on.find_all(exp.Column) if col.table}
+                     for col in _find_all(on, exp.Column) if col.table}
             # A join reaches between two relations, so its ON names the right-hand one and at most
             # one other; zero others is the self-join, where both endpoints are that one relation.
             # A compound ON reaching back over several tables, or one naming no column at all, is a
@@ -6462,7 +6558,7 @@ def _join_sites(node: "exp.Expression", visible: set[str], limit: int,
             pinned = right in names and len(others) <= 1
             if pinned:
                 left = others[0] if others else right
-                quals = {col.table for col in on.find_all(exp.Column) if col.table
+                quals = {col.table for col in _find_all(on, exp.Column) if col.table
                          and scope_map.get(col.table, col.table) == left} - {join.this.alias_or_name}
                 left_src = (_pick_binding(_own_sources(sel), next(iter(quals)))
                             if len(quals) == 1 and sel is not None else None)
@@ -6568,7 +6664,7 @@ class _Reach:
                         continue
                     for child in value if isinstance(value, list) else [value]:
                         if isinstance(child, exp.Expression):
-                            for tbl in child.find_all(exp.Table):
+                            for tbl in _find_all(child, exp.Table):
                                 visits += 1
                                 cte = _cte_binding(tbl)
                                 if cte is not None:
@@ -6576,8 +6672,8 @@ class _Reach:
                 self.arms.append(("main" + suffixes.get(id(sel), ""), direct))
         self.every = frozenset(label for label, _ in self.arms)
         self.users: dict[int, set[int]] = {}       # id(step) -> the steps whose bodies read it
-        for cte in tree.find_all(exp.CTE):
-            for tbl in cte.this.find_all(exp.Table):
+        for cte in _find_all(tree, exp.CTE):
+            for tbl in _find_all(cte.this, exp.Table):
                 visits += 1
                 read = _cte_binding(tbl)
                 if read is not None:
@@ -6702,9 +6798,9 @@ def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
                                     "pre-flight does not analyse"),
             ))
             continue
-        cols = list(agg.find_all(exp.Column))
+        cols = list(_find_all(agg, exp.Column))
         holds_subquery = None
-        if agg.find(exp.Select) is not None:
+        if _has(agg, exp.Select):
             # A subquery's columns are bound in its own scope; credited to this SELECT's aliases
             # they could name a table the aggregate never reads. The outer columns still count, so
             # a fan on them is reported, but the subquery's rows leave the rest unknown.
@@ -6720,11 +6816,11 @@ def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
         if isinstance(agg.parent, exp.Filter) and agg.parent.this is agg:
             predicate = agg.parent.expression
             # A subquery's columns belong to its own scope, not this SELECT's (D4).
-            if predicate.find(exp.Subquery, exp.Exists, exp.Select) is not None:
+            if _has(predicate, exp.Subquery, exp.Exists, exp.Select):
                 nested = ("the aggregate's FILTER clause holds a subquery, so the pre-flight cannot "
                           "tell which of this query's rows it counts")
             else:
-                cols += list(predicate.find_all(exp.Column))
+                cols += list(_find_all(predicate, exp.Column))
         resolved = [_resolve_folded(col, scope_map) for col in cols]
         why = nested or holds_subquery or _why_unresolved(cols, resolved, scope_map, visible)
         sites.append(_AggSite(
@@ -7054,7 +7150,7 @@ def _select_aggregates(sel: "exp.Select") -> list["exp.AggFunc"]:
     resolves these into reports and `_aggregates_marker` counts what falls OUTSIDE them, so the two
     have to be answering the same question — a second spelling of this walk is how a receipt ends up
     reporting on an aggregate its own marker claims was never read."""
-    return [agg for select_expr in sel.expressions for agg in select_expr.find_all(exp.AggFunc)]
+    return [agg for select_expr in sel.expressions for agg in _find_all(select_expr, exp.AggFunc)]
 
 
 def _output_aggregates(node: "exp.Expression") -> list["exp.AggFunc"]:
@@ -7176,7 +7272,7 @@ def _joined_table_pairs(tree: "exp.Select", scope_map: dict[str, str]) -> frozen
         # them with the join's WRITTEN name threw out a valid join to a grain-preserving CTE and left
         # the chain reported as a chasm.
         right = scope_map.get(join.this.alias_or_name, _relation_name(join.this))
-        names = {scope_map.get(col.table, col.table) for col in on.find_all(exp.Column) if col.table}
+        names = {scope_map.get(col.table, col.table) for col in _find_all(on, exp.Column) if col.table}
         if right not in names or len(names - {right}) > 1:
             continue
         for pair in _predicate_pairs(on, scope_map):
@@ -7231,7 +7327,7 @@ def _each_written_join(
                 if unread is not None:
                     unread.extend((_tkey(_bare(right)), frozenset(cands), kind) for cands in lost)
             continue
-        names = {scope_map.get(col.table, col.table) for col in on.find_all(exp.Column) if col.table}
+        names = {scope_map.get(col.table, col.table) for col in _find_all(on, exp.Column) if col.table}
         if right not in names or len(names - {right}) > 1:
             continue
         # This join's fixed-value conditions on its own alias travel with its key, so a declared
@@ -7805,7 +7901,7 @@ def _statement_outputs(ctx: _DisplayContext, tree: "exp.Expression"
                        ) -> "tuple[list[exp.Expression], bool, list[list[tuple]]]":
     """The statement's projections as its first SELECT writes them, whether a star is among them,
     and for each the expressions every arm of a UNION computes in that position."""
-    arms = _query_arms(tree) or [s for s in [tree.find(exp.Select)] if s is not None]
+    arms = _query_arms(tree) or [s for s in [_find(tree, exp.Select)] if s is not None]
     if not arms:
         return [], False, []
     projs = list(arms[0].expressions)
@@ -8277,7 +8373,7 @@ def _fold_unquoted_identifiers(node: "exp.Expression") -> "exp.Expression":
     `tables` folding a name the same way rather than drifting to two rules for one question.
     """
     folded = node.copy()
-    for ident in folded.find_all(exp.Identifier):
+    for ident in _find_all(folded, exp.Identifier):
         if not ident.quoted and isinstance(ident.this, str):
             ident.set("this", ident.this.lower())
     return folded
@@ -8292,7 +8388,7 @@ def _predicate_columns(node: "exp.Expression") -> set[str]:
     conservative direction, since `omitted` is the one status that makes a definite claim about
     what the statement left out.
     """
-    return {col.name.lower() for col in node.find_all(exp.Column) if col.name}
+    return {col.name.lower() for col in _find_all(node, exp.Column) if col.name}
 
 
 def _mentions_any_column(predicates: list["exp.Expression"], names: set[str]) -> bool:
@@ -8300,7 +8396,7 @@ def _mentions_any_column(predicates: list["exp.Expression"], names: set[str]) ->
     return any(
         (col.name or "").lower() in names
         for predicate in predicates
-        for col in predicate.find_all(exp.Column)
+        for col in _find_all(predicate, exp.Column)
     )
 
 
@@ -8558,7 +8654,7 @@ def _strip_qualifiers(node: "exp.Expression") -> "exp.Expression":
     still read.
     """
     stripped = node.copy()
-    for col in stripped.find_all(exp.Column):
+    for col in _find_all(stripped, exp.Column):
         # ALL THREE namespace parts, not just `table`. A column can be written
         # `catalog.db.table.column`, and sqlglot keeps each part in its own arg — so clearing
         # `table` alone left `public.total_amount` behind for a statement writing
@@ -9060,12 +9156,12 @@ def _arm_is_grouped(sel: "exp.Select") -> bool:
 def _is_aggregate(expr: "exp.Expression | None") -> bool:
     """Whether the projection aggregates (SUM, COUNT, AVG, ...) outside a window."""
     return bool(expr is not None and any(
-        agg.find_ancestor(exp.Window) is None for agg in expr.find_all(exp.AggFunc)))
+        agg.find_ancestor(exp.Window) is None for agg in _find_all(expr, exp.AggFunc)))
 
 
 def _column_names(node: "exp.Expression") -> frozenset:
     """The (already folded, unqualified) column names a reduced expression reads."""
-    return frozenset(col.name for col in node.find_all(exp.Column))
+    return frozenset(col.name for col in _find_all(node, exp.Column))
 
 
 def _is_indicator(node: Any) -> bool:
@@ -9081,7 +9177,7 @@ def _aggregate_families(node: "exp.Expression") -> frozenset:
     """Which kinds of aggregate a reduced expression computes, so a MAX is never read as a way of
     writing a SUM. A SUM of a 0/1 flag is a count, and an AVG is a sum over a count."""
     out: set[str] = set()
-    for agg in node.find_all(exp.AggFunc):
+    for agg in _find_all(node, exp.AggFunc):
         if isinstance(agg, exp.Sum):
             out.add("count" if _is_indicator(agg.this) else "sum")
         elif isinstance(agg, exp.Avg):
@@ -9205,7 +9301,7 @@ def _peeled(node: "exp.Expression") -> "tuple[exp.Expression, tuple]":
     """
     # Never inside a window: a FILTER there drops rows from the frame, a WHERE drops them from the
     # rows the frame is counted over, and with a ROWS frame the two give different numbers.
-    if node.find(exp.Window) is not None:
+    if _has(node, exp.Window):
         return node, ()
     units = _own_nodes(node, (exp.Filter, exp.AggFunc))
     peels = [_peel_unit(unit) for unit in units]
@@ -9224,9 +9320,29 @@ def _peeled(node: "exp.Expression") -> "tuple[exp.Expression, tuple]":
 
 
 def _condition_key(node: "exp.Expression", dialect: "str | None") -> "exp.Expression":
-    """One condition in the form it is compared in: the same steps a binding takes (#655)."""
-    return _equivalent_form(_strip_qualifiers(_fold_unquoted_identifiers(node)), False,
-                            _count_kind(dialect))
+    """One condition in the form it is compared in: the same steps a binding takes (#655).
+
+    `_strip_qualifiers(_fold_unquoted_identifiers(node))` on ONE copy: each of those copies the
+    node it is handed, and a condition is copied for its key thousands of times in a long WHERE."""
+    key = node.copy()
+    # Both rewrite each node on its own, so one pass in any order does both. A qualifier stripped
+    # before its identifiers are reached is not folded, and is gone from the key either way.
+    stack = [key]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, exp.Identifier):
+            if not cur.quoted and isinstance(cur.this, str):
+                cur.set("this", cur.this.lower())
+        elif isinstance(cur, exp.Column):
+            for part in ("table", "db", "catalog"):
+                if cur.args.get(part):
+                    cur.set(part, None)
+        for value in cur.args.values():
+            if isinstance(value, exp.Expression):
+                stack.append(value)
+            elif isinstance(value, list):
+                stack.extend(v for v in value if isinstance(v, exp.Expression))
+    return _equivalent_form(key, False, _count_kind(dialect))
 
 
 class _Restriction(NamedTuple):
@@ -9509,9 +9625,9 @@ def _step_reason(body: "exp.Select") -> Optional[str]:
     states (an order-dependent cut, a window, a de-duplication, a grouping a column list does not
     state, a row source that is not a table) each stop the trace.
     """
-    if body.find(exp.Pivot) is not None:
+    if _has(body, exp.Pivot):
         return _WHY_PIVOT
-    if any(proj.find(*_SET_RETURNING) is not None for proj in body.expressions):
+    if any(_has(proj, *_SET_RETURNING) for proj in body.expressions):
         return _WHY_SRF
     if any(body.args.get(arg) for arg in ("limit", "offset", "fetch", "qualify")):
         return _WHY_ROW_ORDER
@@ -9519,7 +9635,7 @@ def _step_reason(body: "exp.Select") -> Optional[str]:
     if isinstance(distinct, exp.Distinct) and distinct.args.get("on") is not None:
         return _WHY_ROW_ORDER         # DISTINCT ON keeps one row per key, chosen by order
     for proj in body.expressions:
-        for window in proj.find_all(exp.Window):
+        for window in _find_all(proj, exp.Window):
             return _WHY_ROW_ORDER if window.args.get("order") else _WHY_WINDOW
     if any(body.args.get(arg) for arg in ("laterals", "connect", "match")):
         return _WHY_UNREADABLE
@@ -9591,7 +9707,7 @@ def _cte_step(cte: "exp.CTE", memo: dict) -> _Step:
     if key not in memo:
         with_ = cte.parent
         recursive = bool(isinstance(with_, exp.With) and with_.args.get("recursive")
-                         and any(_cte_binding(t) is cte for t in cte.this.find_all(exp.Table)))
+                         and any(_cte_binding(t) is cte for t in _find_all(cte.this, exp.Table)))
         memo[key] = _classify_step(cte.this, _alias_columns(cte), recursive)
     return memo[key]
 
@@ -9783,11 +9899,11 @@ def _stated(node: "exp.Expression", sel: "exp.Select", memo: dict, depth: int = 
         return None
     # A subquery's columns may name the step being substituted, or (inside a step) that step's own
     # references, and neither can be renamed from here.
-    if node.find(exp.Select) is not None and (
+    if _has(node, exp.Select) and (
             depth or _names_a_step_inside(node, sel, memo)
             # A subquery reading a WITH step: written out it is detached from the statement, so
             # the step could not be shown in its place and its name would show.
-            or any(_cte_binding(t) is not None for t in node.find_all(exp.Table))):
+            or any(_cte_binding(t) is not None for t in _find_all(node, exp.Table))):
         return None
     out = node.copy()
     for orig, copy in zip(_own_nodes(node, exp.Column), _own_nodes(out, exp.Column)):
@@ -9852,7 +9968,7 @@ def _names_a_step_inside(node: "exp.Expression", sel: "exp.Select", memo: dict) 
     …)` over a step `p`)."""
     own = {id(col) for col in _own_nodes(node, exp.Column)}
     sources = _own_sources(sel)
-    for col in node.find_all(exp.Column):
+    for col in _find_all(node, exp.Column):
         if id(col) in own or not col.table:
             continue
         src = _pick_binding(sources, col.table)
@@ -9878,7 +9994,7 @@ def _sole_table_name(src: "exp.Table", sel: "exp.Select", memo: dict) -> Optiona
     names = memo.get(key)
     if names is None:
         names = Counter()
-        for node in root.find_all(exp.Table, exp.Subquery, exp.CTE):
+        for node in _find_all(root, exp.Table, exp.Subquery, exp.CTE):
             spelled = {_tkey(node.alias_or_name)}
             if isinstance(node, exp.Table):
                 spelled.add(_tkey(node.name))
@@ -10883,7 +10999,7 @@ def _match_output_column(oc: OutputColumn, unread: bool,
         # sides' rows whatever its ON says; a window's frame is counted over the rows a WHERE
         # leaves; an outer join's ON condition restricts a number only if the rows it null-extends
         # add nothing to it.
-        if aggregating and (path.full or (expr.find(exp.Window) is not None and path.rows)
+        if aggregating and (path.full or (_has(expr, exp.Window) and path.rows)
                             or (path.outer_used and not _ignores_null_rows(peeled_value))):
             return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNMODELLED, aggregating=True)
         rows_by_form = {grouped: _rows(grouped) for grouped in own_found}
@@ -10995,13 +11111,13 @@ def _arms_contributing(tree: "exp.Expression", columns: list, results: list) -> 
     of an EXCEPT or an INTERSECT only decides which rows of the left are kept. Every other arm of a
     set operation is its own item with its own match (`main#<n>`), never one claim for the column:
     one arm can count a metric and the next count something else into the same column."""
-    if any(op.args.get("by_name") for op in tree.find_all(exp.SetOperation)):
+    if any(op.args.get("by_name") for op in _find_all(tree, exp.SetOperation)):
         # Arms matched up by column NAME: a position says nothing about which column an arm's
         # value lands in, so no arm's value is claimed.
         return [_ColumnMatch(UNDETERMINED, None, reason=_WHY_BY_NAME, aggregating=r.aggregating)
                 if r.status == MATCHED else r for r in results]
     silent: set = set()
-    for op in tree.find_all(exp.Except, exp.Intersect):
+    for op in _find_all(tree, exp.Except, exp.Intersect):
         silent |= {id(sel) for arm in _output_select_arms(op.expression) for sel in arm}
     if not silent:
         return results
@@ -11174,16 +11290,16 @@ def _withholds(node: "exp.Expression", sensitive: "set[str] | frozenset[str]",
     '…'`, is caught without following the rename: simple, and wider than needed in the safe
     direction. ACE-178 lists conditions from inside steps, so the second half is what keeps a
     sensitive value out of the receipt however many steps it went through."""
-    if any(_tkey(col.name) in sensitive for col in node.find_all(exp.Column)):
+    if any(_tkey(col.name) in sensitive for col in _find_all(node, exp.Column)):
         return True
     # A whole-row reference (`CAST(c AS TEXT)`, `row_to_json(c)`) carries every column of its row,
     # a sensitive one included, under no column's name.
-    if sensitive and any(_is_row_reference(col) for col in node.find_all(exp.Column)):
+    if sensitive and any(_is_row_reference(col) for col in _find_all(node, exp.Column)):
         return True
     if not statement_sensitive:
         return False
-    return node.find(exp.Select) is not None or any(
-        _may_be_renamed(col) for col in node.find_all(exp.Column))
+    return _has(node, exp.Select) or any(
+        _may_be_renamed(col) for col in _find_all(node, exp.Column))
 
 
 def _is_row_reference(col: "exp.Column") -> bool:
@@ -11244,13 +11360,13 @@ def _restriction_text(node: "exp.Expression", sensitive: "set[str] | frozenset[s
     # is shown in brackets: `x = 1` beside `a OR b` must not read as `(x = 1 AND a) OR b`. The
     # brackets `_and_conjuncts` took off are the ones put back.
     copied = node.copy()
-    if node.find(exp.Select) is not None and not _inline_steps(
+    if _has(node, exp.Select) and not _inline_steps(
             node, copied, [_MAX_INLINED_NODES], sensitive, statement_sensitive):
         # A subquery reading a step (`id IN (SELECT id FROM v)`) shows the step's own SELECT in
         # its place, so a reader never sees a step's name. When a step cannot be shown — it would
         # carry a withheld value, it is recursive, or the chain is too long — the subquery is
         # withheld whole rather than shown with the step's name or its values.
-        for sub in [n for n in copied.find_all(exp.Select)
+        for sub in [n for n in _find_all(copied, exp.Select)
                     if n.find_ancestor(exp.Select) is None]:
             sub.replace(exp.Var(this=_WITHHELD))
     shown = exp.Paren(this=copied) if isinstance(node, (exp.Or, exp.Xor)) else copied
@@ -11262,7 +11378,7 @@ def _restriction_text(node: "exp.Expression", sensitive: "set[str] | frozenset[s
                 continue
             if leaf is not shown:
                 leaf.replace(exp.Var(this=_WITHHELD))
-    for neg in reversed(list(shown.find_all(exp.Not))):
+    for neg in reversed(list(_find_all(shown, exp.Not))):
         readable = _readable_negation(neg, booleans)
         if isinstance(readable, _NEGATED_IN_PLACE):
             # `x NOT IN (…)`, `x NOT LIKE …`, `x NOT BETWEEN …`: the predicate as written with NOT
@@ -11303,7 +11419,7 @@ def _inline_steps(orig: "exp.Expression", copied: "exp.Expression", budget: list
     the chain is deeper than `_MAX_INLINED_DEPTH`, or it outgrows `budget` nodes."""
     if depth >= _MAX_INLINED_DEPTH:
         return False
-    for o, c in list(zip(orig.find_all(exp.Table), copied.find_all(exp.Table))):
+    for o, c in list(zip(_find_all(orig, exp.Table), _find_all(copied, exp.Table))):
         cte = _cte_binding(o)
         if cte is None:
             continue
@@ -11312,7 +11428,7 @@ def _inline_steps(orig: "exp.Expression", copied: "exp.Expression", budget: list
         if (id(cte) in inlining or not isinstance(body, exp.Expression) or _alias_columns(cte)
                 or (isinstance(with_, exp.With) and with_.args.get("recursive"))
                 or _withholds(body, sensitive, statement_sensitive)
-                or any(_is_row_reference(col) for col in body.find_all(exp.Column))):
+                or any(_is_row_reference(col) for col in _find_all(body, exp.Column))):
             return False
         budget[0] -= sum(1 for _ in body.walk())
         if budget[0] < 0:
