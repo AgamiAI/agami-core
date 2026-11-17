@@ -111,8 +111,7 @@ def test_a_build_statement_never_imports_the_runtime(tmp_path, monkeypatch):
 # verbatim: the change is allowed to reach the no-model answer sooner and nothing else.
 _UNMATCHED = {"aggregate": False, "area": None, "confidence": None, "definition_prose": None,
               "expression": None, "kind": "output", "name": None, "origin": None,
-              "review_state": None, "scope": "main", "signed_off_at": None, "signed_off_by": None,
-              "signed_off_role": None, "source_tables": None, "status": "unmatched",
+              "review_state": None, "scope": "main", "source_tables": None, "status": "unmatched",
               "built_from": None, "joins_not_declared": None, "missing_conditions": None,
               "missing_tables": None, "reason": None, "restrictions": None, "result_filters": None}
 _OK_RECEIPT = {

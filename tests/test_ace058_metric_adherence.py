@@ -594,7 +594,7 @@ def test_every_model_derived_key_is_null_on_every_status_but_matched(org):
     (item,) = _outs(section)
     assert item["status"] != rt.MATCHED
     for key in ("name", "area", "definition_prose", "expression", "confidence", "origin",
-                "review_state", "signed_off_by", "signed_off_role", "signed_off_at"):
+                "review_state"):
         assert item[key] is None, key
 
 
@@ -606,7 +606,9 @@ def test_a_matched_item_carries_the_binding_the_model_author_wrote(org):
     (item,) = _outs(section)
     assert item["status"] == rt.MATCHED
     assert item["expression"] == PAID_REVENUE
-    assert item["signed_off_by"] == "you@example.com"
+    # Approved, and never by whom: the signer stays in the model, not on what the client reads.
+    assert item["review_state"] == "approved"
+    assert not {"signed_off_by", "signed_off_role", "signed_off_at"} & set(item)
 
 
 def test_the_marker_counts_only_what_is_unsettled(org):

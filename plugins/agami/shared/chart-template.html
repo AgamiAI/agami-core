@@ -42,9 +42,7 @@
                             {"column": null,
                              "metric": {"name":"revenue","area":"sales","definition_prose":"...",
                                         "expression":"SUM(amount)","confidence":"...",
-                                        "review_state":"approved","origin":"model",
-                                        "signed_off_by":"you@example.com","signed_off_role":"cfo",
-                                        "signed_off_at":"2026-03-15T10:00:00Z"}}],
+                                        "review_state":"approved","origin":"model"}}],
                   "undetermined": "..."},
 
       // ONE ENTRY PER REFERENCE, not per table: a table read twice appears twice, which is what
@@ -88,7 +86,6 @@
                            "name":"orders_to_customers","from_to":"orders → customers",
                            "cardinality":"many_to_one","confidence":"inferred",
                            "review_state":"unreviewed","origin":"introspect_heuristic",
-                           "signed_off_by":null,"signed_off_role":null,"signed_off_at":null,
                            "cross_schema":false,"on":"orders.customer_id = customers.id"}],
                 "undetermined": "..."},
 
@@ -694,53 +691,16 @@
       const rs = (m && m.review_state || 'unreviewed').toLowerCase();
       return rs !== 'approved' && rs !== 'rejected';
     }
-    // Display a sign-off role nicely: known roles use their canonical label, acronyms
-    // upper-case (cto → CTO), free-text title-cases (data engineer → Data Engineer).
-    function prettifyRole(role) {
-      if (!role) return '';
-      const key = String(role).trim().toLowerCase();
-      const KNOWN = { cfo: 'CFO', cto: 'CTO', ceo: 'CEO', coo: 'COO', cio: 'CIO', cdo: 'CDO',
-                      data_lead: 'Data Lead', engineer: 'Engineer', analyst: 'Analyst' };
-      if (KNOWN[key]) return KNOWN[key];
-      const ACR = { cto: 'CTO', ceo: 'CEO', cfo: 'CFO', coo: 'COO', cio: 'CIO', cdo: 'CDO',
-                    vp: 'VP', pm: 'PM', bi: 'BI', hr: 'HR', it: 'IT' };
-      return key.replace(/_/g, ' ').split(/\s+/).filter(Boolean)
-        .map(w => ACR[w] || (w.charAt(0).toUpperCase() + w.slice(1))).join(' ');
-    }
     // Build a readable approval phrase like:
-    //   "auto-approved (FK declared in DB)"
-    //   "approved by you@example.com (CFO), Mar 15"
+    //   "approved"
     //   "unreviewed (confidence inferred)"
+    // Only WHETHER it is approved: the receipt never says who approved it — that stays in the
+    // model, for the people who own it.
     // Shared by the trust banner at the top and the provenance panel at the bottom, so one
     // relationship never gets described two ways in one report.
     function approvalPhrase(entry) {
       const state = (entry.review_state || 'unreviewed').toLowerCase();
-      if (state === 'approved') {
-        // System-approved (auto) vs human-approved.
-        if (entry.signed_off_by === 'agami_introspect_v1' || entry.signed_off_role === 'system') {
-          const reasons = {
-            fk:                    'FK declared in DB',
-            column_comment:        'DBA-authored column comment',
-            introspect_heuristic:  'unique-index + name match',
-          };
-          const why = reasons[entry.origin] || 'introspect signal';
-          return 'auto-approved (' + why + ')';
-        }
-        let txt = 'approved';
-        if (entry.signed_off_by) {
-          txt += ' by ' + entry.signed_off_by;
-          if (entry.signed_off_role && entry.signed_off_role !== 'system') {
-            txt += ' (' + prettifyRole(entry.signed_off_role) + ')';
-          }
-        }
-        if (entry.signed_off_at) {
-          const d = new Date(entry.signed_off_at);
-          if (!isNaN(d.getTime())) {
-            txt += ', ' + d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-          }
-        }
-        return txt;
-      }
+      if (state === 'approved') return 'approved';
       if (state === 'rejected') return 'rejected';
       // Stale: approved once, then changed (an edit, or the database moved under it) — not signed off.
       if (state === 'stale')    return 'stale (changed since it was approved — not signed off until re-approved)';

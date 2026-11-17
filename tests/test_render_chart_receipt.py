@@ -147,8 +147,6 @@ def _receipt_clean() -> dict:
                 "definition_prose": "Sum of completed-order amounts in USD.",
                 "expression": "SUM(amount)", "confidence": "confirmed",
                 "review_state": "approved", "origin": "model",
-                "signed_off_by": "you@example.com", "signed_off_role": "cfo",
-                "signed_off_at": "2026-03-15T10:00:00Z",
             }},
         ]),
         tables=_section([
@@ -172,9 +170,7 @@ def _declared_join(**overrides) -> dict:
         "predicate": "o.customer_id = c.id", "scope": "main", "status": "declared",
         "from_to": "orders → customers", "name": "orders_to_customers",
         "cardinality": "many_to_one", "confidence": "confirmed",
-        "review_state": "approved", "origin": "fk",
-        "signed_off_by": "you@example.com", "signed_off_role": "data_lead",
-        "signed_off_at": "2026-03-15T10:00:00Z", "cross_schema": False,
+        "review_state": "approved", "origin": "fk", "cross_schema": False,
         "on": "orders.customer_id = customers.id",
         **overrides,
     }
@@ -187,7 +183,6 @@ def _undeclared_join(**overrides) -> dict:
         "predicate": NONCE_UNDECLARED_PREDICATE, "scope": "main", "status": "undeclared",
         "from_to": NONCE_FROM_TO, "name": None,
         "cardinality": None, "confidence": None, "review_state": None, "origin": None,
-        "signed_off_by": None, "signed_off_role": None, "signed_off_at": None,
         "cross_schema": None, "on": None,
         **overrides,
     }
@@ -205,7 +200,6 @@ def _receipt_with_unreviewed_join() -> dict:
         joins=_section([_declared_join(
             predicate="s.carrier_id = c.id", from_to=NONCE_FROM_TO, name=NONCE_JOIN,
             confidence="inferred", review_state="unreviewed", origin="introspect_heuristic",
-            signed_off_by=None, signed_off_role=None, signed_off_at=None,
             on="shipments.carrier_id = carriers.id",
         )]),
     )
@@ -232,7 +226,6 @@ def _receipt_with_ad_hoc_metric() -> dict:
                 "definition_prose": "Median days from dispatch to delivery.",
                 "expression": "PERCENTILE_CONT(0.5)", "confidence": None,
                 "review_state": "unreviewed", "origin": "ad_hoc",
-                "signed_off_by": None, "signed_off_role": None, "signed_off_at": None,
             }},
         ]),
     )
@@ -250,7 +243,7 @@ def test_render_with_receipt_substitutes_payload():
     # The receipt JSON ends up inline in the JS. Check key pieces.
     assert "model_version" in html
     assert "abc123def456" in html
-    assert "you@example.com" in html
+    assert "Sum of completed-order amounts in USD." in html
 
 
 def test_render_with_unreviewed_join_carries_the_banner_inputs():
@@ -384,6 +377,21 @@ def test_a_metric_calculated_for_this_answer_says_that_in_both_places_it_appears
     assert "text: 'calculated on the fly'" in html
     # And the banner that carries that badge is built from the metric this receipt supplied.
     assert "median_transit_days" in html
+
+
+def test_an_approved_entry_says_approved_and_never_who():
+    """The receipt says only WHETHER a definition is approved; who approved it stays in the model.
+    So the page has no code that reads a signer, and an approved entry's phrase is the bare word —
+    even for a receipt recorded before the signer was dropped from it."""
+    receipt = _receipt_clean()
+    receipt["joins"]["items"][0].update(signed_off_by="signer@example.com",
+                                        signed_off_role="cfo")
+    html = render(title="Test", summary="", sections=[_chart_section()], receipt=receipt)
+
+    assert "if (state === 'approved') return 'approved';" in html
+    template = Path(TEMPLATE_PATH).read_text()
+    assert "signed_off" not in template
+    assert "approved by" not in template
 
 
 def test_the_named_filters_block_no_producer_ever_filled_is_gone():

@@ -346,7 +346,7 @@ def test_every_item_carries_exactly_one_status_and_the_same_flat_key_set(org):
     (item,) = _items(org, ONE_JOIN)
     assert set(item) == {
         "predicate", "scope", "status", "from_to", "name", "cardinality", "confidence", "origin",
-        "review_state", "signed_off_by", "signed_off_role", "signed_off_at", "cross_schema", "on",
+        "review_state", "cross_schema", "on",
         # ACE-178: the tables the status was decided on, when a WITH step stood for one.
         "resolves_to",
     }
@@ -570,9 +570,8 @@ def test_the_signoff_block_is_carried_on_declared(org):
     assert item["confidence"] == "confirmed"
     assert item["origin"] == "fk"
     assert item["review_state"] == "approved"
-    assert item["signed_off_by"] == "you@example.com"
-    assert item["signed_off_role"] == "data_owner"
-    assert item["signed_off_at"] == "2026-01-01T00:00:00Z"
+    # The state only: who signed it off stays in the model and never reaches the client.
+    assert not {"signed_off_by", "signed_off_role", "signed_off_at"} & set(item)
     assert item["cross_schema"] is False
     assert item["on"] is None
 
@@ -583,7 +582,6 @@ def test_an_unconfirmed_relationship_reports_the_other_origin(org):
     assert item["confidence"] == "inferred"
     assert item["origin"] == "introspect_heuristic"
     assert item["review_state"] == "unreviewed"
-    assert item["signed_off_by"] is None
 
 
 @pytest.mark.parametrize("sql", [WRONG_COLUMN, CROSS_JOIN, PRE_AGGREGATE, COMMA_JOIN],
@@ -595,8 +593,7 @@ def test_every_model_derived_key_is_null_on_every_other_status(org, sql):
     (item,) = _items(org, sql)
     assert item["status"] != rt.DECLARED
     assert all(item[k] is None for k in (
-        "name", "cardinality", "confidence", "origin", "review_state", "signed_off_by",
-        "signed_off_role", "signed_off_at", "cross_schema", "on"))
+        "name", "cardinality", "confidence", "origin", "review_state", "cross_schema", "on"))
 
 
 # --- SC-2: a join that wrote no ON ------------------------------------------
@@ -1259,8 +1256,7 @@ def test_a_statement_whose_joins_are_not_declared_executes_and_is_never_refused(
 EXPECTED_UNDECLARED = {
     "predicate": "o.id = c.id", "scope": "main", "status": rt.UNDECLARED,
     "from_to": "orders → customers", "resolves_to": None, "name": None, "cardinality": None, "confidence": None,
-    "origin": None, "review_state": None, "signed_off_by": None, "signed_off_role": None,
-    "signed_off_at": None, "cross_schema": None, "on": None,
+    "origin": None, "review_state": None, "cross_schema": None, "on": None,
 }
 
 
