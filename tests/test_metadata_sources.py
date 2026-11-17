@@ -524,3 +524,48 @@ def test_the_columns_a_join_was_written_from_come_from_what_curate_applied():
     from semantic_model import cli
     assert cli._applied_column("rel itsm/incident.caller_id→sys_user") == ("incident", "caller_id")
     assert cli._applied_column("xrel Incident.Parent_Sys_Id→task") == ("incident", "parent_sys_id")
+
+
+def test_enrich_metadata_sizes_each_read_from_the_source_count(tmp_path, monkeypatch, capsys):
+    """Each metadata read runs under a cap sized from the source's own COUNT(*), not the caller's;
+    a source past the ceiling is refused with its count and never read."""
+    _servicenow_model(tmp_path)
+    from semantic_model import cli
+    from semantic_model import introspect as INTRO
+
+    caps: list = []
+    reads: list[str] = []
+
+    def factory(count):
+        def make(profile, python=None, max_rows=None, **kw):
+            caps.append(max_rows)
+
+            def run(sql):
+                s = sql.lower()
+                if "count(*)" in s:
+                    return [{"N": count}]
+                if "sys_choice" in s or "sys_dictionary" in s:
+                    reads.append(s)
+                    return SYS_CHOICE if "sys_choice" in s else SYS_DICTIONARY
+                return []
+            return run
+        return make
+
+    args = ["enrich-metadata", str(tmp_path), "--profile", "servicenow", "--db-type", "redshift",
+            "--skip-references"]
+    monkeypatch.setattr(INTRO, "make_execute_sql_runner", factory(213_960))
+    ns = cli.build_parser().parse_args(args)
+    assert ns.func(ns) == 0
+    # the default runner, the catalog listing's at the ceiling, then one sized from each source's count
+    assert caps == [None, 5_000_000] + [213_960 + 1_000 + 2_139] * 2, caps
+    assert len(reads) == 2
+
+    capsys.readouterr()
+    caps.clear()
+    reads.clear()
+    monkeypatch.setattr(INTRO, "make_execute_sql_runner", factory(6_000_000))
+    ns = cli.build_parser().parse_args(args)
+    assert ns.func(ns) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert "6,000,000 rows" in out["error"] and "5,000,000" in out["error"], out
+    assert reads == [] and caps == [None, 5_000_000]

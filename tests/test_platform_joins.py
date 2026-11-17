@@ -445,3 +445,17 @@ def test_class_parents_resolve_ids_and_stop_on_a_loop():
     parents = M.class_parents(rows, table_col="name", id_col="sys_id", parent_col="super_class")
     assert parents["incident"] == "task"
     assert M.ancestors("incident", parents) == ["task", "base"]
+
+
+def test_a_dictionary_past_the_default_row_cap_is_read_without_the_caller_raising_it(tmp_path, monkeypatch):
+    """The command sizes each metadata read from the source's own count: a dictionary longer than
+    the query-time cap is read whole with no AGAMI_SQL_MAX_ROWS from the caller."""
+    monkeypatch.delenv("AGAMI_SQL_MAX_ROWS", raising=False)
+    wh = _platform(tmp_path)
+    con = sqlite3.connect(wh["db"])
+    filler = [(f"other_class_{i // 10}", f"field_{i}", "Field", "A field.", "string", "") for i in range(1500)]
+    con.executemany("INSERT INTO sys_dictionary_raw VALUES (?,?,?,?,?,?)", filler)
+    con.commit()
+    con.close()
+    out = _build(wh)["out"]
+    assert out["fetched"]["dictionary"] == len(DICTIONARY) + 1500 > 1000, out
