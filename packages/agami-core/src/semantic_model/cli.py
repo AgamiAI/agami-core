@@ -1726,11 +1726,22 @@ def cmd_introspect(args) -> int:
         bigquery_region=args.bigquery_region,
         progress_path=progress,
         append=getattr(args, "append", False),
+        batch=_batch_arg(getattr(args, "batch", None)),
     )
     res = V.validate(org)
     print(report.render())
     print(V.format_result(res))
     return 0 if res.ok else 1
+
+
+def _batch_arg(text: Optional[str]) -> Optional[tuple[int, int]]:
+    """`--batch 3/5` -> (3, 5); anything else is refused, so a typo never prints a wrong position."""
+    if not text:
+        return None
+    m = re.fullmatch(r"\s*(\d+)\s*/\s*(\d+)\s*", text)
+    if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
+        raise SystemExit(f"--batch takes n/total, such as 3/5, not {text!r}")
+    return int(m.group(1)), int(m.group(2))
 
 
 def cmd_enrich_metadata(args) -> int:
@@ -2373,6 +2384,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="batched build: introspect only --tables this call, MERGE into the existing "
                          "model (prior tables loaded, not re-queried), write the union. Call once per "
                          "batch for quick foreground progress on a big schema (no background monitor).")
+    sp.add_argument("--batch", default=None,
+                    help="this call's place in a batched build, as n/total (e.g. 3/5): written as the "
+                         "progress log's first line, for the progress page")
     sp.set_defaults(func=cmd_introspect)
 
     sp = sub.add_parser("enrich-metadata",

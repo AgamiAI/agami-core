@@ -29,8 +29,11 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
-from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
+from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Optional
@@ -142,18 +145,121 @@ _GROUPED_FINDINGS = {"empty": "empty on every row read", "mostly_blank": "blank 
                      "constant": "one value on every row"}
 
 
+# A step that writes no line for this long gets a heartbeat line saying what it is waiting on, so a
+# slow statement and a hung build stop looking the same (#677: one step ran 30+ minutes silently).
+HEARTBEAT_S = 60.0
+_LOG_LOCK = threading.Lock()   # workers write lines too; one line at a time, never interleaved
+_LAST_LINE: dict[Path, float] = {}   # log -> monotonic time of its last line of real progress
+_LAST_ANY: dict[Path, float] = {}    # log -> monotonic time of its last line, heartbeats included
+_WAITING: dict[Path, dict[int, str]] = {}   # log -> what each in-flight step is waiting on
+
+
+def _stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _write_line(path: Path, msg: str, *, beat: bool = False) -> None:
+    with _LOG_LOCK:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(f"{_stamp()} {msg.rstrip(chr(10))}\n")
+            fh.flush()
+        now = time.monotonic()
+        _LAST_ANY[path] = now
+        if not beat:
+            _LAST_LINE[path] = now
+
+
 def _progress(path: Optional[Path], msg: str) -> None:
-    """Append a FLUSHED progress line so a tailing skill can surface a heartbeat during a long
-    introspection (the engine is otherwise silent until it returns — which reads as 'stuck' on a
-    big Redshift schema). Best-effort; never raises."""
+    """Append a FLUSHED progress line, stamped in UTC (`2026-11-17T10:04:00Z columns+grain 30/52`),
+    so a tailing skill or the progress page can surface a heartbeat during a long introspection (the
+    engine is otherwise silent until it returns — which reads as 'stuck' on a big Redshift schema).
+    The stamp goes first so a reader looking for the message still finds it. Best-effort; never raises."""
     if path is None:
         return
     try:
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(msg.rstrip("\n") + "\n")
-            fh.flush()
+        _write_line(path, msg)
     except Exception:
         pass
+
+
+@contextmanager
+def _waiting_on(path: Optional[Path], what: str) -> Iterator[None]:
+    """Name what the enclosed statements are doing, for the heartbeat. Table and column NAMES only,
+    never a value read from them: the log sits in the model folder and is shown on a page."""
+    if path is None:
+        yield
+        return
+    token = object()
+    with _LOG_LOCK:
+        _WAITING.setdefault(path, {})[id(token)] = what
+    try:
+        yield
+    finally:
+        with _LOG_LOCK:
+            _WAITING.get(path, {}).pop(id(token), None)
+
+
+def _quiet_for(seconds: float) -> str:
+    return f"{int(seconds)} s" if seconds < 60 else f"{int(seconds // 60)} min"
+
+
+def _watch(path: Optional[Path]) -> Optional[PF.Watch]:
+    """A `PF.Watch` naming each statement's work for the heartbeat, or None with no log."""
+    return None if path is None else (lambda what: _waiting_on(path, what))
+
+
+def _counted(path: Optional[Path], label: str, total: int) -> Optional[Callable[[int], None]]:
+    """A `done` callback that logs `<label> k/total` about every 10%, as the table reads do."""
+    if path is None:
+        return None
+    step = max(1, total // 10)
+    last = [0]
+
+    def done(k: int) -> None:
+        if k // step > last[0] // step or k >= total:
+            last[0] = k
+            _progress(path, f"{label} {min(k, total)}/{total}")
+    return done
+
+
+@contextmanager
+def _heartbeat(path: Optional[Path]) -> Iterator[None]:
+    """While the build runs, write `waiting on the database for <N> min: <what>` whenever no line has
+    been written for HEARTBEAT_S. N counts from the last line of real progress, so a step stuck for
+    half an hour says so rather than restarting the count at every beat."""
+    if path is None:
+        yield
+        return
+    stop = threading.Event()
+    with _LOG_LOCK:
+        _LAST_LINE[path] = _LAST_ANY[path] = time.monotonic()
+
+    def beat() -> None:
+        while not stop.wait(min(5.0, HEARTBEAT_S / 4)):
+            with _LOG_LOCK:
+                now = time.monotonic()
+                quiet = now - _LAST_LINE.get(path, now)
+                due = now - _LAST_ANY.get(path, now) >= HEARTBEAT_S
+                doing = sorted(set(_WAITING.get(path, {}).values()))
+            if not due or stop.is_set():
+                continue
+            what = "; ".join(doing[:3]) + (f"; and {len(doing) - 3} more" if len(doing) > 3 else "")
+            try:
+                _write_line(path, f"waiting on the database for {_quiet_for(quiet)}: "
+                                  f"{what or 'the step on the line before'}", beat=True)
+            except Exception:
+                pass
+
+    worker = threading.Thread(target=beat, name="introspect-heartbeat", daemon=True)
+    worker.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        worker.join(timeout=5.0)
+        with _LOG_LOCK:
+            for d in (_LAST_LINE, _LAST_ANY, _WAITING):
+                d.pop(path, None)
 
 
 @dataclass
@@ -342,13 +448,44 @@ def introspect(
     bigquery_region: str = "region-us",
     progress_path: Optional[str | Path] = None,
     append: bool = False,
+    batch: Optional[tuple[int, int]] = None,
 ) -> tuple[Datasource, IntrospectReport]:
     """Introspect a live DB into the semantic model and (unless dry_run) write the
     canonical tree. `tables` (optional) is the allowlist of `schema.table` to build —
     the prune step's kept set (also the no-catalog case where enumeration is denied).
     `exclude_columns` (optional, `schema.table.column`) marks those columns excluded
-    (the prune step's dropped columns).
+    (the prune step's dropped columns). `batch` (n, of) names this call's place in a batched
+    build as the progress log's first line, so the progress page can say "batch 3 of 5".
     """
+    pp = Path(progress_path) if progress_path else None
+    if pp is not None:
+        try:
+            pp.parent.mkdir(parents=True, exist_ok=True)
+            pp.write_text("", encoding="utf-8")  # fresh log per run
+        except Exception:
+            pp = None
+    if batch is not None:
+        _progress(pp, f"batch {batch[0]} of {batch[1]}")
+    with _heartbeat(pp):
+        return _introspect(profile, db_type, runner=runner, artifacts_dir=artifacts_dir, out_dir=out_dir,
+                           tables=tables, exclude_columns=exclude_columns, dry_run=dry_run,
+                           bigquery_region=bigquery_region, pp=pp, append=append)
+
+
+def _introspect(
+    profile: str,
+    db_type: str,
+    *,
+    runner: Runner,
+    artifacts_dir: str | Path,
+    out_dir: Optional[str | Path],
+    tables: Optional[list[str]],
+    exclude_columns: Optional[list[str]],
+    dry_run: bool,
+    bigquery_region: str,
+    pp: Optional[Path],
+    append: bool,
+) -> tuple[Datasource, IntrospectReport]:
     dialect = D.get_dialect(db_type)
     if isinstance(dialect, D.BigQuery):
         dialect = D.BigQuery(region=bigquery_region)
@@ -359,14 +496,6 @@ def introspect(
 
     report = IntrospectReport(profile=profile, db_type=db_type, out_dir=str(out), dry_run=dry_run)
 
-    pp = Path(progress_path) if progress_path else None
-    if pp is not None:
-        try:
-            pp.parent.mkdir(parents=True, exist_ok=True)
-            pp.write_text("", encoding="utf-8")  # fresh log per run
-        except Exception:
-            pp = None
-
     # 1. discover (schema, table) pairs
     pairs = _discover_tables(dialect, runner, tables, report)
     if not pairs:
@@ -376,19 +505,12 @@ def introspect(
         )
     _progress(pp, f"discovered {len(pairs)} tables — reading columns, grain, keys")
 
-    # 2. per-table columns + grain
-    built: list[Table] = []
-    _step = max(1, len(pairs) // 10)   # throttle the heartbeat to ~10 lines, not one per table
+    # 2. per-table columns + grain, a few tables at once
     budget = _CountBudget(_COUNT_BUDGET_S)
     reads = _ReadBudget(DISTINCT_READ_CAP)
     keys_unread: set[tuple] = set()   # (schema, table) whose unique keys couldn't be read
     samples: dict[tuple, tuple] = {}   # (schema, table) -> (sample, est_rows), for the placeholder scan
-    for i, (schema, table) in enumerate(pairs, 1):
-        t = _build_table(dialect, runner, schema, table, conn_name, report, budget, reads,
-                         keys_unread, samples)
-        built.append(t)
-        if i % _step == 0 or i == len(pairs):
-            _progress(pp, f"columns+grain {i}/{len(pairs)}")
+    built = _read_tables(dialect, runner, pairs, conn_name, report, budget, reads, keys_unread, samples, pp)
     if budget.skipped:
         report.notes.append(
             f"{budget.skipped} table(s) left unsized: exact row counts stopped after {_COUNT_BUDGET_S:.0f}s "
@@ -613,9 +735,10 @@ def introspect(
     def personal(t: Table, c: Column) -> bool:
         return _never_read(c) or c.name.lower() in personal_cols.get((t.schema_name, t.name), set())
 
-    report.profile_tables = PF.profile_tables(dialect, runner, to_profile, personal, samples, done=profiled)
+    report.profile_tables = PF.profile_tables(dialect, runner, to_profile, personal, samples, done=profiled,
+                                              watch=_watch(pp))
     _progress(pp, "join candidates: testing columns no join covers…")
-    _scan_join_candidates(dialect, runner, rels, built, report, sg)
+    _scan_join_candidates(dialect, runner, rels, built, report, sg, pp=pp)
     if refreshing:   # counted after the join merge and relabel, which are changes too
         report.notes.append(
             f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
@@ -1307,6 +1430,66 @@ def _discover_tables(
     return []
 
 
+def _read_tables(
+    dialect: D.Dialect, runner: Runner, pairs: list[tuple], conn_name: str, report: IntrospectReport,
+    budget: _CountBudget, reads: _ReadBudget, keys_unread: set, samples: dict,
+    pp: Optional[Path] = None,
+) -> list[Table]:
+    """Read every table's columns, keys and sample, up to `PF.WORKERS` tables at once (#677: one at a
+    time, a wide build spent 30 s to 3 min per view waiting on the warehouse).
+
+    Each table is built against a report of its own, and those are folded into `report` in `pairs`
+    order once all are read, so the model and the report come out the same whatever order the tables
+    finish in. The two run-wide budgets are shared and locked: the counts' time budget, and the
+    DISTINCT reads, where only when that cap runs out can which columns got a value list depend on
+    which table got there first. PF.WORKERS is 1 for a browser sign-in, which reads one at a time."""
+    step = max(1, len(pairs) // 10)   # throttle the log to ~10 lines, not one per table
+
+    def one(pair: tuple) -> tuple[Table, IntrospectReport, set, dict]:
+        schema, table = pair
+        own = IntrospectReport(profile=report.profile, db_type=report.db_type, out_dir=report.out_dir,
+                               dry_run=report.dry_run)
+        own_unread: set = set()
+        own_samples: dict = {}
+        with _waiting_on(pp, f"reading columns and keys of {table}"):
+            t = _build_table(dialect, runner, schema, table, conn_name, own, budget, reads,
+                             own_unread, own_samples)
+        return t, own, own_unread, own_samples
+
+    with ThreadPoolExecutor(max_workers=max(1, PF.WORKERS)) as pool:
+        futures = [pool.submit(one, p) for p in pairs]
+        for i, _ in enumerate(as_completed(futures), 1):
+            if i % step == 0 or i == len(pairs):
+                _progress(pp, f"columns+grain {i}/{len(pairs)}")
+        results = [f.result() for f in futures]
+    built: list[Table] = []
+    for t, own, own_unread, own_samples in results:
+        _fold_report(report, own)
+        keys_unread |= own_unread
+        samples.update(own_samples)
+        built.append(t)
+    return built
+
+
+def _fold_report(into: IntrospectReport, part: IntrospectReport) -> None:
+    """Add one table's findings to the run's report, as if the table had been built against it:
+    lists and counts add up, the first table to set a capability's mode keeps it, a keyed entry is
+    the latest table's."""
+    for f in fields(part):
+        mine, theirs = getattr(into, f.name), getattr(part, f.name)
+        if isinstance(theirs, list):
+            mine.extend(theirs)
+        elif f.name == "mode_per_capability":
+            for k, v in theirs.items():
+                mine.setdefault(k, v)
+        elif isinstance(theirs, dict):
+            mine.update(theirs)
+        elif isinstance(theirs, bool):
+            setattr(into, f.name, mine or theirs)
+        elif isinstance(theirs, int):
+            setattr(into, f.name, mine + theirs)
+
+
 def _build_table(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
     conn_name: str, report: IntrospectReport, budget: Optional[_CountBudget] = None,
@@ -1461,12 +1644,36 @@ _COUNT_BUDGET_S = 600.0
 class _CountBudget:
     seconds_left: float
     skipped: int = 0
+    # Tables are read a few at a time (`_read_tables`), so the budget is shared between workers.
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def start(self) -> bool:
+        """Whether a count may run; counts the table as skipped when the time is used up."""
+        with self.lock:
+            if self.seconds_left <= 0:
+                self.skipped += 1
+                return False
+            return True
+
+    def spend(self, seconds: float) -> None:
+        with self.lock:
+            self.seconds_left -= seconds
 
 
 @dataclass
 class _ReadBudget:
     left: int
     skipped: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def take(self) -> bool:
+        """One DISTINCT read, if any are left; counts a skipped column when none are."""
+        with self.lock:
+            if self.left <= 0:
+                self.skipped += 1
+                return False
+            self.left -= 1
+            return True
 
 
 def _estimate_rows(
@@ -1493,15 +1700,14 @@ def _estimate_rows(
     if count_q and count_q != q:
         # A distinct count was tried, so its answer replaces the catalog's: when it fails, the size
         # is unknown, never the catalog's 0 (an unanalysed table with rows would read as empty).
-        if budget is not None and budget.seconds_left <= 0:
-            budget.skipped += 1
+        if budget is not None and not budget.start():
             return None
         started = time.monotonic()
         try:
             return _rows_from(_try(runner, count_q))
         finally:
             if budget is not None:
-                budget.seconds_left -= time.monotonic() - started
+                budget.spend(time.monotonic() - started)
     # The estimate query was itself the exact count (no catalog statistics on this engine).
     return est if est is not None and est >= 0 else None
 
@@ -2387,7 +2593,7 @@ def _candidate(t: Table, c: Column, u: Table, k: str, check: PF.JoinCheck, found
 
 def _scan_join_candidates(dialect: D.Dialect, runner: Runner, rels: list[Relationship],
                           tables: list[Table], report: IntrospectReport,
-                          sqlglot_dialect: Optional[str] = None) -> None:
+                          sqlglot_dialect: Optional[str] = None, pp: Optional[Path] = None) -> None:
     """Test columns no join covers against other tables' keys and report what the data bears out (#512).
 
     Nothing is written to the model: a candidate is listed in the report and join_candidates.json for
@@ -2423,7 +2629,7 @@ def _scan_join_candidates(dialect: D.Dialect, runner: Runner, rels: list[Relatio
                 break
         if not round_:
             break
-        PF.run_checks(dialect, runner, [r[-1] for r in round_])
+        PF.run_checks(dialect, runner, [r[-1] for r in round_], watch=_watch(pp))
         report.join_candidate_probes += len(round_)
         for prio, t, c, u, col, key, check in round_:
             if col in found:
@@ -2491,7 +2697,8 @@ def _check_joins(dialect: D.Dialect, runner: Runner, rels: list[Relationship], t
     fresh = [c for _, c in todo if not c.read]
     if fresh:
         _progress(pp, f"joins: checking {len(fresh)} on the data")
-        PF.run_checks(dialect, runner, fresh)
+        PF.run_checks(dialect, runner, fresh, done=_counted(pp, "joins checked", len(fresh)),
+                      watch=_watch(pp))
     for why, n in skipped.items():
         report.notes.append(f"{n} join(s) not checked on the data: {why}")
     if capped:
@@ -2755,11 +2962,8 @@ def _enrich_from_sample(
     if not _sample_covers_values(sample, est_rows):
         choice_cands = []  # a big table: DISTINCT would scan it, and a partial list would mislead
     for c in choice_cands:
-        if reads is not None:
-            if reads.left <= 0:
-                reads.skipped += 1
-                continue
-            reads.left -= 1
+        if reads is not None and not reads.take():
+            continue
         rows = _try(runner, dialect.distinct_sql(schema, table, c.name, ENUM_MAX_DISTINCT + 1))
         if rows is None or len(rows) > ENUM_MAX_DISTINCT:
             continue  # more values than a list holds: none, rather than an incomplete one

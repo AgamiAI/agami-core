@@ -943,7 +943,8 @@ def test_introspect_writes_progress_log(tmp_path):
     pp = tmp_path / "progress.log"
     I.introspect("shop", "postgres", runner=_catalog_runner,
                  artifacts_dir=tmp_path, dry_run=True, progress_path=pp)
-    lines = pp.read_text().splitlines()
+    # Each line is stamped in UTC (#677); the message after the stamp is unchanged.
+    lines = [ln.split(" ", 1)[1] for ln in pp.read_text().splitlines()]
     assert any("discovered" in ln for ln in lines)
     assert any(ln.startswith("columns+grain 1/") for ln in lines)
     assert lines[-1].startswith("done:")

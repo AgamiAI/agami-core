@@ -24,9 +24,11 @@ out of time is not, and its checks are reported as not run.
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, ContextManager, Optional
 
 from . import dialects as D
 from .models import Column, Table
@@ -279,15 +281,38 @@ def _batch(dialect: D.Dialect, runner: Runner, batch: list[JoinCheck]) -> None:
             _one(dialect, runner, c, spread_first=False)
 
 
-def run_checks(dialect: D.Dialect, runner: Runner, checks: list[JoinCheck]) -> None:
-    """Run every check in place: several to a statement, a few statements at once."""
+Watch = Callable[[str], ContextManager[None]]
+
+
+def _tables_of(batch: list[JoinCheck]) -> str:
+    names = sorted({c.ft.name for c in batch})
+    return ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+
+
+def run_checks(dialect: D.Dialect, runner: Runner, checks: list[JoinCheck],
+               done: Optional[Callable[[int], None]] = None, watch: Optional[Watch] = None) -> None:
+    """Run every check in place: several to a statement, a few statements at once. `done` hears the
+    number of checks finished so far after each statement; `watch` names what each statement is
+    doing while it runs (`checking joins of orders`), for the build's heartbeat."""
     batches = [checks[i:i + CHECKS_PER_STATEMENT] for i in range(0, len(checks), CHECKS_PER_STATEMENT)]
+    finished = 0
+    lock = threading.Lock()
+
+    def one(b: list[JoinCheck]) -> None:
+        nonlocal finished
+        with (watch(f"checking joins of {_tables_of(b)}") if watch else nullcontext()):
+            _batch(dialect, runner, b)
+        if done:
+            with lock:   # under the lock, so the counts reach `done` in order
+                finished += len(b)
+                done(finished)
+
     if len(batches) <= 1:
         for b in batches:
-            _batch(dialect, runner, b)
+            one(b)
         return
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        list(pool.map(lambda b: _batch(dialect, runner, b), batches))
+        list(pool.map(one, batches))
 
 
 # ---------------------------------------------------------------------------
@@ -619,13 +644,15 @@ def _mixed_formats(values: list) -> Optional[str]:
 
 def profile_tables(dialect: D.Dialect, runner: Runner, tables: list[Table],
                    personal: Callable[[Table, Column], bool],
-                   samples: Optional[dict] = None, done: Optional[Callable[[int], None]] = None) -> dict:
+                   samples: Optional[dict] = None, done: Optional[Callable[[int], None]] = None,
+                   watch: Optional[Watch] = None) -> dict:
     """The profile of each table (at most PROFILE_TABLE_CAP), keyed `schema.table`, a few at once."""
     picked = tables[:PROFILE_TABLE_CAP]
 
     def one(t: Table):
         sample = (samples or {}).get((t.schema_name, t.name), (None,))[0]
-        return t, profile_table(dialect, runner, t, personal, sample)
+        with (watch(f"profiling {t.name}") if watch else nullcontext()):
+            return t, profile_table(dialect, runner, t, personal, sample)
 
     out: dict = {}
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:

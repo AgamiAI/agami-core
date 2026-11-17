@@ -110,9 +110,11 @@ def test_urllib_parse_is_still_allowed():
 # listen, and only on the loopback interface, where nothing off this machine can reach them. The page
 # server's saving mode (`--decisions`, #651) is the one listener that takes data from a page other
 # than the password: one JSON post behind a token, written to a file and applied by the skill, never
-# by the server. Its refusals are tested in test_serve_page.py.
+# by the server. Its refusals are tested in test_serve_page.py. The build-progress page (#677) is
+# read-only: GET and HEAD of its page and a status summary of the progress log, behind a token; it
+# takes nothing from the page (test_introspect_progress.py).
 LISTEN = re.compile(r"\bhttp\.server\b|\bsocketserver\b")
-LISTENERS = {"connect_helper.py", "serve_page.py"}
+LISTENERS = {"connect_helper.py", "serve_page.py", "progress_page.py"}
 
 
 def test_only_the_local_helpers_listen_and_only_on_loopback():
@@ -130,3 +132,9 @@ def test_the_page_server_takes_decisions_only_behind_its_checks():
     for needle in ("MAX_DECISIONS", "srv.origins", 'srv.base + "save"', "srv.taken or srv.closed", "_write_private"):
         assert needle in text, needle
     assert "subprocess" not in text and "curate" not in text  # applying is the skill's job
+
+
+def test_the_progress_page_takes_nothing_from_the_page():
+    text = (SCRIPTS_DIR / "progress_page.py").read_text()
+    assert "do_POST = do_PUT = do_DELETE = do_PATCH = _refuse" in text
+    assert "rfile" not in text and "subprocess" not in text and "write_text" not in text
