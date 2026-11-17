@@ -112,8 +112,11 @@ def test_a_build_statement_never_imports_the_runtime(tmp_path, monkeypatch):
 _UNMATCHED = {"aggregate": False, "area": None, "confidence": None, "definition_prose": None,
               "expression": None, "kind": "output", "name": None, "origin": None,
               "review_state": None, "scope": "main", "signed_off_at": None, "signed_off_by": None,
-              "signed_off_role": None, "source_tables": None, "status": "unmatched"}
+              "signed_off_role": None, "source_tables": None, "status": "unmatched",
+              "built_from": None, "joins_not_declared": None, "missing_conditions": None,
+              "missing_tables": None, "reason": None, "restrictions": None, "result_filters": None}
 _OK_RECEIPT = {
+    "agami_core_version": guardrail.core_version(),
     "aggregates": {"items": [], "undetermined": None},
     "assumptions": {"items": [], "undetermined": None},
     "columns": {"items": [{**_UNMATCHED, "column": "id"}, {**_UNMATCHED, "column": "status"},
@@ -133,6 +136,7 @@ _WITHHELD = ("Withheld because the statement was refused. Reporting these would 
 _REFUSED_RECEIPT = {
     **{name: {"items": [], "undetermined": _WITHHELD}
        for name in ("aggregates", "assumptions", "columns", "joins")},
+    "agami_core_version": guardrail.core_version(),
     "model_version": None,
     "tables": {"items": [{"declared": True, "ref": "orders"}],
                "undetermined": "A refused statement is told which of the names it wrote the model "
