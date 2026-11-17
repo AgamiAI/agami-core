@@ -1280,9 +1280,11 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
             # Built on a defined metric (an average of a per-day total): not that metric, and not a
             # gap either. Named, so the person can judge whether the second step is what they meant.
             built = item["built_from"]
-            by = ", ".join(map(str, built.get("by") or []))
+            # A null `by` is a grouping the receipt could not read: said so, never guessed.
+            by = (", ".join(map(str, built["by"])) if built.get("by")
+                  else "group" if built.get("by") == [] else "a grouping the receipt could not read")
             note = (f"built from the metric {built.get('metric')!r}: "
-                    f"{str(built.get('aggregate', '')).lower()} of it per {by or 'group'}")
+                    f"{str(built.get('aggregate', '')).lower()} of it per {by}")
             if built.get("restrictions"):
                 note += ", counted only where " + " and ".join(map(str, built["restrictions"]))
             if built.get("joins_not_declared"):

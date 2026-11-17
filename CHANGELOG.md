@@ -333,6 +333,11 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A receipt names a `GROUP BY 1` grouping by what it groups.** A number built from a metric per group (an
+  average of a per-day count) reported its grouping as `by: ["1"]`. A position is now read as the
+  expression it points at in that query's own select list; when it points at nothing, or the list
+  holds a `*`, `by` is null (the grouping could not be read) instead of a number.
+
 - **`sm introspect` says why the database couldn't be used.** A credentials profile missing its
   password read every table, got no columns, and ended with "every name yielded zero columns. Check
   the --tables list", pointing at shell quoting. A failure about the connection (missing

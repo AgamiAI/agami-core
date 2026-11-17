@@ -1154,6 +1154,18 @@ def test_a_number_built_from_a_metric_is_open_and_says_how():
     assert "built from the metric 'total_sales': avg of it per opened" in row["note"]
 
 
+def test_a_built_from_number_whose_grouping_could_not_be_read_says_so():
+    """A null `by` (a `GROUP BY <position>` pointing at nothing) is never shown as a grouping."""
+    receipt = {"columns": {"items": [{"kind": "output", "column": "a", "status": "unmatched",
+                                      "aggregate": True, "built_from": {
+                                          "metric": "total_sales", "aggregate": "AVG",
+                                          "by": None, "restrictions": [],
+                                          "joins_not_declared": []}}]},
+               "tables": {"items": [{"qname": "orders"}]}}
+    [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "AVG(daily)"}]})
+    assert "avg of it per a grouping the receipt could not read" in row["note"]
+
+
 def test_a_built_from_number_names_its_own_restrictions_and_joins():
     """ACE-178 review: "built from total_sales, avg per opened" must also say which rows the per-day
     totals were counted over, and any join the semantic model does not declare."""

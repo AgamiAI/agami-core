@@ -4686,8 +4686,10 @@ def assemble_receipt(
     def _built(built: "dict | None") -> "dict[str, Any] | None":
         if built is None:
             return None
+        # `by` is null when the grouping could not be read (a position that points at nothing).
         return {"metric": built["metric"], "aggregate": built["aggregate"],
-                "by": _shown(built["by"]), "restrictions": _shown(built["restrictions"]),
+                "by": _shown(built["by"]) if built["by"] is not None else None,
+                "restrictions": _shown(built["restrictions"]),
                 "joins_not_declared": _labels(built["joins"])}
 
     # ACE-178: one trace per receipt, so each step is read once however many columns pass through
@@ -10712,6 +10714,31 @@ def _group_columns(sel: "exp.Select") -> list:
     return out
 
 
+def _group_by_items(sel: "exp.Select") -> "tuple | None":
+    """What a SELECT groups by, each position (`GROUP BY 1`) read as the projection it points at in
+    THIS SELECT's own list, or None when one cannot be read: a position past the list or at zero, a
+    list holding a star (whose width this does not know), or a grouping that is not a plain list.
+    Never the literal number, which a reader would take for a constant."""
+    group = sel.args.get("group") if isinstance(sel, exp.Select) else None
+    if group is None:
+        return ()
+    if any(group.args.get(k) for k in ("rollup", "cube", "grouping_sets", "all")):
+        return None
+    projections = sel.expressions
+    out = []
+    for g in group.expressions:
+        if isinstance(g, exp.Literal) and g.is_int:
+            n = int(g.name)
+            if not 0 < n <= len(projections) or any(
+                    isinstance(p, exp.Star) or (isinstance(p, exp.Column) and p.is_star)
+                    for p in projections):
+                return None
+            proj = projections[n - 1]
+            g = proj.this if isinstance(proj, exp.Alias) else proj
+        out.append(g)
+    return tuple(out)
+
+
 def _follow_to(col: "exp.Column", sel: "exp.Select", target: "exp.Select",
                memo: dict) -> "exp.Column | None":
     """The plain column of `target` a column of an outer layer passes on, or None."""
@@ -11256,11 +11283,10 @@ def _match_built_on(oc: OutputColumn, flow: _Flow, unread: bool, by_binding: dic
         return _ColumnMatch(UNDETERMINED, None, reason=_WHY_JOIN_UNNAMED, aggregating=True)
     per_group = ([r.node for r in path.rows + upper_rows] + [jm for jm, _ in path.inner]
                  + list(tr.arm(step.body).after))
-    group = step.body.args.get("group")
     built = {
         "metric": inner.match.metric.name,
         "aggregate": agg.key.upper(),
-        "by": tuple(group.expressions) if group is not None else (),
+        "by": _group_by_items(step.body),
         "restrictions": tuple(inner.restrictions) + tuple(per_group),
         "joins": tuple(dict.fromkeys(inner.joins + _undeclared_joins(path.joins, tr,
                                                                      join_status,
