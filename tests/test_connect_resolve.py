@@ -62,6 +62,8 @@ def test_ready_with_default_main_section_is_not_nulled(tmp_path, monkeypatch):
     creds = local / "credentials"
     creds.write_text("[main]\ntype = sqlite\npath = /x/y.db\n", encoding="utf-8")
     os.chmod(creds, 0o600)
+    (tmp_path / "main").mkdir()
+    (tmp_path / "main" / "datasource.yaml").write_text("name: main\n", encoding="utf-8")
     data, _ = _run(monkeypatch, tmp_path)
     assert data["next"] == "ready"
     assert data["profile"] == "main"
@@ -74,12 +76,39 @@ def test_next_ready_with_section(tmp_path, monkeypatch):
     creds = local / "credentials"
     creds.write_text("[sample]\ntype = sqlite\npath = /x/y.db\n", encoding="utf-8")
     os.chmod(creds, 0o600)
+    (tmp_path / "sample").mkdir()
+    (tmp_path / "sample" / "datasource.yaml").write_text("name: sample\n", encoding="utf-8")
     data, anomalies = _run(monkeypatch, tmp_path, AGAMI_PROFILE="sample")
     assert data["next"] == "ready"
     assert data["credentials"]["present"] is True
     assert data["credentials"]["type"] == "sqlite"
     assert data["credentials"]["chmod_ok"] is True
     assert anomalies == []
+
+
+def test_next_build_with_credentials_but_no_model(tmp_path, monkeypatch):
+    # Credentials saved but the build never ran: there is nothing to ask yet, so the start card must
+    # go into the build, never recommend "Ask a question" of a database with no model.
+    local = tmp_path / "local"
+    local.mkdir()
+    creds = local / "credentials"
+    creds.write_text("[sample]\ntype = sqlite\npath = /x/y.db\n", encoding="utf-8")
+    os.chmod(creds, 0o600)
+    data, _ = _run(monkeypatch, tmp_path, AGAMI_PROFILE="sample")
+    assert data["next"] == "build"
+    assert data["profile"] == "sample"
+    assert data["credentials"]["present"] is True
+
+
+def test_next_build_with_default_main_section_keeps_the_name(tmp_path, monkeypatch):
+    local = tmp_path / "local"
+    local.mkdir()
+    creds = local / "credentials"
+    creds.write_text("[main]\ntype = sqlite\npath = /x/y.db\n", encoding="utf-8")
+    os.chmod(creds, 0o600)
+    data, _ = _run(monkeypatch, tmp_path)
+    assert data["next"] == "build"
+    assert data["profile"] == "main"
 
 
 def test_next_promote_with_example_only(tmp_path, monkeypatch):

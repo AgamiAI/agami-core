@@ -274,6 +274,22 @@ def test_ready_branch_matches_the_start_card():
     assert "a reload or re-introspect request skips the card" in line
 
 
+def test_build_branch_goes_into_the_build_and_never_recommends_a_question():
+    # Credentials but no model: the returning card recommended "Ask a question" of a database with
+    # nothing built. `build` skips the card and goes straight to Phase 1.
+    text = SKILL.read_text(encoding="utf-8")
+    line = next(ln for ln in text.splitlines() if ln.startswith("1. **Resolve the environment**"))
+    branch = line.split("**`build`**", 1)[1].split("**`promote`**", 1)[0]
+    assert "show no start card" in branch
+    assert "never offer \"Ask a question\"" in branch
+    assert "Phase 1" in branch and "not `reintrospect`" in branch
+    card = _start_card()
+    assert "`data.next` is `build`" in card
+    returning = card.split("**Returning**", 1)[1]
+    assert "`data.next` is `ready`" in returning.splitlines()[0]
+    assert "and built" in returning.splitlines()[0]
+
+
 def test_fields_card_prompt_rules_out_passwords_and_urls():
     s = _between("### 0a.4c ", "### 0a.4k ")
     assert "never a password or a URL that holds one" in s
