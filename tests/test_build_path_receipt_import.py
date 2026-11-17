@@ -125,7 +125,7 @@ _OK_RECEIPT = {
     "joins": {"items": [], "undetermined": None},
     "model_version": None,
     "tables": {"items": [{"alias": "o", "declared": True, "filters": [], "freshness": None,
-                          "qname": "public.orders", "ref": "orders", "rows": None,
+                          "qname": "public.orders", "ref": "orders", "rows": None, "rows_text": None,
                           "rows_as_of": None, "scan_risk": None, "scope": "main"}],
                "undetermined": None},
 }

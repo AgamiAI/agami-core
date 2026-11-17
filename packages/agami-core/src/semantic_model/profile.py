@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Callable, ContextManager, Optional
 
 from . import dialects as D
-from .models import Column, Table
+from .models import Column, Table, rows_text
 
 Runner = Callable[[str], list[dict]]
 
@@ -542,6 +542,7 @@ def profile_table(dialect: D.Dialect, runner: Runner, t: Table, personal: Callab
     out = {"read": how, "rows_read": n, "columns": cols}
     if _rows(t) is not None:
         out["rows_estimated"] = _rows(t)
+        out["rows_estimated_text"] = rows_text(_rows(t))
     if len(t.columns) > len(live):
         out["columns_not_read"] = len(t.columns) - len(live)
     if order:

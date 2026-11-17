@@ -52,6 +52,7 @@ from .models import (
     Table,
     TableRef,
     bare_name,
+    rows_text,
     stored_identity,
     table_key,
 )
@@ -910,6 +911,10 @@ def _table_detail(
         )
     if "performance_hints" in include and table.performance_hints:
         tinfo["performance_hints"] = table.performance_hints.model_dump(exclude_none=True)
+        if table.performance_hints.estimated_row_count is not None:
+            # A capped count is stored as cap + 1; the words say "at least" so it is not read as a total.
+            tinfo["performance_hints"]["estimated_row_count_text"] = rows_text(
+                table.performance_hints.estimated_row_count)
     return tinfo
 
 

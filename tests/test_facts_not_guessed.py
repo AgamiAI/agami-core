@@ -264,6 +264,19 @@ def test_a_repeating_table_whose_key_has_spaces_gets_its_distinct_count():
     assert names == [B.record_count_name("Work Orders", key)]
 
 
+def test_a_repeat_key_no_longer_served_proposes_nothing_built_on_it():
+    # The caveat outlives a key the curator rejected: no count of an unserved column, and no
+    # row-weighted rate in its place, since every repeat would count again.
+    from semantic_model.models import Column, Table
+
+    t = Table(
+        name="tickets_v",
+        columns=[Column(name="is_escalated", type="boolean")],
+        caveats=[B.repeat_caveat("ticket_id", 3.0)],
+    )
+    assert B.suggest_metrics(t, D.get_dialect("sqlite"), flag_rates=True) == []
+
+
 def test_a_distinct_rate_binding_runs_and_counts_each_record_once(tmp_path, db):
     org, _ = I.introspect(
         "demo", "sqlite", runner=_runner(db), artifacts_dir=tmp_path, dry_run=True

@@ -1449,7 +1449,8 @@
           if (t.rows !== undefined && t.rows !== null) {
             // estimated_row_count is an introspection-time ESTIMATE — mark it (≈) and, when
             // we know when the count was last checked (`rows_as_of`), say so.
-            let txt = ' — ≈' + Number(t.rows).toLocaleString() + ' rows';
+            // `rows_text` says "at least" for a count that reached the cap, whose stored number is cap + 1.
+            let txt = t.rows_text ? ' — ' + t.rows_text : ' — ≈' + Number(t.rows).toLocaleString() + ' rows';
             const ao = t.rows_as_of ? String(t.rows_as_of).trim() : '';
             if (ao) txt += ' (estimated as of ' + maybePrettifyDate(ao) + ')';
             li.appendChild(document.createTextNode(txt));

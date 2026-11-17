@@ -1089,11 +1089,16 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
     wanted = (None if flag_rates is True
               else {n.lower() for n in flag_rates} if flag_rates else set())
     repeated = repeated_key(table)
-    if repeated:
+    # The caveat names the key as measured; a key since rejected from the model is not served, so
+    # nothing built on it could be answered. Then no record count and no rate: a row-weighted
+    # rate would count each repeat again.
+    key = next((c.name for c in table.columns if c.name.lower() == repeated[0].lower()),
+               None) if repeated else None
+    if repeated and key is None:
+        flags_here = []
+    if key is not None:
         # The repeat check leaves such a table without a one-column grain, so nothing else names its
         # records; this is the count people ask of it first, and COUNT(*) would multiply it.
-        key = next((c.name for c in table.columns if c.name.lower() == repeated[0].lower()),
-                   repeated[0])
         out.append({"name": record_count_name(t, key),
                     "calculation": f"Number of distinct {key} values in {t}: each record counts "
                                    f"once, however many rows repeat it",
@@ -1104,8 +1109,8 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
         if wanted is not None and c.name.lower() not in wanted:
             continue
         row = dialect.flag_rate_expr(dialect.ident(c.name), boolean=c.type == "boolean")
-        binding = _distinct_rate(row, dialect.ident(repeated[0])) if repeated else f"AVG({row})"
-        among = f"{repeated[0]} values" if repeated else "rows"
+        binding = _distinct_rate(row, dialect.ident(key)) if key else f"AVG({row})"
+        among = f"{key} values" if key else "rows"
         out.append({"name": flag_rate_name(t, c.name),
                     "calculation": f"Fraction of {t} where {c.name} is true, among the {among} "
                                    f"where {c.name} is set (rows where it is NULL are left out)",
@@ -1113,7 +1118,7 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
                     "source_tables": [t],
                     # The record key is read too, so a test run evaluates this same binding.
                     "_proposal": {"flags": [], "row_expr": row,
-                                  "columns": [c.name, *([repeated[0]] if repeated else [])]}})
+                                  "columns": [c.name, *([key] if key else [])]}})
     ts_cols = [c for c in table.columns
                if not c.primary_key and c.description_source != "ai_unknown"
                and c.type in _TS_TYPES and not repeated]
@@ -1123,7 +1128,9 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
                                           start_type=s.type, end_type=e.type)
         guard = dialect.duration_guard(dialect.ident(s.name), dialect.ident(e.name),
                                        start_type=s.type, end_type=e.type)
-        row = f"CASE WHEN {guard} THEN {days} END"
+        # `* 1.0`: some engines (Redshift, SQL Server) average whole numbers to a whole number, so
+        # 2.7 days would read as 2. In the row, so the test run evaluates the same expression.
+        row = f"CASE WHEN {guard} THEN {days} * 1.0 END"
         same_family = [p for p in pairs if p[2] == fam]
         name = (f"{t}_avg_days_{s.name}_to_{e.name}" if len(same_family) > 1
                 else f"{t}_avg_{fam + '_' if fam else ''}duration_days")

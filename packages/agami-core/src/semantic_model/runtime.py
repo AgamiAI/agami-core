@@ -5014,6 +5014,9 @@ def assemble_receipt(
             "qname": (f"{t.schema_name}.{t.name}" if t.schema_name else t.name) if t else None,
             "declared": t is not None,
             "rows": (ph.estimated_row_count if ph else None),
+            # The size in words: a count that reached the cap is "at least", never its stored cap + 1.
+            "rows_text": (rows_text(ph.estimated_row_count)
+                          if ph and ph.estimated_row_count is not None else None),
             "rows_as_of": (ph.estimated_row_count_at if ph else None),
             # Advisory: this table is large and the statement reads it from the outer side of a join
             # (#451). Null otherwise, or when its size is unknown.

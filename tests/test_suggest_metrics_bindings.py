@@ -95,7 +95,7 @@ def test_durations_use_the_dialects_date_arithmetic_for_the_column_types(db, pai
     guard = {"bigquery": (f"{e} >= {s}" if pair is _DATE_PAIR
                           else f"CAST({e} AS TIMESTAMP) >= CAST({s} AS TIMESTAMP)"),
              "redshift": f"{e} >= {s}", "snowflake": f"{e} >= {s}"}.get(db, f"{days} >= 0")
-    assert _binding(met) == f"AVG(CASE WHEN {guard} THEN {days} END)"
+    assert _binding(met) == f"AVG(CASE WHEN {guard} THEN {days} * 1.0 END)"
 
 
 _MIXED_PAIR = (m.Column(name="opened_on", type="date"), m.Column(name="closed_at", type="timestamp"))

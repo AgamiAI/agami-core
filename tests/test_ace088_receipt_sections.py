@@ -216,6 +216,22 @@ def test_tables_section_is_one_entry_per_reference_not_per_table(org):
     assert {(i["ref"], i["alias"]) for i in orders} == {("orders", "o"), ("public.orders", None)}
 
 
+def test_a_size_that_reached_the_cap_reads_as_at_least_never_its_stored_number(org):
+    # Stored as cap + 1 so guards stay conservative; the words must not hand that on as a total.
+    from semantic_model.models import ROW_COUNT_CAP
+
+    def orders_entry():
+        return next(i for i in _sections(org)["tables"]["items"] if i["qname"] == "public.orders")
+
+    assert orders_entry()["rows_text"] == f"about {ROW_ESTIMATE:,} rows"
+    table = next(t for a in org.subject_areas for t in a.tables_defined if t.name == "orders")
+    table.performance_hints.estimated_row_count = ROW_COUNT_CAP + 1
+    assert orders_entry()["rows_text"] == f"at least {ROW_COUNT_CAP:,} rows"
+    info = L._table_detail(org, table, None, area=None, columns=None,
+                           include=["performance_hints"], params=None, index=None)
+    assert info["performance_hints"]["estimated_row_count_text"] == f"at least {ROW_COUNT_CAP:,} rows"
+
+
 def test_tables_section_marks_a_reference_the_model_does_not_declare(org):
     """The CTE name is a reference the statement makes and the model knows nothing about. It is
     reported as undeclared rather than dropped, because a dropped reference is an unchecked one."""
@@ -655,7 +671,7 @@ def test_sections_carry_metadata_and_structure_only_never_values(org):
                    "joins_not_declared", "missing_tables", "built_from", "reason"}),
     }
     assert {frozenset(i) for i in sections["tables"]["items"]} == {
-        frozenset({"ref", "alias", "qname", "declared", "rows", "rows_as_of", "freshness",
+        frozenset({"ref", "alias", "qname", "declared", "rows", "rows_text", "rows_as_of", "freshness",
                    # The two the declared-filter accounting added. `scope` is a label built from a
                    # closed set of forms — `main` / `cte:<name>` / `subquery`, the first two taking
                    # a `#<n>` arm ordinal when the scope is one of several arms of a set operation —
