@@ -1113,3 +1113,98 @@ def test_a_card_header_stays_within_twelve_characters_however_many_questions():
     assert OQ._header(3, 40) == "Ask 3/40"
     assert OQ._header(1234, 5678) == "Ask 1234"
     assert all(len(OQ._header(i, 10**6)) <= 12 for i in (1, 999, 10**6))
+
+
+# --- ACE-183 follow-up: one question per meaning, and the plain reading offered ------------------
+
+
+def _status_table(org, db: Path, name: str, columns: tuple[str, ...], values: dict[str, int]):
+    """A small table whose status columns all hold `values` (value -> rows), each labelled itself."""
+    from semantic_model.models import Column, PerformanceHints, Table
+
+    rows = [v for v, n in values.items() for _ in range(n)]
+    con = sqlite3.connect(db)
+    con.execute(
+        f"CREATE TABLE {name}(id INTEGER PRIMARY KEY, {', '.join(f'{c} TEXT' for c in columns)})"
+    )
+    con.executemany(
+        f"INSERT INTO {name} VALUES (?{', ?' * len(columns)})",
+        [(i + 1, *([v] * len(columns))) for i, v in enumerate(rows)],
+    )
+    con.commit()
+    con.close()
+    org.subject_areas[0].tables_defined.append(
+        Table(
+            name=name,
+            schema="main",
+            performance_hints=PerformanceHints(estimated_row_count=len(rows)),
+            columns=[
+                Column(name="id", type="integer", primary_key=True),
+                *(
+                    Column(name=c, type="string", choice_field={v: v for v in values})
+                    for c in columns
+                ),
+            ],
+        )
+    )
+
+
+def _status_questions(out: dict, table: str) -> list[dict]:
+    return [q for q in out["questions"] if q.get("pattern") == "status" and q["table"] == table]
+
+
+def test_two_status_columns_holding_the_same_values_are_asked_once(store):
+    root, db = store
+    org = L.load_datasource(root)
+    # a ticketing system keeps the state twice, under a generic and a table-specific name
+    _status_table(
+        org,
+        db,
+        "problems",
+        ("state", "problem_state"),
+        {"Open": 10, "Work in Progress": 15, "Pending": 30},
+    )
+    out = _ask_org(org, db)
+    (q,) = _status_questions(out, "problems")
+    assert q["question"] == "When someone says 'open problems', which statuses count?"
+    assert "the same question" in " ".join(_dropped(out, "status", "problems"))
+
+
+def test_an_open_status_offers_the_value_called_open_first(store):
+    root, db = store
+    org = L.load_datasource(root)
+    _status_table(
+        org, db, "problems", ("state",), {"Open": 10, "Work in Progress": 15, "Pending": 30}
+    )
+    (q,) = _status_questions(_ask_org(org, db), "problems")
+    # Pending holds the most rows, but "open problems" read plainly is the ones marked Open
+    assert [(o["label"], o["value"]) for o in q["options"]] == [
+        ("Only Open", 10),
+        ("Open, Work in Progress or Pending", 55),
+    ]
+
+
+def test_a_completed_status_offers_the_value_called_completed_first(store):
+    root, db = store
+    org = L.load_datasource(root)
+    _status_table(
+        org,
+        db,
+        "projects",
+        ("status",),
+        {
+            "Completed": 20,
+            "Fieldwork Completed": 5,
+            "Closed Complete": 12,
+            "Closed Incomplete": 4,
+            "Cancelled": 3,
+        },
+    )
+    (q,) = _status_questions(_ask_org(org, db), "projects")
+    assert q["question"] == "When someone says 'completed projects', which statuses count?"
+    assert [(o["label"], o["value"]) for o in q["options"]] == [
+        ("Only Completed", 20),
+        ("Closed Complete, Completed or Fieldwork Completed", 37),
+        # the contradicting value is never a reading on its own, only something to also include
+        ("Closed Complete, Completed or Fieldwork Completed, and also Closed Incomplete", 41),
+    ]
