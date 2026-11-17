@@ -153,7 +153,7 @@ def _shop_runner(tmp_path: Path, fail_from: str, code: int, *, once: bool = Fals
     return run, state
 
 
-@pytest.mark.parametrize("phase", ["AS from_table", "g.v AS v", "AS sampled"],
+@pytest.mark.parametrize("phase", ["AS from_table", "g.v AS v", "AS rows_matched"],
                          ids=["relationships", "placeholders", "join-candidates"])
 def test_a_connection_lost_mid_build_stops_before_anything_is_written(tmp_path, phase):
     run, state = _shop_runner(tmp_path, phase, 10)
@@ -167,7 +167,7 @@ def test_a_connection_lost_mid_build_stops_before_anything_is_written(tmp_path, 
 
 
 def test_one_probe_failing_on_its_own_statement_does_not_stop_the_build(tmp_path):
-    run, state = _shop_runner(tmp_path, "AS sampled", 5, once=True)
+    run, state = _shop_runner(tmp_path, "AS rows_matched", 5, once=True)
     out = tmp_path / "acme"
     INTRO.introspect("acme", "sqlite", runner=run, artifacts_dir=tmp_path, out_dir=out)
     assert state["failed"]
