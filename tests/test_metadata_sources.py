@@ -569,3 +569,14 @@ def test_enrich_metadata_sizes_each_read_from_the_source_count(tmp_path, monkeyp
     out = json.loads(capsys.readouterr().out)
     assert "6,000,000 rows" in out["error"] and "5,000,000" in out["error"], out
     assert reads == [] and caps == [None, 5_000_000]
+
+
+def test_an_unread_count_leaves_the_metadata_read_under_the_deployment_cap():
+    from semantic_model import cli
+
+    def refused(sql):
+        raise RuntimeError("count not allowed")
+
+    assert cli._metadata_read_cap(refused, "dict") is None
+    assert cli._metadata_read_cap(lambda sql: [], "dict") is None
+    assert cli._metadata_read_cap(lambda sql: [{"n": 10}], "dict") == 1_010
