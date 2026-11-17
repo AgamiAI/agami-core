@@ -571,9 +571,33 @@ When a step is slow for a known reason, say the reason (*"each statement goes ov
 the warehouse"*), not a duration.
 
 Then **report progress from the engine's real counts** as it goes (background + tail, per 1.7):
-`columns+grain 30/52`, `joins: checking 78 on the data`, `profiled 20/42 tables`. Quote the counts the
-progress log printed; never estimate, round up or extrapolate one. For `reintrospect`, say it reads
-every table again.
+`columns+grain 30/52`, `joins: checking 78 on the data`, `joins checked 140/300`, `profiled 20/42 tables`.
+Each log line starts with its UTC time (`2026-11-17T10:04:00Z columns+grain 30/52`); quote the message
+after it. Quote the counts the progress log printed; never estimate, round up or extrapolate one. For
+`reintrospect`, say it reads every table again.
+
+**Open the progress page when the build will take more than a few minutes** — 15 or more tables on a
+database reached over the network, or any batched build (1.7 option 1). Builds read up to 4 tables at
+once, but only one at a time when the profile's sign-in may prompt (any Snowflake `authenticator`
+other than a password, key pair or token). Start it in the background
+(`run_in_background`) before the first introspect call, wait for its one line (the Monitor tool, never
+a foreground sleep); its `url` is `<progress_url>`:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" progress_page.py "<artifacts_dir>/<profile>/.introspect/progress.log" --minutes 240
+# → {"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 14400}
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/open_in_browser" "<progress_url>"
+```
+
+*"[Build progress](<progress_url>) shows each stage, its count and how long it has run."* The page reads the
+log every few seconds: batch n of N, tables read of total, the stages still to come by name, the
+current stage's count, the time elapsed, and *"Waiting on the database for 12 min: checking joins of
+orders"* when the log has gone quiet. It never estimates the time left. **Keep posting one line in
+the chat per stage change** as well (the page may not open in a remote or web session): `Reading
+columns and keys`, `Finding relationships`, `Checking joins on the data`, `Profiling columns`,
+`Testing join candidates`, done. When the log says `waiting on the database for <N> min: <what>`,
+pass that on in one line: it means a statement is slow, not that the build has stopped. Stop the
+page (TaskStop) when Phase 1 is done.
 
 ### 1.1 — Existing-model check
 
@@ -864,16 +888,18 @@ AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect \
 1. **Batched build (preferred for 30+ tables) — `--append`.** Batching is your call, never a card (question-cards rule 9): say in one line how many batches you ran. Split the kept allowlist into batches of ~10–15 tables and introspect **one batch per call**, each a *foreground* command. Every call MERGES into the existing model (prior tables' columns and keys are loaded from disk, not read again; every join of the model is checked on the data again each call), so you end with the full union — and you report `batch 3/5 (+12 tables)` between calls, natural progress with **no background monitor to babysit**:
    ```bash
    split -l 12 "<artifacts_dir>/local/tmp/agami-keep.txt" "<artifacts_dir>/local/tmp/agami-batch-"      # batch files
-   for b in "<artifacts_dir>/local/tmp/agami-batch-"*; do
+   set -- "<artifacts_dir>/local/tmp/agami-batch-"*; n=0
+   for b in "$@"; do
+     n=$((n + 1))
      AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect \
        --profile <p> --db-type <t> \
-       --artifacts "<artifacts_dir>" --tables-file "$b" --append
+       --artifacts "<artifacts_dir>" --tables-file "$b" --append --batch "$n/$#"
    done
    ```
-   (`--append` on the first batch just creates the model — there's nothing to merge yet. The relationship pass runs each batch across the union, deduped, so the final batch yields the complete join graph.)
-2. **Single background call + tail.** If you'd rather one call: run it **in the background** (Bash `run_in_background: true`) and `tail` its progress log every ~15–20s, surfacing the latest line. The engine writes a flushed, **throttled** (~every 10%) per-phase log to `<artifacts_dir>/<profile>/.introspect/progress.log` (override with `--progress`): `discovered 52 tables …`, `columns+grain 30/52`, `joins: checking 78 on the data`, `profiled 20/42 tables`, `done`.
+   (`--append` on the first batch just creates the model — there's nothing to merge yet. The relationship pass runs each batch across the union, deduped, so the final batch yields the complete join graph. `--batch n/N` writes `batch n of N` as the log's first line, for the progress page.)
+2. **Single background call + tail.** If you'd rather one call: run it **in the background** (Bash `run_in_background: true`) and `tail` its progress log every ~15–20s, surfacing the latest line. The engine writes a flushed, **throttled** (~every 10%) per-phase log to `<artifacts_dir>/<profile>/.introspect/progress.log` (override with `--progress`), each line stamped in UTC: `discovered 52 tables …`, `columns+grain 30/52`, `joins: checking 78 on the data`, `joins checked 140/300`, `profiled 20/42 tables`, `done`. A step that writes nothing for a minute adds `waiting on the database for <N> min: <what>` (table names only), so a slow statement never reads as hung.
 
-(For a handful of tables on a local database, one foreground call is enough.)
+(For a handful of tables on a local database, one foreground call is enough. Columns and keys are read for up to 4 tables at once, 1 when the profile signs in through a browser, the same limit the join checks use.)
 
 It builds + **validates** + writes the model at `<artifacts_dir>/<profile>/`: storage connection, **proposed subject areas**, per-table columns + types (catalog or value-inferred), PK→`grain`, other unique keys→`unique_keys`, FK→`relationships` with **inferred cardinality** (`many_to_one`/`one_to_many`/`one_to_one`, one-to-one when the join is on a whole key on both sides; a join only the data shows is unique keeps its label and lands `unreviewed` with a "looks one-to-one, confirm" note), `column_groups` on deep tables (≥30 cols), `sensitive` flags on PII (by whole-word column name, email-valued columns, and personal keys inside JSON values, named in a column caveat), cross-area edges, and a report. Relationships from **unenforced-FK** dialects (Redshift/Databricks/Trino) are confirmed when at least 95% of their values are found on the other side, else `unreviewed`; everything from probe mode is `unreviewed`. Every join is then checked on the data, and the report's `## joins checked on the data` section lists the ones worth a look (values with no partner, or a referenced key that repeats, which multiplies rows): mention those in the Phase 7 summary in plain words. The report prints the **capability mode per step** (catalog vs probe) — surface that to the user so they know what was read vs inferred.
 
