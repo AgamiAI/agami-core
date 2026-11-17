@@ -95,7 +95,10 @@ def provider(key: str) -> Provider | None:
     discovery_url = _discovery_url(key)  # may raise for an any-tenant MS authority
     if discovery_url is None:
         return None
-    pinned = not (key == "microsoft" and _ms_tenant().lower() == _MS_PERSONAL_AUTHORITY)
+    # The personal-accounts tenant id is an alias for `consumers` at Microsoft, so it is unpinned too.
+    pinned = not (
+        key == "microsoft" and _ms_tenant().lower() in {_MS_PERSONAL_AUTHORITY, _MS_PERSONAL_TENANT}
+    )
     return Provider(
         key,
         discovery_url,

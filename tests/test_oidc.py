@@ -716,3 +716,34 @@ def test_admin_microsoft_login_needs_pinned_tenant(consumers, monkeypatch):
     assert "Continue with Microsoft" not in c.get("/admin/login").text
     r = c.get("/admin/oidc/start", params={"provider": "microsoft"}, follow_redirects=False)
     assert r.status_code == 400 and r.json()["error"] == "invalid_request"
+
+
+def test_personal_tenant_id_is_treated_as_consumers(consumers, monkeypatch):
+    # Microsoft serves the personal-accounts tenant id and `consumers` with the same issuer, so the
+    # id is an alias and must not count as a pinned company tenant (or admin sign-in would open).
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", MS_PERSONAL_TENANT.upper())
+    p = oidc.provider("microsoft")
+    assert p.pinned is False and p.require_email_verified is True
+    with pytest.raises(ValueError):
+        oidc.verify_id_token(p, _personal_token(tid=MS_WORK_TENANT), nonce="the-nonce")
+
+
+def test_admin_callback_refuses_once_the_provider_is_unpinned(env, monkeypatch):
+    # A state minted while Microsoft was pinned cannot finish an admin sign-in after the tenant
+    # setting moves to `consumers`.
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_ID", CLIENT_ID)
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_SECRET", "ms-secret")
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", MS_TENANT)
+    _seed_admin(env, monkeypatch, provider="microsoft")
+    c = _client()
+    state, nonce = _admin_start(c, provider="microsoft")
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", "consumers")
+    monkeypatch.setattr(oidc, "_discover", lambda p: CONSUMERS_META)
+    monkeypatch.setattr(
+        oidc,
+        "exchange_code",
+        lambda p, *, code, redirect_uri: _personal_token(nonce=nonce, email=ADMIN_EMAIL),
+    )
+    cb = c.get("/oauth/oidc/callback", params={"code": "x", "state": state}, follow_redirects=False)
+    assert cb.status_code == 403
+    assert "agami_admin_session" not in cb.cookies

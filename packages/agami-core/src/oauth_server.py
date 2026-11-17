@@ -841,6 +841,10 @@ async def oidc_callback(request: Request) -> Response:
     p = _safe_provider(claims.get("provider", ""))
     if p is None:
         return _oauth_error("invalid_request", "unknown or unconfigured provider")
+    # `admin_oidc_start` already refuses an unpinned provider; checked again here so a state minted
+    # before the tenant setting changed cannot finish an admin sign-in.
+    if claims.get("purpose") == "admin_login" and not p.pinned:
+        return _oauth_error("access_denied", "admin sign-in needs a tenant-pinned provider", status=403)
     if not q.get("code"):
         return _oauth_error("invalid_request", "missing code")
     try:
