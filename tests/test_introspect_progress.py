@@ -286,13 +286,25 @@ def page(tmp_path):
     log = tmp_path / "progress.log"
     log.write_text("2026-11-17T10:00:01Z discovered 13 tables — reading columns, grain, keys\n"
                    "2026-11-17T10:00:09Z columns+grain 9/13\n", encoding="utf-8")
-    proc = subprocess.Popen([sys.executable, str(SCRIPTS / "progress_page.py"), str(log), "--minutes", "1"],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    line = proc.stdout.readline()
-    assert line, proc.stderr.read()
-    yield log, json.loads(line)["url"]
-    proc.kill()
-    proc.wait()
+    server = PP._Server(log)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    yield log, f"http://{PP.HOST}:{server.port}{server.base}"
+    server.shutdown()
+    server.server_close()
+
+
+def test_the_page_script_prints_its_link_and_exits_when_its_time_is_up(tmp_path):
+    proc = subprocess.run([sys.executable, str(SCRIPTS / "progress_page.py"), str(tmp_path / "p.log"),
+                           "--minutes", "0"], capture_output=True, text=True, timeout=30)
+    out = json.loads(proc.stdout.splitlines()[0])
+    assert proc.returncode == 0 and out["expires_in"] == 0
+    assert re.fullmatch(r"http://127\.0\.0\.1:\d+/[A-Za-z0-9_-]{43}/", out["url"])
+
+
+def test_the_page_main_serves_until_its_time_is_up(tmp_path, capsys):
+    assert PP.main([str(tmp_path / "p.log"), "--minutes", "0"]) == 0
+    assert json.loads(capsys.readouterr().out)["url"].startswith("http://127.0.0.1:")
 
 
 def _get(url: str, host: str | None = None) -> tuple[int, str, dict]:
@@ -322,6 +334,10 @@ def test_the_page_is_served_and_its_status_refreshes_from_the_log(page):
 
 def test_the_page_answers_nothing_without_its_token_or_from_another_host(page):
     _, url = page
+    req = urllib.request.Request(url + "status", data=b"{}", method="POST")
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(req, timeout=5)
+    assert e.value.code == 405
     root = url.rsplit("/", 2)[0] + "/"
     assert _get(root)[0] == 404
     assert _get(root + "status")[0] == 404
@@ -332,3 +348,47 @@ def test_the_page_answers_nothing_without_its_token_or_from_another_host(page):
 def test_a_missing_log_reads_as_not_started(tmp_path):
     s = PP.read_status(tmp_path / "nope.log", first_seen=None, now=0.0)
     assert s["stage"] is None and s["started"] is False
+
+
+def test_elapsed_counts_from_the_first_batch_this_page_saw(tmp_path):
+    log = tmp_path / "progress.log"
+    log.write_text("2026-11-17T10:30:00Z batch 2 of 2\n\n2026-11-17T10:30:01Z columns+grain 1/4\n", encoding="utf-8")
+    first = _at("2026-11-17T10:00:00Z")
+    running = PP.read_status(log, first_seen=first, now=_at("2026-11-17T10:31:00Z"))
+    assert running["run_elapsed_s"] == 31 * 60 and running["elapsed_s"] == 60
+    with log.open("a", encoding="utf-8") as fh:
+        fh.write("2026-11-17T10:40:00Z done: 4 tables, 2 relationships\n")
+    done = PP.read_status(log, first_seen=first, now=_at("2026-11-17T11:00:00Z"))
+    assert done["run_elapsed_s"] == 40 * 60 and done["elapsed_s"] == 10 * 60
+
+
+def test_an_unwritable_log_never_stops_the_build(tmp_path, shop_db):
+    (tmp_path / "blocker").write_text("a file, not a folder", encoding="utf-8")
+    org, _ = I.introspect("shop", "sqlite", runner=_runner(shop_db), artifacts_dir=tmp_path, dry_run=True,
+                          progress_path=tmp_path / "blocker" / "progress.log")
+    assert org.subject_areas
+
+
+def test_a_heartbeat_that_cannot_write_never_stops_the_build(tmp_path, shop_db, monkeypatch):
+    monkeypatch.setattr(I, "HEARTBEAT_S", 0.1)
+    real = I._write_line
+
+    def flaky(path, msg, *, beat=False):
+        if beat:
+            raise OSError("disk full")
+        real(path, msg, beat=beat)
+
+    monkeypatch.setattr(I, "_write_line", flaky)
+    pp = tmp_path / "progress.log"
+    I.introspect("shop", "sqlite", runner=_runner(shop_db, slow_on="'warehouses'", slow_for=0.6),
+                 artifacts_dir=tmp_path, dry_run=True, progress_path=pp)
+    assert STAMP.sub("", pp.read_text().splitlines()[-1]).startswith("done:")
+
+
+def test_the_batch_flag_takes_n_of_total_only():
+    from semantic_model import cli
+    assert cli._batch_arg(None) is None
+    assert cli._batch_arg("3/5") == (3, 5) and cli._batch_arg(" 1 / 1 ") == (1, 1)
+    for bad in ("0/5", "6/5", "three", "3-5"):
+        with pytest.raises(SystemExit):
+            cli._batch_arg(bad)
