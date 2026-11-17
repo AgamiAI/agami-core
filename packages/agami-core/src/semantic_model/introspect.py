@@ -112,9 +112,14 @@ ENUM_MAX_DISTINCT = 25
 # A list declared in the catalog (an enum type, a CHECK ... IN) is exact, so it is kept far past the
 # cap on a list read from the data.
 DECLARED_MAX_VALUES = 200
-# Each value list read from the data is one DISTINCT query; this bounds them per run, so a wide model
+# Each value list read from the data is one DISTINCT read; this bounds them per run, so a wide model
 # can't fire thousands.
 DISTINCT_READ_CAP = 1000
+# A table's per-column reads (its value lists, and the grain and unenforced-key checks) go this many
+# columns to a statement. Through `execute_sql.py` each statement is a new process and a new connection,
+# and on a view the view runs again each time: one statement per column cost a 60-column view minutes.
+# 25 value lists of ENUM_MAX_DISTINCT + 1 rows stay under the default 1000-row result cap.
+COMBINED_READ_COLUMNS = 25
 PROBE_TABLE_CAP = 200  # cap value-overlap probing work
 # The per-run budget the uniqueness probes and the join-candidate scan each get. Joins themselves,
 # declared keys an unenforcing engine leaves to the data included, are checked on `profile.JOIN_CHECK_CAP`.
@@ -318,6 +323,8 @@ class IntrospectReport:
     # On a refresh of an existing model: what changed structurally, per table. Empty on a first build.
     changes: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     new_tables: list[str] = field(default_factory=list)
+    # Tables whose combined per-column read failed and were read a column at a time instead.
+    read_column_by_column: list[str] = field(default_factory=list, repr=False)
 
     def render(self) -> str:
         lines = [
@@ -775,6 +782,10 @@ def _introspect(
     _scan_placeholders(dialect, runner, [*built, *(per_area.values() if refreshing else ())], rels,
                        samples, reads, report, sg, fresh_personal=fresh_personal,
                        prior=set(existing) if refreshing else set())
+    if report.read_column_by_column:
+        report.notes.append(
+            f"{len(report.read_column_by_column)} table(s) read one column at a time: the combined read of "
+            f"their columns failed (first: {report.read_column_by_column[0]})")
     to_profile = [t for t in built if table_key(t.name, t.schema_name) in read_now
                   and t.review_state not in _UNSERVED]
     _progress(pp, f"profiling {len(to_profile)} tables…")
@@ -1639,7 +1650,7 @@ def _build_table(
     est_rows = _estimate_rows(dialect, runner, schema, table, budget)
 
     # grain: catalog PKs, else uniqueness probe (skipped on very large tables — see _grain)
-    grain, gmode = _grain(dialect, runner, schema, table, cols, est_rows=est_rows)
+    grain, gmode = _grain(dialect, runner, schema, table, cols, est_rows=est_rows, report=report)
     report.mode_per_capability.setdefault("grain", gmode)
     if gmode == "probe_skipped_large":
         report.notes.append(
@@ -1654,7 +1665,7 @@ def _build_table(
     repeat = checked if checked and checked[1] > 1 else None
     if repeat:
         report.notes.append(f"{table}: {build.repeat_caveat(*repeat)}")
-    unique_keys = _unique_keys(dialect, runner, schema, table, cols, grain, est_rows=est_rows)
+    unique_keys = _unique_keys(dialect, runner, schema, table, cols, grain, est_rows=est_rows, report=report)
     if unique_keys is None:
         # Unknown, not none: a refresh keeps the stored keys rather than read this as their removal.
         unique_keys = []
@@ -1959,7 +1970,7 @@ def _rows_from(rows: Optional[list[dict]]) -> Optional[int]:
 
 def _grain(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
-    *, est_rows: Optional[int] = None,
+    *, est_rows: Optional[int] = None, report: Optional[IntrospectReport] = None,
 ) -> tuple[list[str], str]:
     pks = _try(runner, dialect.sql_primary_keys(schema, table))
     if pks:
@@ -1973,8 +1984,7 @@ def _grain(
     # probe: a single id-ish column that is unique + non-null
     candidates = [c.name for c in cols if c.name.lower() == "id" or c.name.lower().endswith("_id")]
     candidates = candidates or [c.name for c in cols[:3]]
-    for cand in candidates:
-        res = _try(runner, dialect.count_distinct_sql(schema, table, cand))
+    for cand, res in _count_reads(dialect, runner, schema, table, candidates, report):
         if not res:
             continue
         row = res[0]
@@ -1991,7 +2001,7 @@ def _grain(
 
 def _unique_keys(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
-    grain: list[str], *, est_rows: Optional[int] = None,
+    grain: list[str], *, est_rows: Optional[int] = None, report: Optional[IntrospectReport] = None,
 ) -> Optional[list[list[str]]]:
     """The table's unique keys other than its grain, in the column spelling `cols` uses, or None
     when a catalog read or a data check failed and the keys are unknown.
@@ -2029,15 +2039,112 @@ def _unique_keys(
     if est_rows is not None and est_rows >= _GRAIN_PROBE_MAX_ROWS:
         return []
     kept = []
-    for key in keys:
-        if len(key) != 1:
-            continue
-        res = _try(runner, dialect.count_distinct_sql(schema, table, key[0]))
+    singles = [key for key in keys if len(key) == 1]
+    for key, (_, res) in zip(singles, _count_reads(dialect, runner, schema, table, [k[0] for k in singles], report)):
         if res is None:
             return None
         if _all_distinct(res) is not None:
             kept.append(key)
     return kept
+
+
+def _chunks(items: list, size: int) -> Iterator[list]:
+    for i in range(0, len(items), max(1, size)):
+        yield items[i:i + max(1, size)]
+
+
+def _read_column_by_column(report: Optional[IntrospectReport], table: str) -> None:
+    if report is not None and table not in report.read_column_by_column:
+        report.read_column_by_column.append(table)
+
+
+def _count_reads(
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, columns: list[str],
+    report: Optional[IntrospectReport] = None,
+) -> Iterator[tuple[str, Optional[list[dict]]]]:
+    """Each column with its `count_distinct_sql` result (None for a failed read), read
+    COMBINED_READ_COLUMNS to a statement. A combined read that fails, or answers something else, is
+    read a column at a time, so one column of an odd type costs only that statement."""
+    for chunk in _chunks(columns, COMBINED_READ_COLUMNS):
+        got = None
+        if len(chunk) > 1:
+            got = _split_counts(_try(runner, dialect.count_distinct_many_sql(schema, table, chunk)), len(chunk))
+            if got is None:
+                _read_column_by_column(report, table)
+        for i, col in enumerate(chunk):
+            yield col, ([got[i]] if got is not None else _try(runner, dialect.count_distinct_sql(schema, table, col)))
+
+
+def _split_counts(rows: Optional[list[dict]], n: int) -> Optional[list[dict]]:
+    """Each column's `count_distinct_sql` row out of a `count_distinct_many_sql` result, or None when
+    the result is not one."""
+    if not rows or len(rows) != 1:
+        return None
+    row = rows[0]
+    try:
+        total = int(float(row.get("total")))
+        out = []
+        for i in range(n):
+            filled = int(float(row.get(f"filled{i}")))
+            out.append({"total": total, "distinct_count": int(float(row.get(f"distinct_count{i}"))),
+                        "null_count": total - filled})
+    except (TypeError, ValueError):
+        return None
+    return out
+
+
+def _value_reads(
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, columns: list[str], n: int,
+    report: Optional[IntrospectReport] = None,
+) -> Iterator[Optional[list[dict]]]:
+    """Each column's `distinct_sql` result (None for a failed read), in `columns` order, read
+    COMBINED_READ_COLUMNS to a statement and falling back to a column at a time as `_count_reads`."""
+    for chunk in _chunks(columns, COMBINED_READ_COLUMNS):
+        got = None
+        if len(chunk) > 1:
+            got = _split_tagged(_try(runner, dialect.distinct_many_sql(schema, table, chunk, n)), len(chunk))
+            if got is None:
+                _read_column_by_column(report, table)
+        for i, col in enumerate(chunk):
+            yield got[i] if got is not None else _try(runner, dialect.distinct_sql(schema, table, col, n))
+
+
+def _split_tagged(
+    rows: Optional[list[dict]], n: int, names: tuple[str, ...] = ("v",), shared: tuple[str, ...] = (),
+) -> Optional[list[list[dict]]]:
+    """Each arm's rows out of a tagged UNION ALL (`dialects.tagged_union`), in the order they came and
+    keyed as its own read keys them; None when the result is not one (a failed read, a row with no tag
+    or one out of range)."""
+    if rows is None:
+        return None
+    out: list[list[dict]] = [[] for _ in range(n)]
+    for r in rows:
+        try:
+            i = int(float(r.get("c")))
+        except (TypeError, ValueError):
+            return None
+        if not 0 <= i < n:
+            return None
+        out[i].append({**{k: r.get(f"{k}{i}") for k in names}, **{k: r.get(k) for k in shared}})
+    return out
+
+
+def _placeholder_reads(
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, columns: list[Column],
+    report: Optional[IntrospectReport] = None,
+) -> Iterator[Optional[list[dict]]]:
+    """Each column's `placeholder_scan_sql` result (None for a failed read), in `columns` order, read
+    COMBINED_READ_COLUMNS to a statement and falling back to a column at a time as `_count_reads`."""
+    for chunk in _chunks(columns, COMBINED_READ_COLUMNS):
+        got = None
+        if len(chunk) > 1:
+            sql = dialect.placeholder_scan_many_sql(schema, table, [(c.name, c.type) for c in chunk], _PLACEHOLDER_TOP)
+            got = _split_tagged(_try(runner, sql), len(chunk), ("v", "lo", "hi"), ("n", "total"))
+            if got is None:
+                _read_column_by_column(report, table)
+        for i, c in enumerate(chunk):
+            yield got[i] if got is not None else _try(
+                runner, dialect.placeholder_scan_sql(schema, table, c.name, c.type, _PLACEHOLDER_TOP))
 
 
 def _distinct_rows(
@@ -3332,8 +3439,8 @@ def _enrich_from_sample(
     """ONE live sample → (a) date_format/timezone on date-candidate columns, and
     (b) on a small table, a `choice_field` skeleton `{value: ""}` on low-cardinality CODED columns
     the catalog declared nothing for (the LLM enrichment fills the labels), read with one bounded
-    DISTINCT per column — without it, a catalog DB's coded columns (e.g. a ServiceNow integer
-    `severity`) never get an enum skeleton, so the decode can only ever live in prose. `skip` names
+    DISTINCT per column, several columns to a statement (`_value_reads`) — without it, a catalog
+    DB's coded columns (e.g. a ServiceNow integer `severity`) never get an enum skeleton, so the decode can only ever live in prose. `skip` names
     (lowercased) the columns whose declared list was rejected: they get no list at all."""
     date_cands = [c for c in cols if c.type in ("date", "timestamp", "time")
                   or (c.type in ("integer", "decimal", "string") and _looks_time_named(c.name))]
@@ -3368,8 +3475,9 @@ def _enrich_from_sample(
     if reads is not None:
         # One claim for the table, in column order: when the cap runs out, the first columns keep theirs.
         choice_cands = choice_cands[:reads.claim(len(choice_cands))]
-    for c in choice_cands:
-        rows = _try(runner, dialect.distinct_sql(schema, table, c.name, ENUM_MAX_DISTINCT + 1))
+    values = _value_reads(dialect, runner, schema, table, [c.name for c in choice_cands], ENUM_MAX_DISTINCT + 1,
+                          report)
+    for c, rows in zip(choice_cands, values):
         if rows is None or len(rows) > ENUM_MAX_DISTINCT:
             continue  # more values than a list holds: none, rather than an incomplete one
         seen = sum(1 for row in sample if row.get(c.name) not in (None, ""))
@@ -3490,6 +3598,7 @@ def _scan_placeholders(
                 by_name.setdefault(c.name, []).append(c)
         personal = {n.lower() for n in (fresh_personal or {}).get(key, set())}
         personal |= {n.lower() for n, cs in by_name.items() if any(_never_read(c) for c in cs)}
+        todo: list[tuple[str, list[Column], set[str], Column]] = []
         for name, cs in by_name.items():
             if name.lower() in personal:
                 continue
@@ -3501,7 +3610,9 @@ def _scan_placeholders(
                 skipped += 1
                 continue
             reads.left -= 1
-            rows = _try(runner, dialect.placeholder_scan_sql(key[0], key[1], c.name, c.type, _PLACEHOLDER_TOP))
+            todo.append((name, cs, kinds, c))
+        results = _placeholder_reads(dialect, runner, key[0], key[1], [c for *_, c in todo], report)
+        for (name, cs, kinds, c), rows in zip(todo, results):
             if rows is None:
                 continue  # not read: what the column holds is unknown, so nothing is dropped either
             top = [(str(r.get("v")), int(float(r.get("n") or 0))) for r in rows if r.get("v") is not None]
