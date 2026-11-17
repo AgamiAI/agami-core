@@ -14,6 +14,13 @@ below corresponds to one such version.
 
 ### Added
 
+- **Microsoft sign-in for personal accounts.** `AGAMI_OIDC_MICROSOFT_TENANT=consumers` lets
+  personal Microsoft accounts sign in, for a server anyone may use. A token is accepted only when
+  its `tid` is Microsoft's personal-accounts tenant, and the address is then treated as proven
+  (`require_email_verified` is true). `common` and `organizations` stay refused, and a tenant id
+  behaves as before. `Provider` gains `pinned`, false only on `consumers`, so a caller can refuse
+  role or group claims from it. The admin Microsoft sign-in needs a pinned tenant.
+
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm
   suggest-units`, `sm set-units`, `sm sensitive` and placeholder findings give each column a
