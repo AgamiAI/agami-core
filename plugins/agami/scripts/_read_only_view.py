@@ -104,6 +104,11 @@ def make_read_only(html: str) -> str:
 # the add-your-own-examples flow rather than to deciding the seeds.
 SAVING_HIDDEN = ("#modal", ".intro", ".reviewer-form", "#btn-add-example")
 SAVE_LABEL = "Save decisions"
+# Frozen while a save is in flight and once one has gone through (or no longer can): what the page
+# shows must stay what it sent. Every control that changes a decision, plus every form field but
+# search, which only filters. The queue's tab is left out: it is a tab, so it only navigates.
+SAVE_LOCKED = tuple(s for s in CHANGE_CONTROLS if s != ".tab-queued") + _FROZEN
+SAVE_LOCKED_FIELDS = "input:not([type=search]), select, textarea, [contenteditable]"
 
 _SAVING_STYLE = (
     '<style id="agami-saves">\n'
@@ -111,6 +116,9 @@ _SAVING_STYLE = (
     + " { display: none !important; }\n"
     + """  body.agami-saved .sticky-footer { display: none !important; }
   body.agami-save-over #btn-generate { pointer-events: none; opacity: 0.5; }
+"""
+    + ",\n".join(f"  body.agami-save-locked :is({s})" for s in (*SAVE_LOCKED, SAVE_LOCKED_FIELDS))
+    + """ { opacity: 0.55; cursor: not-allowed; }
   .agami-save-banner { margin: 0 0 16px; padding: 10px 14px; border-radius: 8px;
     border: 1px solid #D2DBF1; background: #F4F6FD; color: #1B2240; font: 14px/1.4 system-ui, sans-serif; }
   .agami-save-status:empty { display: none; }
@@ -122,7 +130,9 @@ _SAVING_STYLE = (
 
 # Posts once to `save` beside the page (the helper's token path). The helper answers each refusal
 # with a sentence, which is shown as it is; a refusal that cannot change (already saved, expired)
-# leaves the button off.
+# leaves the button off. From the press until a retryable failure, the decision controls take no
+# input: the page redraws its controls, so they are guarded by one capture-phase listener on the
+# document rather than disabled one by one, which a redraw would undo.
 _SAVING_SCRIPT = """<script id="agami-saves-script">
 window.AGAMI_SAVE = %(config)s;
 window.agamiSave = (function () {
@@ -132,12 +142,26 @@ window.agamiSave = (function () {
     if (n) { n.textContent = text; n.className = 'agami-save-status ' + (kind || ''); }
   }
   function buttons(off) { document.querySelectorAll('#btn-generate').forEach(function (b) { b.disabled = off; }); }
+  var LOCKED = %(locked)s, FIELDS = %(fields)s;
+  function frozen(t) { return !!(t && t.closest && (t.closest(LOCKED) || t.closest(FIELDS))); }
+  function guard(ev) {
+    if (!document.body || !document.body.classList.contains('agami-save-locked') || !frozen(ev.target)) return;
+    if (ev.type === 'keydown' && ev.key === 'Tab') return;  // focus can still move past
+    ev.preventDefault(); ev.stopImmediatePropagation();
+  }
+  ['click', 'dblclick', 'mousedown', 'pointerdown', 'keydown', 'beforeinput', 'input', 'change',
+   'paste', 'cut', 'drop', 'submit'].forEach(function (t) { document.addEventListener(t, guard, true); });
+  function lock(on) {
+    document.body.classList.toggle('agami-save-locked', on);
+    var a = document.activeElement;
+    if (on && a && a !== document.body && frozen(a) && a.blur) a.blur();
+  }
   document.addEventListener('DOMContentLoaded', function () {
     document.querySelectorAll('#btn-generate').forEach(function (b) { b.textContent = %(label)s; });
   });
   function save(payload) {
     if (state !== 'idle') return false;
-    state = 'saving'; buttons(true); say('Saving…');
+    state = 'saving'; buttons(true); lock(true); say('Saving…');
     fetch('save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload), cache: 'no-store', credentials: 'omit' })
       .then(function (r) { return r.json().catch(function () { return {}; })
@@ -151,11 +175,11 @@ window.agamiSave = (function () {
         state = (res.status === 409 || res.status === 410) ? 'over' : 'idle';
         // A refusal that cannot change keeps the button off, even when the page redraws its footer.
         if (state === 'over') document.body.classList.add('agami-save-over');
-        buttons(state === 'over');
+        buttons(state === 'over'); lock(state === 'over');
         say((res.b && res.b.message) || ('Not saved (' + res.status + ').'), 'bad');
       })
       .catch(function () {
-        state = 'idle'; buttons(false);
+        state = 'idle'; buttons(false); lock(false);
         say('Not saved: this page could not reach agami. If the chat has moved on, ask there for a new link.', 'bad');
       });
     return true;
@@ -210,6 +234,8 @@ def make_saving(html: str, signoff: dict, back_label: str = "I've saved it") -> 
         "config": config,
         "label": json.dumps(SAVE_LABEL),
         "saved": json.dumps(saved).replace("<", "\\u003c"),
+        "locked": json.dumps(", ".join(SAVE_LOCKED)).replace("<", "\\u003c"),
+        "fields": json.dumps(SAVE_LOCKED_FIELDS),
     }
     html = html.replace("</head>", _SAVING_STYLE + "\n" + script + "\n</head>", 1)
     return html.replace("<body>", f'<body class="agami-saves">\n{saving_banner(signoff)}', 1)

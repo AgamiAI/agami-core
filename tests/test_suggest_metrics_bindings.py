@@ -403,6 +403,29 @@ def test_a_sql_defined_table_is_test_run_over_its_sql(tmp_path, monkeypatch):
     assert (_metrics_dir(tmp_path / "m") / "tickets_is_urgent_rate.yaml").exists()
 
 
+def test_a_repeated_row_table_is_test_run_over_records_like_its_binding(tmp_path, monkeypatch):
+    """Ten rows of one true record and one row of a false record: the written metric counts
+    records (1 of 2), so the test run must too, not rows (10 of 11)."""
+    _model(tmp_path / "m")
+    _edit_table(tmp_path / "m", caveats=[build.repeat_caveat("ticket_id", 5.5)],
+                columns=[{"name": "id", "type": "integer", "primary_key": True},
+                         {"name": "ticket_id", "type": "integer"},
+                         {"name": "is_urgent", "type": "boolean"}])
+    con = sqlite3.connect(tmp_path / "db.sqlite")
+    con.execute("CREATE TABLE tickets (id INTEGER PRIMARY KEY, ticket_id INTEGER, is_urgent BOOLEAN)")
+    con.executemany("INSERT INTO tickets VALUES (?, ?, ?)",
+                    [(i, 1, 1) for i in range(10)] + [(10, 2, 0)])
+    con.commit()
+    con.close()
+    rc, out, seen = _profile_run(tmp_path, monkeypatch)
+    assert rc == 0, out
+    (p,) = out["proposals"]
+    assert "COUNT(DISTINCT" in p["binding"], p
+    assert p["test_run"]["value"] == pytest.approx(0.5), (p, seen)
+    assert "ticket_id" in seen[0]   # the sample carries the record key the binding counts
+    assert [f["flag"] for f in p["flags"]] == ["low_confidence"]   # 11 rows; not degenerate
+
+
 def test_a_sql_defined_table_whose_read_fails_is_flagged_not_test_run(tmp_path, monkeypatch):
     _model(tmp_path / "m")
     _db(tmp_path / "db.sqlite")

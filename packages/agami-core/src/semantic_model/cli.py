@@ -1021,8 +1021,10 @@ def _num(v) -> Optional[float]:
 
 
 def _test_run_sql(table, dialect, props: list[dict]) -> str:
-    """One bounded statement that evaluates every proposal on `table`: each one's AVG (its binding)
-    with the MIN and MAX of the per-row value it averages, over a sample of the columns they read."""
+    """One bounded statement that evaluates every proposal on `table`: each one's own binding with
+    the MIN and MAX of the per-row value it aggregates, over a sample of the columns they read.
+    The binding, never a re-derived AVG: on a table whose rows repeat each record it counts
+    distinct records, and an AVG over the rows would preview a different number than it writes."""
     cols = sorted({c for p in props for c in p["_proposal"]["columns"]})
     if table.source_type == "sql":
         # Newlines keep a trailing `--` comment in the table's SQL from swallowing the `)`.
@@ -1034,7 +1036,8 @@ def _test_run_sql(table, dialect, props: list[dict]) -> str:
     parts = []
     for i, p in enumerate(props):
         v = p["_proposal"]["row_expr"]
-        parts += [f"AVG({v}) AS m{i}", f"MIN({v}) AS m{i}_min", f"MAX({v}) AS m{i}_max"]
+        binding = next(iter(p["bindings"].values()))
+        parts += [f"{binding} AS m{i}", f"MIN({v}) AS m{i}_min", f"MAX({v}) AS m{i}_max"]
     return f"SELECT {', '.join(parts)}, COUNT(*) AS n_rows FROM ({inner}) sample_rows"
 
 

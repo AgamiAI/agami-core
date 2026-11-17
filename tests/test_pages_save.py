@@ -553,3 +553,139 @@ def test_the_review_tab_places_the_section_before_building_its_controls() -> Non
     assert placed < tab.index("const bar = el('div', { class: 'subtab-bar' })")
     assert placed < tab.index("const g = groups[reviewSubTab]")
     assert placed < tab.index("!reviewSubTabChosen && reviewSubTab === 'eyes'")
+
+
+# --- a saving page freezes its decisions while it saves, in a real browser (#689 review) --------
+
+_LOCK_PAGE = """<html><head></head><body>
+<div class="tab-bar"><button class="tab" id="tab">Review</button>
+  <button class="tab-queued" id="qtab">Queue</button></div>
+<input type="search" id="search">
+<div class="card-actions"><button id="approve">Approve</button></div>
+<select id="sel"><option>keep</option><option>drop</option></select>
+<textarea id="note"></textarea>
+<div class="sticky-footer"><button id="btn-generate">Save</button></div>
+<script>
+  window.hits = { tab: 0, qtab: 0, approve: 0, sel: 0 };
+  ['tab', 'qtab', 'approve'].forEach(id => document.getElementById(id)
+    .addEventListener('click', () => window.hits[id]++));
+  document.getElementById('sel').addEventListener('change', () => window.hits.sel++);
+  document.getElementById('btn-generate').addEventListener('click', () => window.agamiSave({ x: 1 }));
+</script></body></html>"""
+
+_LOCK_DRIVER = r"""
+const { chromium } = require('playwright');
+const page = process.argv[1];
+(async () => {
+  let b;
+  try { b = await chromium.launch(); } catch (e) { console.log(JSON.stringify({ skip: String(e).slice(0, 200) })); return; }
+  const p = await b.newPage(); const errs = [];
+  p.on('pageerror', e => errs.push(String(e)));
+  const replies = [];   // the helper's answers, in order; each waits for its release
+  await p.route('http://agami.test/**', async (route) => {
+    if (!route.request().url().endsWith('/save')) return route.fulfill({ contentType: 'text/html', body: page });
+    const r = replies.shift(); await r.wait;
+    route.fulfill({ status: r.status, contentType: 'application/json', body: '{"message": "m"}' });
+  });
+  const reply = (status) => { let release; const wait = new Promise(r => { release = r; }); replies.push({ status, wait }); return release; };
+  const poke = async (word) => {   // every way a person changes a decision, then what changed
+    await p.click('#approve'); await p.click('#tab'); await p.click('#qtab');
+    await p.focus('#sel'); await p.keyboard.press('d');   // type-ahead picks "drop"
+    await p.focus('#note'); await p.keyboard.type(word);
+    await p.fill('#search', word);
+    return p.evaluate(() => ({ hits: { ...window.hits }, note: document.getElementById('note').value,
+      sel: document.getElementById('sel').value, search: document.getElementById('search').value }));
+  };
+  const out = {};
+  await p.goto('http://agami.test/page');
+  const fail = reply(500);
+  await p.click('#btn-generate');
+  out.saving = await poke('a');
+  fail(); await p.waitForFunction(() => document.querySelector('.agami-save-status.bad'));
+  out.retryable = await poke('b');
+  const ok = reply(200);
+  await p.click('#btn-generate'); ok();
+  await p.waitForFunction(() => document.querySelector('.agami-save-status.ok'));
+  out.saved = await poke('c');
+  await p.goto('http://agami.test/page');
+  const gone = reply(410);
+  await p.click('#btn-generate'); gone();
+  await p.waitForFunction(() => document.querySelector('.agami-save-status.bad'));
+  out.over = await poke('d');
+  out.errs = errs;
+  console.log(JSON.stringify(out));
+  await b.close();
+})();
+"""
+
+
+def test_a_saving_page_freezes_its_decisions_until_a_retryable_failure() -> None:
+    import os
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    env = {**os.environ}
+    if "PLAYWRIGHT_BROWSERS_PATH" not in env and hasattr(os, "getuid"):
+        import pwd
+
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        for cache in (
+            home / "Library" / "Caches" / "ms-playwright",
+            home / ".cache" / "ms-playwright",
+        ):
+            if cache.is_dir():
+                env["PLAYWRIGHT_BROWSERS_PATH"] = str(cache)
+    if (
+        node is None
+        or subprocess.run(
+            [node, "-e", "require.resolve('playwright')"], env=env, capture_output=True
+        ).returncode
+    ):
+        pytest.skip(
+            "node with playwright not available (set NODE_PATH to a node_modules that has it)"
+        )
+    html = make_saving(_LOCK_PAGE, ME)
+    proc = subprocess.run(
+        [node, "-e", _LOCK_DRIVER, html], env=env, capture_output=True, text=True, timeout=90
+    )
+    assert proc.returncode == 0, proc.stderr
+    got = json.loads(proc.stdout.strip().splitlines()[-1])
+    if "skip" in got:
+        pytest.skip(got["skip"])
+    assert got["errs"] == []
+    # While saving: no decision changes, but the tabs and the search still work.
+    assert got["saving"] == {
+        "hits": {"tab": 1, "qtab": 1, "approve": 0, "sel": 0},
+        "note": "",
+        "sel": "keep",
+        "search": "a",
+    }
+    # A failure that can be retried gives the controls back.
+    assert got["retryable"] == {
+        "hits": {"tab": 2, "qtab": 2, "approve": 1, "sel": 1},
+        "note": "b",
+        "sel": "drop",
+        "search": "b",
+    }
+    # Once saved, what the page shows stays what it sent.
+    assert got["saved"] == {
+        "hits": {"tab": 3, "qtab": 3, "approve": 1, "sel": 1},
+        "note": "b",
+        "sel": "drop",
+        "search": "c",
+    }
+    # A refusal that cannot change (410: the link expired) keeps them frozen too.
+    assert got["over"] == {
+        "hits": {"tab": 1, "qtab": 1, "approve": 0, "sel": 0},
+        "note": "",
+        "sel": "keep",
+        "search": "d",
+    }
+
+
+def test_every_saving_page_carries_the_lock() -> None:
+    for template in (EXPLORER, EXAMPLES):
+        head = _head(make_saving(template.read_text(encoding="utf-8"), ME))
+        assert "lock(true)" in head and "body.agami-save-locked :is(.card-actions)" in head
+        assert ".tab-queued" not in head.split("var LOCKED = ", 1)[1].split(";", 1)[0]
