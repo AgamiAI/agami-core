@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import re
 import subprocess
@@ -288,6 +289,19 @@ class ExecuteSqlFailure(RuntimeError):
         except ImportError:  # the stdlib-only mirror without the executor module: kind unknown
             EXIT_TO_FAILURE_KIND = {}
         self.kind: Optional[str] = EXIT_TO_FAILURE_KIND.get(returncode)
+        self.refusal_rule: Optional[str] = _refusal_rule(message)
+
+
+def _refusal_rule(stderr: str) -> Optional[str]:
+    """The rule a refusal names, from the JSON object `execute_sql` writes for it as stderr's last
+    line. The last line, not the whole stream: a driver warning printed above it would otherwise
+    make the refusal unreadable, and discovery would report an empty catalog again (#668)."""
+    lines = [ln for ln in stderr.splitlines() if ln.strip()]
+    try:
+        refusal = json.loads(lines[-1]).get("refusal")
+    except (IndexError, ValueError, AttributeError):
+        return None
+    return refusal.get("rule") if isinstance(refusal, dict) else None
 
 
 def make_execute_sql_runner(
@@ -1244,6 +1258,26 @@ def _try(runner: Runner, sql: str) -> Optional[list[dict]]:
         return None
 
 
+def _catalog_read(runner: Runner, sql: str) -> Optional[list[dict]]:
+    """`_try` for discovery's own catalog reads, except that agami's guard refusing one is raised.
+
+    A database error here means the catalog is locked down, and None sends discovery to its
+    explicit-table-list advice. A refusal means agami blocked its own query, and read as None it
+    reported "no tables discovered" for a warehouse the login could read (#668)."""
+    try:
+        return runner(sql)
+    except ExecuteSqlFailure as e:
+        if e.refusal_rule:
+            raise RuntimeError(
+                f"agami's SQL guard refused the catalog read that lists tables (rule: "
+                f"{e.refusal_rule}), so none could be discovered. Refusal: {e}. To build anyway, "
+                "pass an explicit table list (schema.table) so discovery skips the catalog."
+            ) from e
+        return None
+    except Exception:
+        return None
+
+
 # Supabase (hosted Postgres) ships system schemas the user almost never wants modeled — and
 # some hold secrets (vault, pgsodium). We detect Supabase by its signature schemas and drop
 # the whole system set, so onboarding models only the user's app tables (e.g. public).
@@ -1287,14 +1321,14 @@ def _discover_tables(
         return out
 
     # catalog mode: schemas -> tables
-    schemas = _try(runner, dialect.sql_schemas())
+    schemas = _catalog_read(runner, dialect.sql_schemas())
     if schemas is not None:
         report.mode_per_capability["tables"] = "catalog"
         report.schemas = _filter_supabase_system_schemas(
             [r["schema_name"] for r in schemas], report)
         pairs: list[tuple[Optional[str], str]] = []
         for s in report.schemas:
-            trows = _try(runner, dialect.sql_tables(s)) or []
+            trows = _catalog_read(runner, dialect.sql_tables(s)) or []
             for r in trows:
                 pairs.append((r.get("schema_name", s), r["table_name"]))
         return pairs
