@@ -1655,25 +1655,63 @@ def _commit_notes(per_area: list[dict]) -> dict:
     return {"commit_note": " ".join(notes)} if notes else {}
 
 
-def _match_question(known: dict[str, set[str]], question: str) -> tuple[list[str], str]:
-    """The areas `question` names an example in, and the question text to reject there.
-    `<area>/<question>` (the label `rejected` prints) names the area outright, even when that area
-    has no such question: another area's example is never the one meant."""
+def _area_prefix(question: str, areas: list[str]) -> tuple[Optional[str], str]:
+    """The area a `<area>/<question>` names (the label `rejected` prints), and the question after it;
+    (None, question) when the text before the first `/` is no area. Matched ignoring case and the
+    spaces around the slash, so `Request / q` names `request` instead of being looked up whole."""
     q = question.strip()
     head, _, rest = q.partition("/")
-    if rest.strip() and head in known:
-        return [head], rest.strip()
+    by_key = {a.strip().casefold(): a for a in areas}
+    area = by_key.get(head.strip().casefold())
+    if rest.strip() and area is not None:
+        return area, rest.strip()
+    return None, q
+
+
+def _match_question(known: dict[str, set[str]], question: str) -> tuple[list[str], str]:
+    """The areas `question` names an example in, and the question text to reject there.
+    `<area>/<question>` names the area outright, even when that area has no such question: another
+    area's example is never the one meant."""
+    area, rest = _area_prefix(question, list(known))
+    if area is not None:
+        return [area], rest
+    q = question.strip()
     return [a for a, questions in known.items() if q in questions], q
+
+
+def _model_area_names(root: str) -> list[str]:
+    """Every subject area the model declares; empty when it does not load."""
+    try:
+        return [sa.name for sa in L.load_datasource(root, include_rejected=True).subject_areas]
+    except Exception:  # noqa: BLE001 — a model that won't load is reported by _resolve_areas
+        return []
 
 
 def cmd_remove_example_areas(args) -> int:
     areas = _resolve_areas(args)
     if areas is None:
         return 1
-    if len(args.area or []) == 1:
-        return cmd_remove_example(argparse.Namespace(**{**vars(args), "area": areas[0]}))
     known = {a: {(e or {}).get("question", "").strip()
                  for e in L.list_prompt_examples(args.root, a, include_rejected=True)} for a in areas}
+    model_areas = _model_area_names(args.root)
+    outside = []
+    for question in args.question:
+        named, _ = _area_prefix(question, model_areas)
+        literal = any(question.strip() in qs for qs in known.values())
+        if named is not None and named not in areas and not literal:
+            outside.append({"question": question, "area": named})
+    if outside:
+        # The prefix names an area this call does not cover: looking the text up whole in the
+        # covered areas would miss it and report nothing about the area that was meant.
+        _print_json({"refused": "area_not_covered", "questions": outside, "areas": areas,
+                     "message": "these questions name an area this call does not cover; nothing was "
+                                "rejected. Add that --area, or drop --area to cover every area."})
+        return 1
+    if len(args.area or []) == 1:
+        # `<area>/<question>` for the one area named is that area's question, as across several.
+        qs = [question if question.strip() in known[areas[0]] else _area_prefix(question, areas)[1]
+              for question in args.question]
+        return cmd_remove_example(argparse.Namespace(**{**vars(args), "area": areas[0], "question": qs}))
     by_area: dict[str, list[str]] = {}
     ambiguous, missing = [], []
     for question in args.question:

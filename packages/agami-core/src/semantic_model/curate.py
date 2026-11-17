@@ -2443,9 +2443,13 @@ def remove_examples(root: str | Path, area: str, questions: list[str],
         return res
     present = {(e.get("question") or "").strip() for e in existing}
     # the whole question: two that open alike must stay tellable apart (#550)
-    res.applied += [f"example (rejected) {area}/{q}" for q in _mark_examples_rejected(existing, wanted)]
+    changed = _mark_examples_rejected(existing, wanted)
+    res.applied += [f"example (rejected) {area}/{q}" for q in changed]
     for missing in sorted(wanted - present):
-        res.skipped.append({"item": missing, "reason": "no example with that question"})
+        res.skipped.append({"item": missing, "reason": f"no example with that question in area {area!r}"})
+    # Already rejected: nothing changed, and saying nothing read as success for the wrong item.
+    for done in sorted(wanted & present - {q.strip() for q in changed}):
+        res.skipped.append({"item": done, "reason": f"already rejected in area {area!r}; nothing changed"})
     if not res.applied:
         return res
     path = root / "prompt_examples" / area / "examples.yaml"
