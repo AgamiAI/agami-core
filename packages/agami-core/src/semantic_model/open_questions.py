@@ -129,6 +129,10 @@ _OPEN = (
     "processing",
 )
 _NEGATING = frozenset({"not", "non", "no"})
+# The business word each family's question says, and the values that say it plainly: when one is
+# stored ("Open", "Completed"), it is the narrow reading, whatever the row counts.
+_WORD = {"done": "completed", "open": "open"}
+_PLAIN = {"done": frozenset({"completed", "complete"}), "open": frozenset({"open"})}
 # A done-like value whose label also says it didn't succeed ("Closed Incomplete") is no one's reading
 # of "completed" on its own; it is offered only as something to also include.
 _CONTRADICTS_DONE = frozenset(
@@ -567,7 +571,7 @@ def _family(value: str) -> Optional[str]:
     joined = "_".join(_words(value))
     if words & set(_DONE) or joined in _DONE:
         return "done"
-    if words & set(_OPEN) or joined in _OPEN:
+    if words & set(_OPEN) or joined in _OPEN or "in_progress" in joined:
         return "open"
     return None
 
@@ -599,6 +603,12 @@ def _plan_status(p: _Probe) -> None:
             p.checks.append(_status_check(p, c, fam, values, aliases))
 
 
+def _plain(c: Column, fam: str, value: str) -> bool:
+    """Whether a value is the business word itself ("Open", or "Completed (signed off)")."""
+    label = _status_label(c, value).split("(", 1)[0]
+    return " ".join(_words(label)) in _PLAIN[fam] or " ".join(_words(value)) in _PLAIN[fam]
+
+
 def _contradicts(c: Column, fam: str, value: str) -> bool:
     return fam == "done" and bool(set(_words(_meaning(c, value))) & _CONTRADICTS_DONE)
 
@@ -616,7 +626,14 @@ def _status_check(p: _Probe, c: Column, fam: str, values: list[str], aliases: li
         contra = [v for v in present if v not in backed]
         if not backed:
             return None, f"every {fam} value of {c.name} also says it didn't succeed", "status"
-        narrow = backed[-1] if fam == "done" else max(backed, key=lambda v: counts[v])
+        plain = [v for v in backed if _plain(c, fam, v)]
+        narrow = (
+            plain[0]
+            if plain
+            else backed[-1]
+            if fam == "done"
+            else max(backed, key=lambda v: counts[v])
+        )
         lit = p.dialect.quote_lit
         ref = f"{p.label}.{c.name}"
 
@@ -638,7 +655,7 @@ def _status_check(p: _Probe, c: Column, fam: str, values: list[str], aliases: li
             return None, f"one {fam} value of {c.name} holds nearly every row", "status"
         tw = p.noun
         # the business word, never a value that names one of the readings
-        word = "completed" if fam == "done" else "open"
+        word = _WORD[fam]
         evidence = "; ".join(f"{_shown(counts[v])} {_status_label(c, v)}" for v in present)
         return (
             _candidate(
@@ -1438,6 +1455,37 @@ def _labels(org: Datasource) -> dict[int, str]:
     }
 
 
+def _one_per_meaning(candidates: list[dict], dropped: list[dict]) -> list[dict]:
+    """One candidate per question a person would be asked: two that say the same thing with the
+    same readings (a status kept in two columns, `state` beside `problem_state`; a table beside a
+    copy of it) are one question. The one counting the most rows is kept, then the widest apart."""
+    best: dict[tuple, dict] = {}
+    for c in candidates:
+        # a join's readings reach a named table, so links to two schemas' `users` stay two
+        readings = tuple(
+            (o["label"].lower(), o["how"] if c["pattern"] == "join" else "") for o in c["options"]
+        )
+        key = (c["pattern"], c["question"], readings)
+        held = best.get(key)
+        if held is None or _weight(c) > _weight(held):
+            best[key] = c
+    kept = {id(c) for c in best.values()}
+    for c in candidates:
+        if id(c) not in kept:
+            dropped.append(
+                {
+                    "table": c["table"],
+                    "pattern": c["pattern"],
+                    "reason": "the same question with the same readings is already asked",
+                }
+            )
+    return [c for c in candidates if id(c) in kept]
+
+
+def _weight(c: dict) -> tuple[float, float]:
+    return max((abs(o["value"] or 0) for o in c["options"]), default=0.0), c["spread"]
+
+
 def open_questions(
     org: Datasource,
     runner: Runner,
@@ -1563,6 +1611,7 @@ def open_questions(
         except ProbeFailed as e:
             failed.append({"table": None, "pattern": "fiscal", "reason": str(e)})
 
+    candidates = _one_per_meaning(candidates, dropped)
     candidates.sort(key=lambda c: -c["spread"])
     for c in candidates:
         # a unit declares no ambiguity, so it has no op name; one per table, named as one would be
