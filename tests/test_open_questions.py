@@ -10,6 +10,7 @@ A synthetic store, built by real introspection over SQLite. Generic names only.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import sys
 from datetime import date, timedelta
@@ -198,6 +199,9 @@ def test_a_current_flag_and_a_history_table(store):
     ]
     history = next(q for q in out["questions"] if q.get("op", {}).get("name") == "orders_history")
     assert history["op"]["applies_to"] == ["orders", "orders_history"]
+    assert history["question"] == (
+        "When someone asks about orders, should their recorded history count too?"
+    )
     assert [o["value"] for o in history["options"]] == [200, 400]
 
 
@@ -246,7 +250,7 @@ def test_only_codes_are_asked_about_never_words_or_counts(store):
     coded = [q for q in _ask(root, db)["questions"] if q["kind"] == "coded_values"]
     assert [(q["table"], q["column"]) for q in coded] == [("tickets", "priority")]
     assert coded[0]["question"] == (
-        "What do the values of Priority on Tickets mean? Type them in Other, e.g. P1 = …, P2 = …"
+        "What do the values of Priority on tickets mean? Type them in Other, e.g. P1 = …, P2 = …"
     )
 
 
@@ -287,7 +291,7 @@ def test_an_unreadable_column_is_asked_about(store):
     q = next(q for q in _ask(root, db)["questions"] if q["kind"] == "unknown_column")
     assert (q["table"], q["column"]) == ("events", "event_date")
     assert (
-        q["question"] == "What does Event date on Events hold? Type a short description in Other."
+        q["question"] == "What does Event date on events hold? Type a short description in Other."
     )
     res = curate.apply(
         root,
@@ -308,9 +312,7 @@ def test_an_unreadable_column_is_asked_about(store):
     assert not [q for q in _ask(root, db)["questions"] if q["kind"] == "unknown_column"]
 
 
-def test_ambiguities_come_first_ordered_by_how_far_the_readings_differ_and_are_capped(
-    store, monkeypatch
-):
+def test_ambiguities_come_first_ordered_by_how_far_the_readings_differ(store):
     root, db = store
     out = _ask(root, db)
     kinds = [q["kind"] for q in out["questions"]]
@@ -318,9 +320,6 @@ def test_ambiguities_come_first_ordered_by_how_far_the_readings_differ_and_are_c
     assert kinds == sorted(kinds, key=lambda k: (k != "fiscal_start", k != "ambiguity"))
     spreads = [q["spread"] for q in out["questions"] if q["kind"] == "ambiguity"]
     assert spreads == sorted(spreads, reverse=True)
-    monkeypatch.setattr(OQ, "MAX_QUESTIONS", 2)
-    capped = _ask(root, db)
-    assert len(capped["questions"]) == 2 and capped["more"] == len(out["questions"]) - 2
 
 
 def test_a_sensitive_column_is_never_read(store):
@@ -354,13 +353,26 @@ def test_probes_are_bounded_aggregates(store):
     assert len(seen) <= 2 * out["tables_probed"]
 
 
-def test_a_table_above_the_size_guard_is_never_scanned(store, monkeypatch):
+def test_a_table_above_the_size_guard_is_read_on_its_recent_rows_only(store, monkeypatch):
     root, db = store
     monkeypatch.setattr(I, "_OVERLAP_PROBE_MAX_ROWS", 100)
     seen: list[str] = []
     out = _ask(root, db, seen)
-    assert {"table": "orders", "reason": "too large to scan"} in out["skipped"]
-    assert not any('FROM "orders"' in sql for sql in seen)
+    # orders (200 rows) has dates, so it is read from April 2026 on, never whole
+    on_orders = [sql for sql in seen if re.search(r'FROM "main"\."orders"( |$)', sql)]
+    assert on_orders and all(" WHERE " in sql for sql in on_orders)
+    assert out["windowed"] == [{"table": "orders", "since": "2026-04-01"}]
+    assert _found(out, "status", "orders")["evidence"].startswith("since April 2026: ")
+    # its history (400 rows) has no date to narrow it by: listed as not checked, never scanned
+    assert {
+        "table": "orders_history",
+        "reason": "too large to scan, and no date to read only its recent rows",
+    } in out["skipped"]
+    assert not any('FROM "main"."orders_history"' in sql for sql in seen)
+    # a count of recent rows is not the table's size, so neither is compared with another table's
+    assert not any(q.get("op", {}).get("name") == "orders_history" for q in out["questions"])
+    look = next(q for q in out["questions"] if q["kind"] == "look_alike")
+    assert [t["rows"] for t in look["tables"]] == [None, 50]
 
 
 def test_a_failed_probe_is_listed_as_failed_not_as_settled(store):
@@ -842,3 +854,263 @@ def test_answering_one_look_alike_pair_leaves_the_others_asked(store):
     ]
     assert {"orders", "orders_new"} not in pairs
     assert {"orders", "orders_backup"} in pairs and {"orders", "orders_old"} in pairs
+
+
+# --- ACE-183: large tables, no cap, readings a person would mean, plain wording -----------------
+
+
+def _case_table(org, db: Path, rows: int = 20_000_000):
+    """A ticket-like table named in code (`support_case`), far above the size guard, with three
+    business dates and a status whose closed-but-incomplete value contradicts "completed". Its
+    entity calls the rows cases. 100 rows from 2024 sit outside the recent window."""
+    # the data ends in July, so June is the last complete month every date reaches
+    from semantic_model.models import Column, Entity, EntityMapping, PerformanceHints, Table
+
+    states = ("resolved", "closed_incomplete", "fulfilled")
+    data = []
+    for i in range(84):  # two cases opened a day, from June 1 to July 12 2026
+        opened = date(2026, 6, 1) + timedelta(days=i // 2)
+        data.append(
+            (
+                i + 1,
+                states[i % 3],
+                str(opened),
+                str(opened + timedelta(days=3)),
+                str(opened + timedelta(days=10)),
+            )
+        )
+    for i in range(100):
+        old = str(date(2024, 3, 1) + timedelta(days=i))
+        data.append((1000 + i, "fulfilled", old, old, old))
+    con = sqlite3.connect(db)
+    con.execute(
+        "CREATE TABLE support_case(id INTEGER PRIMARY KEY, state TEXT, opened_at TEXT,"
+        " resolved_at TEXT, closed_at TEXT)"
+    )
+    con.executemany("INSERT INTO support_case VALUES (?, ?, ?, ?, ?)", data)
+    con.commit()
+    con.close()
+    iso = {"type": "string", "date_format": "iso8601"}
+    sa = org.subject_areas[0]
+    sa.tables_defined.append(
+        Table(
+            name="support_case",
+            schema="main",
+            performance_hints=PerformanceHints(estimated_row_count=rows),
+            columns=[
+                Column(name="id", type="integer", primary_key=True),
+                Column(
+                    name="state",
+                    type="string",
+                    choice_field={
+                        "resolved": "Resolved",
+                        "closed_incomplete": "Closed Incomplete",
+                        "fulfilled": "Fulfilled",
+                    },
+                ),
+                Column(name="opened_at", **iso),
+                Column(name="resolved_at", **iso),
+                Column(name="closed_at", **iso),
+            ],
+        )
+    )
+    sa.entities.append(
+        Entity(
+            name="Case", maps_to=[EntityMapping(table="support_case", column="id", primary=True)]
+        )
+    )
+
+
+def test_a_twenty_million_row_table_is_asked_about_its_dates_from_its_recent_rows(store):
+    root, db = store
+    org = L.load_datasource(root)
+    _case_table(org, db)
+    seen: list[str] = []
+    out = _ask_org(org, db, seen)
+    q = _found(out, "date", "support_case")
+    assert q is not None
+    assert [o["label"] for o in q["options"]] == ["Opened at", "Resolved at", "Closed at"]
+    # June 2026 by each date; a 12-month window would reach before the rows read, so it is not used
+    assert q["evidence"] == "June 2026: 60 by Opened at; 54 by Resolved at; 40 by Closed at"
+    on_cases = [sql for sql in seen if '"support_case"' in sql]
+    assert len(on_cases) == 2 and all(" WHERE " in sql for sql in on_cases)
+    assert {"table": "support_case", "since": "2026-04-01"} in out["windowed"]
+    assert not [s for s in out["skipped"] if s["table"] == "support_case"]
+
+
+def test_a_large_table_with_no_date_is_listed_as_not_checked(store):
+    root, db = store
+    org = L.load_datasource(root)
+    _table(org, "tickets").performance_hints.estimated_row_count = 20_000_000
+    seen: list[str] = []
+    out = _ask_org(org, db, seen)
+    assert {
+        "table": "tickets",
+        "reason": "too large to scan, and no date to read only its recent rows",
+    } in out["skipped"]
+    assert not any('FROM "main"."tickets"' in sql for sql in seen)
+
+
+def test_the_largest_tables_are_probed_first_when_there_are_more_than_the_cap(store, monkeypatch):
+    root, db = store
+    org = L.load_datasource(root)
+    _case_table(org, db)
+    monkeypatch.setattr(OQ, "MAX_TABLES", 1)
+    out = _ask_org(org, db)
+    assert _found(out, "date", "support_case") is not None
+    assert {"table": "orders", "reason": "over the 1-table probe cap"} in out["skipped"]
+
+
+def test_a_status_that_contradicts_the_word_is_never_a_reading_on_its_own(store):
+    root, db = store
+    org = L.load_datasource(root)
+    _case_table(org, db)
+    q = _found(_ask_org(org, db), "status", "support_case")
+    # "Closed Incomplete" is the most final-sounding value, but no one means it by "completed"
+    assert [(o["label"], o["value"]) for o in q["options"]] == [
+        ("Only Resolved", 28),
+        ("Fulfilled or Resolved", 56),
+        ("Fulfilled or Resolved, and also Closed Incomplete", 84),
+    ]
+    assert q["evidence"] == "since April 2026: 28 Fulfilled; 28 Resolved; 28 Closed Incomplete"
+
+
+def test_questions_name_the_rows_in_plain_words_never_a_table_name(store):
+    root, db = store
+    org = L.load_datasource(root)
+    _case_table(org, db)
+    out = _ask_org(org, db)
+    assert _found(out, "date", "support_case")["question"] == (
+        "When someone says 'cases last month', which date do they mean?"
+    )
+    assert _found(out, "status", "support_case")["question"] == (
+        "When someone says 'completed cases', which statuses count?"
+    )
+    names = {t.name for sa in org.subject_areas for t in sa.tables_defined if "_" in t.name}
+    for q in out["questions"]:
+        if q["kind"] != "ambiguity":
+            continue
+        text = q["question"].lower()
+        assert not any(n.lower() in text or n.replace("_", " ") in text for n in names), text
+        assert "support" not in text
+        if q["pattern"] == "date":  # the example word never names one of the readings
+            words = {w for o in q["options"] for w in o["label"].lower().split()} - {"at", "on"}
+            assert not words & set(re.findall(r"[a-z]+", text)), text
+
+
+def test_an_open_status_question_says_open_never_one_of_its_readings(store):
+    root, db = store
+    con = sqlite3.connect(db)
+    con.execute("UPDATE orders SET status = 'pending' WHERE status = 'cancelled' AND id % 8 = 4")
+    con.execute("UPDATE orders SET status = 'awaiting' WHERE status = 'cancelled'")
+    con.commit()
+    con.close()
+    org = L.load_datasource(root)
+    status = next(c for c in _table(org, "orders").columns if c.name == "status")
+    status.choice_field = {v: "" for v in ("paid", "shipped", "delivered", "pending", "awaiting")}
+    q = next(
+        q
+        for q in _ask_org(org, db)["questions"]
+        if q.get("pattern") == "status" and q["op"]["name"] == "orders_status_open"
+    )
+    assert q["question"] == "When someone says 'open orders', which statuses count?"
+
+
+def test_every_candidate_is_returned_past_a_dozen_widest_apart_first(store):
+    from semantic_model.models import Column, PerformanceHints, Table
+
+    root, db = store
+    org = L.load_datasource(root)
+    con = sqlite3.connect(db)
+    iso = {"type": "string", "date_format": "iso8601"}
+    for k in range(15):
+        name = f"jobs_{chr(97 + k)}"
+        con.execute(f"CREATE TABLE {name}(id INTEGER PRIMARY KEY, started_at TEXT, ended_at TEXT)")
+        same = 36 - 2 * k  # rows that end in June too; the rest end in July
+        con.executemany(
+            f"INSERT INTO {name} VALUES (?, ?, ?)",
+            [
+                (i + 1, f"2026-06-{i % 28 + 1:02d}", "2026-06-29" if i < same else "2026-07-02")
+                for i in range(40)
+            ]
+            + [(41, "2026-07-05", "2026-07-06")],  # the data runs into July, so June is complete
+        )
+        org.subject_areas[0].tables_defined.append(
+            Table(
+                name=name,
+                schema="main",
+                performance_hints=PerformanceHints(estimated_row_count=40),
+                columns=[
+                    Column(name="id", type="integer", primary_key=True),
+                    Column(name="started_at", **iso),
+                    Column(name="ended_at", **iso),
+                ],
+            )
+        )
+    con.commit()
+    con.close()
+    out = _ask_org(org, db)
+    assert "more" not in out
+    jobs = [q["table"] for q in out["questions"] if (q.get("table") or "").startswith("jobs_")]
+    # all 15, with the job table whose two dates differ most first
+    assert jobs == [f"jobs_{chr(97 + k)}" for k in reversed(range(15))]
+    ambiguities = [q for q in out["questions"] if q["kind"] == "ambiguity"]
+    assert len(ambiguities) > 12
+    spreads = [q["spread"] for q in ambiguities]
+    assert spreads == sorted(spreads, reverse=True)
+
+
+def test_a_month_before_the_recent_rows_is_never_compared(store, monkeypatch):
+    root, db = store
+    monkeypatch.setattr(I, "_OVERLAP_PROBE_MAX_ROWS", 100)
+    org = L.load_datasource(root)
+    # orders end in July; read from July on, June's counts would miss its rows dated only in June
+    out = OQ.open_questions(
+        org, _sqlite_runner(db), D.get_dialect("sqlite"), today=date(2026, 10, 15)
+    )
+    assert _dropped(out, "date", "orders") == [
+        "the rows since July 2026 hold no complete month to compare"
+    ]
+
+
+def test_a_table_read_on_its_recent_rows_is_not_compared_with_its_history(store):
+    root, db = store
+    org = L.load_datasource(root)
+    _table(org, "orders").performance_hints.estimated_row_count = 20_000_000
+    out = _ask_org(org, db)
+    assert not any(q.get("op", {}).get("name") == "orders_history" for q in out["questions"])
+    assert _dropped(out, "current", "orders") == [
+        "one table was read on its recent rows only, so their sizes can't be compared"
+    ]
+
+
+def test_a_status_whose_every_done_value_failed_is_not_asked(store):
+    root, db = store
+    con = sqlite3.connect(db)
+    con.execute("UPDATE orders SET status = 'closed_failed' WHERE status IN ('paid', 'delivered')")
+    con.execute("UPDATE orders SET status = 'closed_cancelled' WHERE status = 'shipped'")
+    con.commit()
+    con.close()
+    org = L.load_datasource(root)
+    status = next(c for c in _table(org, "orders").columns if c.name == "status")
+    status.choice_field = {"closed_failed": "", "closed_cancelled": "", "cancelled": ""}
+    out = _ask_org(org, db)
+    assert _found(out, "status", "orders") is None
+    assert _dropped(out, "status", "orders") == [
+        "every done value of status also says it didn't succeed"
+    ]
+
+
+def test_an_entity_without_a_plural_is_made_plural():
+    assert [OQ._plural(w) for w in ("category", "day", "box", "case")] == [
+        "categories",
+        "days",
+        "boxes",
+        "cases",
+    ]
+
+
+def test_a_card_header_stays_within_twelve_characters_however_many_questions():
+    assert OQ._header(3, 40) == "Ask 3/40"
+    assert OQ._header(1234, 5678) == "Ask 1234"
+    assert all(len(OQ._header(i, 10**6)) <= 12 for i in (1, 999, 10**6))

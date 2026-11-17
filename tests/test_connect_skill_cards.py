@@ -769,9 +769,14 @@ def test_2g_asks_only_checked_questions_from_the_engine():
         assert kind in s, kind
 
 
-def test_2g_cards_are_capped_and_every_question_can_skip_the_rest():
+def test_2g_pages_every_question_and_each_can_skip_the_rest():
     s = _section_2g()
-    assert "up to 4 questions per card" in s and "at most 12" in s
+    # ACE-183: the engine has no cap; the skill pages its questions onto cards
+    assert "up to 4 questions per card" in s and "there is no cap" in s and "at most 12" not in s
+    # a table not checked is said, never passed over as settled
+    assert "`skipped`" in s and "Not checked:" in s and "`windowed`" in s
+    # every card's evidence is shown just before it, not a table cut off after 15 rows
+    assert "**Show each page before its card**" in s and "at most 15 rows" not in s
     assert "every question ends with **Skip the rest**" in s
     assert "**Ask each time**" in s
     assert "no option is marked Recommended" in s

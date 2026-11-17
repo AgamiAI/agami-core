@@ -28,10 +28,17 @@ coded values whose meaning enrichment left blank, columns it marked unreadable, 
 
 **Bounded.** Every probe is an aggregate over one table: one statement per table for every pattern,
 one more for a table's date windows, and two for the fiscal check, built with the dialect helpers
-introspection uses. A table whose estimated size is above introspection's overlap-probe guard is not
-scanned; one whose size is unknown is, as introspection itself probes it. At most `MAX_TABLES` tables
-are probed. A column flagged sensitive is never read. Only counts and sums come back; no row value is
+introspection uses. A table whose estimated size is above introspection's overlap-probe guard is
+aggregated over its recent rows only (any business date since `RECENT_MONTHS` months back), since
+the biggest table is often the one people ask about most. That bounds the rows aggregated, not the
+rows read: an OR across date columns still scans the table on a warehouse without an index on them
+(Redshift, Snowflake, BigQuery) and through a view. One with no business date to narrow it by is not
+probed, and is listed under `skipped` with every other table not checked. One whose size is unknown
+is scanned, as introspection itself probes it. At most `MAX_TABLES` tables are probed, the largest
+first. A column flagged sensitive is never read. Only counts and sums come back; no row value is
 printed, and a failed probe is reported by its error's class alone.
+
+**Every candidate is returned**, the readings furthest apart first; a skill pages them onto cards.
 
 **Nothing is declared here.** Each candidate carries the `add` op that would declare it, without a
 default or behaviour: the person picks the usual reading, and whether the agent asks or answers and
@@ -54,10 +61,11 @@ from .units import CURRENCY_SYMBOLS
 
 Runner = Callable[[str], list[dict]]
 
-# At most this many questions are put to a person in one build: three cards of four.
-MAX_QUESTIONS = 12
-# At most this many tables are probed in one run.
+# At most this many tables are probed in one run, the largest first.
 MAX_TABLES = 60
+# A table too large to scan is read on the rows with a business date since the first of the month
+# this many months back: enough to hold the last complete month, which the date check compares.
+RECENT_MONTHS = 3
 # Two readings "differ" when their answers are at least this far apart, relative to the larger. A
 # choice that moves the answer by less is not worth a card: on a live run it was 24 against 23.
 MIN_DIFFERENCE = 0.05
@@ -121,6 +129,23 @@ _OPEN = (
     "processing",
 )
 _NEGATING = frozenset({"not", "non", "no"})
+# A done-like value whose label also says it didn't succeed ("Closed Incomplete") is no one's reading
+# of "completed" on its own; it is offered only as something to also include.
+_CONTRADICTS_DONE = frozenset(
+    {
+        "incomplete",
+        "cancelled",
+        "canceled",
+        "unsuccessful",
+        "failed",
+        "rejected",
+        "abandoned",
+        "unresolved",
+        "declined",
+        "void",
+        "voided",
+    }
+)
 
 # The words that make an amount column a reading of "how much"; a component (tax, discount, a fee)
 # or a per-unit price is part of an amount, not another reading of it.
@@ -284,6 +309,33 @@ def _phrase(name: str) -> str:
     return words if first.isupper() and len(first) > 1 else words[:1].lower() + words[1:]
 
 
+def _plural(word: str) -> str:
+    if re.search(r"[^aeiou]y$", word):
+        return word[:-1] + "ies"
+    return word + "es" if word.endswith(("s", "x", "ch", "sh")) else word + "s"
+
+
+def _nouns(org: Datasource) -> dict[str, tuple[str, str]]:
+    """What each table's rows are called, (plural, singular), by the entity anchored on it: a table
+    is often named for the system that writes it (`support_case`) while its entity says "Case". A table with none falls back
+    to its own name in plain words."""
+    out: dict[str, tuple[str, str]] = {}
+    entities = [e for sa in org.subject_areas for e in sa.entities]
+    for e in [*entities, *org.cross_subject_area_entities]:
+        home = e.resolved_primary_table
+        if home and e.review_state != "rejected":
+            name = _phrase(e.name)
+            out.setdefault(
+                home.rsplit(".", 1)[-1].lower(), (_phrase(e.plural or _plural(name)), name)
+            )
+    return out
+
+
+def _noun(nouns: dict[str, tuple[str, str]], t: Table) -> tuple[str, str]:
+    words = _phrase(t.name)
+    return nouns.get(t.name.lower(), (words, I._singular(words)))
+
+
 class ProbeFailed(Exception):
     """A probe the database refused or couldn't run. The reason is the error's class (and the
     executor's failure kind, such as `network`), never its text: a database message can quote the
@@ -365,12 +417,33 @@ class _Probe:
     """One table's aggregates, gathered into one statement: every pattern adds the expressions it
     needs and reads them back by alias once the statement has run."""
 
-    def __init__(self, dialect: D.Dialect, t: Table, label: str, area: str):
+    def __init__(self, dialect: D.Dialect, t: Table, label: str, area: str, noun: tuple[str, str]):
         self.dialect, self.table, self.label, self.area = dialect, t, label, area
+        self.noun, self.one = noun
         self.fq = dialect.qualified(t.schema_name, t.name)
         self.exprs: list[str] = ["COUNT(*) AS n"]
         self.checks: list[Callable[[dict], tuple[Optional[dict], Optional[str], str]]] = []
         self.row: Optional[dict] = None
+        # Set on a table too large to scan: only rows with a business date since this day are
+        # aggregated (which bounds the rows counted, not necessarily the rows the engine reads).
+        self.since: Optional[date] = None
+        self.where = ""
+
+    def recent(self, since: date, cols: list[Column]) -> None:
+        """Aggregate only the rows with any of `cols` on or after `since`. This bounds the rows
+        aggregated, not the rows read: an OR across columns still scans the table on an engine that
+        can't prune by it (Redshift, Snowflake, BigQuery, a view). Any, not one: a row opened in
+        March and closed in June is one of June's closed rows, so every date's count in a window
+        from `since` on is the same as on the whole table."""
+        lit = self.dialect
+        self.since = since
+        self.where = " WHERE " + " OR ".join(
+            f"{self.q(c.name)} >= {_day_literal(lit, c, since.isoformat())}" for c in cols
+        )
+
+    def scope(self) -> str:
+        """Which rows a count covers, for a candidate's evidence."""
+        return f"since {self.since:%B %Y}" if self.since else "all rows"
 
     def q(self, column: str) -> str:
         return self.dialect.quote_ident(column)
@@ -384,7 +457,7 @@ class _Probe:
         return self.add(f"SUM(CASE WHEN {condition} THEN 1 ELSE 0 END)")
 
     def statement(self) -> str:
-        return f"SELECT {', '.join(self.exprs)} FROM {self.fq}"
+        return f"SELECT {', '.join(self.exprs)} FROM {self.fq}{self.where}"
 
     def n(self) -> int:
         return int(_number((self.row or {}).get("n")) or 0)
@@ -430,7 +503,11 @@ def _plan_dates(p: _Probe, runner: Runner, today: date) -> None:
         keep = sorted(keep, key=lambda k: -k[1])[:_MAX_READINGS]
         if len(keep) < 2:
             return None, "fewer than two date columns are filled on most rows", "date"
-        windows = _date_windows([k[2] for k in keep], today)
+        windows = [
+            w for w in _date_windows([k[2] for k in keep], today) if not p.since or w[1] >= p.since
+        ]
+        if not windows:
+            return None, f"the rows {p.scope()} hold no complete month to compare", "date"
         lit = p.dialect
         exprs = [
             f"SUM(CASE WHEN {p.q(c.name)} >= {_day_literal(lit, c, lo.isoformat())} AND {p.q(c.name)} < "
@@ -438,8 +515,8 @@ def _plan_dates(p: _Probe, runner: Runner, today: date) -> None:
             for w, (_, lo, hi) in enumerate(windows)
             for i, (c, _, _) in enumerate(keep)
         ]
-        row = _run(runner, f"SELECT {', '.join(exprs)} FROM {p.fq}")
-        tw = _phrase(p.table.name)
+        row = _run(runner, f"SELECT {', '.join(exprs)} FROM {p.fq}{p.where}")
+        tw = p.noun
         for w, (name, _, _) in enumerate(windows):
             options = [
                 _reading(
@@ -522,6 +599,10 @@ def _plan_status(p: _Probe) -> None:
             p.checks.append(_status_check(p, c, fam, values, aliases))
 
 
+def _contradicts(c: Column, fam: str, value: str) -> bool:
+    return fam == "done" and bool(set(_words(_meaning(c, value))) & _CONTRADICTS_DONE)
+
+
 def _status_check(p: _Probe, c: Column, fam: str, values: list[str], aliases: list[str]):
     def check(_row: dict):
         counts = {v: p.value(a) or 0 for v, a in zip(values, aliases)}
@@ -531,30 +612,40 @@ def _status_check(p: _Probe, c: Column, fam: str, values: list[str], aliases: li
         if fam == "done":
             # In the order things happen (paid, shipped, delivered); the narrow reading is the last.
             present.sort(key=lambda v: -_done_rank(_meaning(c, v)))
-            narrow = present[-1]
-        else:
-            narrow = max(present, key=lambda v: counts[v])
+        backed = [v for v in present if not _contradicts(c, fam, v)]
+        contra = [v for v in present if v not in backed]
+        if not backed:
+            return None, f"every {fam} value of {c.name} also says it didn't succeed", "status"
+        narrow = backed[-1] if fam == "done" else max(backed, key=lambda v: counts[v])
         lit = p.dialect.quote_lit
         ref = f"{p.label}.{c.name}"
-        wide = _reading(
-            _listed([_status_label(c, v) for v in present]),
-            f"{ref} IN ({', '.join(lit(v) for v in present)})",
-            sum(counts[v] for v in present),
-        )
-        only = _reading(
-            f"Only {_status_label(c, narrow)}", f"{ref} = {lit(narrow)}", counts[narrow]
-        )
-        options = [only, wide]
+
+        def among(vs: list[str], label: str) -> dict:
+            return _reading(
+                label, f"{ref} IN ({', '.join(lit(v) for v in vs)})", sum(counts[v] for v in vs)
+            )
+
+        labels = _listed([_status_label(c, v) for v in backed])
+        options = [
+            _reading(f"Only {_status_label(c, narrow)}", f"{ref} = {lit(narrow)}", counts[narrow])
+        ]
+        if len(backed) > 1:
+            options.append(among(backed, labels))
+        if contra:
+            also = _listed([_status_label(c, v) for v in contra])
+            options.append(among(backed + contra, f"{labels}, and also {also}"))
         if not differ([o["value"] for o in options]):
             return None, f"one {fam} value of {c.name} holds nearly every row", "status"
-        tw = _phrase(p.table.name)
-        word = "completed" if fam == "done" else _status_label(c, narrow).lower()
+        tw = p.noun
+        # the business word, never a value that names one of the readings
+        word = "completed" if fam == "done" else "open"
+        evidence = "; ".join(f"{_shown(counts[v])} {_status_label(c, v)}" for v in present)
         return (
             _candidate(
                 "status",
                 p.label,
                 f"When someone says '{word} {tw}', which statuses count?",
-                "; ".join(f"{_shown(counts[v])} {_status_label(c, v)}" for v in present),
+                evidence if not p.since else f"{p.scope()}: {evidence}",
                 options,
                 _op(
                     _name(p.label, f"{c.name}_{fam}"),
@@ -611,7 +702,7 @@ def _plan_amounts(p: _Probe) -> None:
         ]
         if len(options) < 2 or not differ([o["value"] for o in options]):
             return None, "the amount columns add up to the same total", "amount"
-        tw = _phrase(p.table.name)
+        tw = p.noun
         which = (
             ("currency" if all(u in CURRENCY_SYMBOLS for u in units) else "unit")
             if by_unit
@@ -625,7 +716,7 @@ def _plan_amounts(p: _Probe) -> None:
                 "unit" if by_unit else "amount",
                 p.label,
                 f"When someone asks how much {tw} came to, which {which} do they mean?",
-                "all rows: " + "; ".join(f"{o['shown']} in {o['label']}" for o in options),
+                f"{p.scope()}: " + "; ".join(f"{o['shown']} in {o['label']}" for o in options),
                 options,
                 _op(
                     _name(p.label, "amount"),
@@ -666,7 +757,7 @@ def _unit_candidate(
         "unit",
         p.label,
         f"When someone asks how much {tw} came to, which {which} do they mean?",
-        "all rows: " + "; ".join(f"{o['shown']} in {o['label']}" for o in options),
+        f"{p.scope()}: " + "; ".join(f"{o['shown']} in {o['label']}" for o in options),
         options,
         None,
     )
@@ -707,12 +798,16 @@ def _refers_to(key: tuple[str, str], t: Table) -> bool:
     return key[1] == mine[1] and (not key[0] or not mine[0] or key[0] == mine[0])
 
 
-def _plan_joins(p: _Probe, groups: dict[tuple, list], targets: dict[tuple, str]) -> None:
+def _plan_joins(
+    p: _Probe, groups: dict[tuple, list], targets: dict[tuple, tuple[str, str]]
+) -> None:
     cols = {c.name: c for c in p.table.columns}
     for (frm, to, _), rels in groups.items():
         if not _refers_to(frm, p.table):
             continue
-        tt, tc = targets.get(to, rels[0].to_table), rels[0].to_column
+        tt, one = targets.get(to, (rels[0].to_table, ""))
+        tc = rels[0].to_column
+        one = one or I._singular(_phrase(tt.rsplit(".", 1)[-1]))
         rels = [r for r in rels if r.from_column in cols and _readable(cols[r.from_column])][
             :_MAX_READINGS
         ]
@@ -727,21 +822,24 @@ def _plan_joins(p: _Probe, groups: dict[tuple, list], targets: dict[tuple, str])
                 apart[(x, y)] = p.add(
                     f"SUM(CASE WHEN {a} = {b} OR ({a} IS NULL AND {b} IS NULL) THEN 0 ELSE 1 END)"
                 )
-        p.checks.append(_join_check(p, tt, tc, rels, linked, apart))
+        p.checks.append(_join_check(p, tt, tc, one, rels, linked, apart))
 
 
-def _targets(groups: dict[tuple, list], tables: list[tuple[Table, str, str]]) -> dict[tuple, str]:
+def _targets(
+    groups: dict[tuple, list], tables: list[tuple[Table, str, str]], nouns: dict
+) -> dict[tuple, tuple[str, str]]:
     """Each join target's label, schema-qualified when its bare name is shared, so joins to
-    `sales.users` and `support.users` get different names and guidance."""
+    `sales.users` and `support.users` get different names and guidance; and what one of its rows
+    is called."""
     out = {}
     for _, to, _ in groups:
-        hits = [label for t, label, _ in tables if _refers_to(to, t)]
+        hits = [(label, _noun(nouns, t)[1]) for t, label, _ in tables if _refers_to(to, t)]
         if len(hits) == 1:
             out[to] = hits[0]
     return out
 
 
-def _join_check(p: _Probe, tt: str, tc: str, rels: list, linked: list[str], apart: dict):
+def _join_check(p: _Probe, tt: str, tc: str, one: str, rels: list, linked: list[str], apart: dict):
     def check(_row: dict):
         n = p.n()
         # A key filled on few rows records an event (who voided it), not another reading of the link,
@@ -764,14 +862,14 @@ def _join_check(p: _Probe, tt: str, tc: str, rels: list, linked: list[str], apar
             )
             for i in keep
         ]
-        fw = _phrase(p.table.name)
-        one = I._singular(_phrase(tt.rsplit(".", 1)[-1]))
+        fw = p.noun
         return (
             _candidate(
                 "join",
                 p.label,
                 f"When someone asks about {fw} by {one}, which {one} do they mean?",
-                f"{_shown(moved)} of {_shown(n)} rows link to a different {one} depending on the join; "
+                ("" if not p.since else f"{p.scope()}: ")
+                + f"{_shown(moved)} of {_shown(n)} rows link to a different {one} depending on the join; "
                 + "; ".join(f"{o['shown']} rows have a {o['label']}" for o in options),
                 options,
                 _op(
@@ -822,13 +920,14 @@ def _current_check(p: _Probe, alias: str, how: str):
         ]
         if not differ([o["value"] for o in options]):
             return None, "nearly every row is current", "current"
-        tw = _phrase(p.table.name)
+        tw = p.noun
         return (
             _candidate(
                 "current",
                 p.label,
                 f"When someone asks how many {tw} there are, do they mean only the current ones?",
-                f"{options[0]['shown']} current of {options[1]['shown']} rows",
+                ("" if not p.since else f"{p.scope()}: ")
+                + f"{options[0]['shown']} current of {options[1]['shown']} rows",
                 options,
                 _op(
                     _name(p.label, "current"),
@@ -879,6 +978,12 @@ def _relatives(tables: list[tuple[Table, str, str]]) -> list[tuple[str, tuple, t
 
 
 def _history_candidate(base: _Probe, other: _Probe) -> tuple[Optional[dict], Optional[str], str]:
+    if base.since or other.since:
+        return (
+            None,
+            "one table was read on its recent rows only, so their sizes can't be compared",
+            "current",
+        )
     options = [
         _reading(f"Only {plain_words(base.table.name)}", f"count rows of {base.label}", base.n()),
         _reading(
@@ -889,12 +994,12 @@ def _history_candidate(base: _Probe, other: _Probe) -> tuple[Optional[dict], Opt
     ]
     if not differ([o["value"] for o in options]):
         return None, f"{other.label} holds as many rows as {base.label}", "current"
-    bw = _phrase(base.table.name)
+    bw = base.noun
     return (
         _candidate(
             "current",
             base.label,
-            f"When someone asks about {bw}, should {_phrase(other.table.name)} count too?",
+            f"When someone asks about {bw}, should their recorded history count too?",
             f"{options[0]['shown']} rows in {plain_words(base.table.name)}, {options[1]['shown']} in "
             f"{plain_words(other.table.name)}",
             options,
@@ -941,7 +1046,8 @@ def _look_alike(base: tuple, other: tuple, probes: dict) -> dict:
             {
                 "table": label,
                 "label": plain_words(t.name),
-                "rows": p.n() if p is not None and p.row else None,
+                # a windowed probe counted recent rows only, not the table's size
+                "rows": p.n() if p is not None and p.row and not p.since else None,
                 "ops": [_table_op(u, u_area, field="caveats", value=[*u.caveats, note])],
             }
         )
@@ -1049,7 +1155,9 @@ def _codes(values: list[str]) -> bool:
     return bool(values) and sum(_code_like(v) for v in values) * 2 >= len(values)
 
 
-def _unread_columns(tables: list[tuple[Table, str, str]]) -> tuple[list[dict], list[dict]]:
+def _unread_columns(
+    tables: list[tuple[Table, str, str]], nouns: dict
+) -> tuple[list[dict], list[dict]]:
     coded, unknown = [], []
     labels = {id(t): label for t, label, _ in tables}
     for t, _, area in tables:
@@ -1077,7 +1185,7 @@ def _unread_columns(tables: list[tuple[Table, str, str]]) -> tuple[list[dict], l
                             value=dict(c.choice_field or {}),
                         ),
                         "question": f"What do the values of {plain_words(c.name)} on "
-                        f"{plain_words(t.name)} mean? Type them in Other, e.g. {shown}",
+                        f"{_noun(nouns, t)[0]} mean? Type them in Other, e.g. {shown}",
                     }
                 )
             elif c.description_source == "ai_unknown" and not (c.description or "").strip():
@@ -1085,7 +1193,7 @@ def _unread_columns(tables: list[tuple[Table, str, str]]) -> tuple[list[dict], l
                     {
                         "kind": "unknown_column",
                         **where,
-                        "question": f"What does {plain_words(c.name)} on {plain_words(t.name)} "
+                        "question": f"What does {plain_words(c.name)} on {_noun(nouns, t)[0]} "
                         "hold? Type a short description in Other.",
                         # the person's words go in `value`; `source: human` says whose they are
                         "op": _table_op(
@@ -1119,6 +1227,12 @@ def _says(q: dict, o: dict) -> str:
         q["pattern"], "rows"
     )
     return f"{o['shown']} {unit}"
+
+
+def _header(i: int, total: int) -> str:
+    """`Ask 3/40`, within a card header's 12 characters however many questions there are."""
+    full = f"Ask {i}/{total}"
+    return full if len(full) <= 12 else f"Ask {i}"[:12]
 
 
 def _card(q: dict, header: str) -> dict:
@@ -1219,7 +1333,7 @@ def open_questions(
     org: Datasource, runner: Runner, dialect: D.Dialect, *, today: Optional[date] = None
 ) -> dict:
     """Every candidate the data shows, checked by running its readings, then what the build couldn't
-    read, capped at `MAX_QUESTIONS`; see the module docstring."""
+    read; see the module docstring."""
     today = today or date.today()
     calls = [0]
 
@@ -1230,15 +1344,17 @@ def open_questions(
     declared = {a.name for a in org.ambiguities}
     groups = _join_groups(org)
     tables = _physical_tables(org)
-    targets = _targets(groups, tables)
+    nouns = _nouns(org)
+    targets = _targets(groups, tables, nouns)
     relatives = _relatives(tables)
     related = {lbl for _, base, other in relatives for lbl in (base[1], other[1])}
 
     probes: dict[str, _Probe] = {}
     eligible: list[_Probe] = []  # every table it would be safe to probe, for the fiscal check
     skipped: list[dict] = []
+    planned = []
     for t, label, area in tables:
-        p = _Probe(dialect, t, label, area)
+        p = _Probe(dialect, t, label, area, _noun(nouns, t))
         _plan_dates(p, counted, today)
         _plan_status(p)
         _plan_amounts(p)
@@ -1246,15 +1362,20 @@ def open_questions(
         _plan_current(p, today)
         if t.source_type == "table" and not I._too_big_to_probe(t) and _rows(t) != 0:
             eligible.append(p)
+        planned.append(p)
+    # The largest first, so a cap on tables never leaves out the one people ask about most.
+    planned.sort(key=lambda p: -(_rows(p.table) or 0))
+    for p in planned:
+        t, label = p.table, p.label
         if not p.checks and label not in related:
             continue
-        if t.source_type != "table" or I._too_big_to_probe(t):
+        if t.source_type != "table":
+            skipped.append({"table": label, "reason": "defined by SQL, not a table"})
+        elif I._too_big_to_probe(t) and not _date_columns(t):
             skipped.append(
                 {
                     "table": label,
-                    "reason": "too large to scan"
-                    if t.source_type == "table"
-                    else "defined by SQL, not a table",
+                    "reason": "too large to scan, and no date to read only its recent rows",
                 }
             )
         elif _rows(t) == 0:
@@ -1262,6 +1383,8 @@ def open_questions(
         elif len(probes) >= MAX_TABLES:
             skipped.append({"table": label, "reason": f"over the {MAX_TABLES}-table probe cap"})
         else:
+            if I._too_big_to_probe(t):
+                p.recent(_month_start(today, RECENT_MONTHS), _date_columns(t))
             probes[label] = p
 
     candidates: list[dict] = []
@@ -1321,14 +1444,13 @@ def open_questions(
             failed.append({"table": None, "pattern": "fiscal", "reason": str(e)})
 
     candidates.sort(key=lambda c: -c["spread"])
-    coded, unknown = _unread_columns(tables)
+    coded, unknown = _unread_columns(tables, nouns)
     asked = [_fiscal_start_question()] if org.fiscal_year_start_unasked() else []
-    questions = (asked + candidates + look_alikes + coded + unknown)[:MAX_QUESTIONS]
+    questions = asked + candidates + look_alikes + coded + unknown
     for i, q in enumerate(questions, 1):
-        q["card"] = _card(q, f"Ask {i}/{len(questions)}")
+        q["card"] = _card(q, _header(i, len(questions)))
     return {
         "questions": questions,
-        "more": max(0, len(asked + candidates + look_alikes + coded + unknown) - MAX_QUESTIONS),
         "counts": {
             "ambiguities": len(candidates),
             "look_alike": len(look_alikes),
@@ -1339,6 +1461,10 @@ def open_questions(
         "failed": failed,
         "dropped": dropped,
         "skipped": skipped,
+        # tables too large to scan, read on their recent rows only
+        "windowed": [
+            {"table": label, "since": p.since.isoformat()} for label, p in probes.items() if p.since
+        ],
         "tables_probed": len(probes),
         "statements": calls[0],
     }
