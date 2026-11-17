@@ -568,20 +568,40 @@ def set_datasource_description(root: str | Path, description: str) -> "ApplyResu
     `datasource.md` narrative, which is context read after the datasource is chosen. Validated and
     committed like `set_key_terminology`, with the prior file restored on a validation failure. Only
     the first line is kept and it is stripped: a routing label that spans paragraphs stops being one."""
+    line = (description or "").strip().splitlines()[0].strip() if (description or "").strip() else ""
+    if not line:
+        res = ApplyResult()
+        res.errors.append("description is empty")
+        return res
+    return _set_datasource_field(root, "description", line, "datasource description")
+
+
+def set_fiscal_year_start(root: str | Path, month: int) -> "ApplyResult":
+    """Record the month the fiscal year starts in, as a person gave it (ACE-182), January included:
+    the build never writes one, and `open_questions` asks until this has run."""
+    if not isinstance(month, int) or not 1 <= month <= 12:
+        res = ApplyResult()
+        res.errors.append(f"fiscal_year_start_month must be a month from 1 to 12, not {month!r}")
+        return res
+    return _set_datasource_field(root, "fiscal_year_start_month", month, "fiscal year start",
+                                 also={"fiscal_year_start_confirmed": True})
+
+
+def _set_datasource_field(root: str | Path, field: str, value: Any, msg: str, *,
+                          also: Optional[dict] = None) -> "ApplyResult":
+    """Write one datasource.yaml field (and `also`, alongside it), validated and committed, with the
+    prior file restored on a validation failure."""
     root = Path(root)
     res = ApplyResult()
     dsp = root / "datasource.yaml"
     if not dsp.exists():
         res.errors.append(f"no datasource.yaml at {dsp}")
         return res
-    line = (description or "").strip().splitlines()[0].strip() if (description or "").strip() else ""
-    if not line:
-        res.errors.append("description is empty")
-        return res
     prior = dsp.read_text(encoding="utf-8")
     odoc = _load(dsp) or {}
-    before = odoc.get("description")
-    odoc["description"] = line
+    before = odoc.get(field)
+    odoc[field] = value
+    odoc.update(also or {})
     _dump(dsp, odoc)
     try:
         vres = V.validate(load_datasource(root, include_rejected=True), cache=_VALIDATION_CACHE)
@@ -594,10 +614,10 @@ def set_datasource_description(root: str | Path, description: str) -> "ApplyResu
         res.errors.append(f"validation failed to run: {e}")
         dsp.write_text(prior, encoding="utf-8")
         return res
-    res.applied = ["description"]
+    res.applied = [field]
     res.committed, res.commit_note = _record(
-        root, "datasource description",
-        [{"op": "edit", "kind": "datasource", "field": "description", "value": line, "before": before}],
+        root, msg,
+        [{"op": "edit", "kind": "datasource", "field": field, "value": value, "before": before}],
         None, None)
     return res
 

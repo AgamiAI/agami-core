@@ -572,6 +572,7 @@ def apply_spec(
     org.cross_subject_area_relationships = cross
     if spec.get("fiscal_year_start_month"):
         org.fiscal_year_start_month = int(spec["fiscal_year_start_month"])
+        org.fiscal_year_start_confirmed = True  # a spec a person filled in is their answer
 
     v = validator.validate(org)
     res.errors = v.errors

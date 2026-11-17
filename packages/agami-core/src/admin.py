@@ -995,6 +995,9 @@ def model_overview_html(
     tree = _model_tree_html(org, datasource, datasources)
     table_total = sum(len(a.tables_defined) for a in org.subject_areas)
     ver = ui.esc(version[:8]) if version else f"v{org.version}"
+    # Unset until someone says when the fiscal year starts (ACE-182); never shown as a month.
+    month = org.fiscal_year_start_month
+    fiscal = f"Starts month {month}" if month else "Not set yet"
     stats = (
         f'<div class="stat"><div class="k">Subject areas</div>'
         f'<div class="v">{len(org.subject_areas)}</div></div>'
@@ -1002,7 +1005,7 @@ def model_overview_html(
         f'<div class="stat"><div class="k">Version</div>'
         f'<div class="v mono" style="font-size:14px">{ver}</div></div>'
         f'<div class="stat"><div class="k">Fiscal year</div>'
-        f'<div class="v" style="font-size:14px">Starts month {org.fiscal_year_start_month}</div></div>'
+        f'<div class="v" style="font-size:14px">{fiscal}</div></div>'
     )
     areas = "".join(
         f'<a class="trow" href="{_model_url(datasource, area=a.name)}">'

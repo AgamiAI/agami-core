@@ -807,6 +807,14 @@ _CARRIED_DATASOURCE_KEYS = ("key_terminology", "ambiguities", "cross_subject_are
                             "cross_subject_area_metrics")
 
 
+def _fiscal_start(org: Datasource, out: Path) -> dict:
+    prev = _previous_doc(out)
+    month = org.fiscal_year_start_month or prev.get("fiscal_year_start_month")
+    confirmed = org.fiscal_year_start_confirmed or bool(prev.get("fiscal_year_start_confirmed"))
+    return {**({"fiscal_year_start_month": month} if month else {}),
+            **({"fiscal_year_start_confirmed": True} if month and confirmed else {})}
+
+
 def _carried_datasource_fields(org: Datasource, out: Path) -> dict:
     prev = _previous_doc(out)
     carried = {k: prev[k] for k in _CARRIED_DATASOURCE_KEYS if prev.get(k)}
@@ -864,7 +872,8 @@ def write_tree(
         # wiped the one line an agent routes a question by on every re-introspect (#327). Keep the
         # previous file's line unless the caller supplies a new one.
         "description": org.description or _previous_description(out),
-        "fiscal_year_start_month": org.fiscal_year_start_month,
+        # Written only once someone has said it (ACE-182); a rewrite keeps the answer on file.
+        **_fiscal_start(org, out),
         "storage_connections": [
             {"name": sc.name, "ref": f"datasources/{sc.name}/storage.yaml"}
             for sc in org.storage_connections
@@ -990,6 +999,39 @@ def flag_rate_name(table: str, column: str) -> str:
     return f"{table}_{column}_rate"
 
 
+# A table (often a view joining a record to its stages or periods) that holds each record on several
+# rows (ACE-182). Introspection measures it and writes this caveat; the caveat is the one place it is
+# kept, so the agent reading the table and `suggest_metrics` both see it. Worded as a factor, never a
+# row count, so the measured-figure check does not read it as one.
+_REPEAT_CAVEAT = ("Rows repeat about {factor} times per {key}: count records with COUNT(DISTINCT {key}), "
+                  "never COUNT(*).")
+_REPEAT_RE = re.compile(r"^Rows repeat about (\d+(?:\.\d+)?) times per (\S+?): ")
+
+
+def repeat_caveat(key: str, factor: float) -> str:
+    shown = f"{factor:.0f}" if factor >= 2 else f"{factor:.1f}"
+    return _REPEAT_CAVEAT.format(factor=shown, key=key)
+
+
+def is_repeat_caveat(text: str) -> bool:
+    return bool(_REPEAT_RE.match(text))
+
+
+def repeated_key(table: Table) -> Optional[tuple[str, float]]:
+    """(key, factor) when the table's rows repeat each record, from its repeat caveat; else None."""
+    for c in table.caveats:
+        m = _REPEAT_RE.match(c)
+        if m:
+            return m.group(2), float(m.group(1))
+    return None
+
+
+def _distinct_rate(row: str, key: str) -> str:
+    """A flag's share of true over records, not rows: each record counts once however often it repeats."""
+    return (f"COUNT(DISTINCT CASE WHEN {row} = 1.0 THEN {key} END) * 1.0 / "
+            f"NULLIF(COUNT(DISTINCT CASE WHEN {row} IS NOT NULL THEN {key} END), 0)")
+
+
 def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
                     flag_rates: bool | Collection[str] = False) -> list[dict]:
     """Per-table reusable measures inferred STRUCTURALLY — all general, no vendor patterns:
@@ -1026,26 +1068,33 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
     Columns agami couldn't read (`description_source == "ai_unknown"`) are SKIPPED — we don't
     propose a metric on a column we can't explain (its prose would just restate opaque SQL).
     Re-run after such a column is described and it becomes eligible (write_items is incremental,
-    so no duplicates)."""
+    so no duplicates).
+
+    On a table whose rows repeat each record (`repeated_key`), a rate counts distinct records, and
+    no duration average is proposed: an average over the repeats weights each record by how often
+    it repeats, and the repeats are where such views differ."""
     t = table.name
     st = dialect.name
     out: list[dict] = []
     flags_here = flag_columns(table)
     wanted = (None if flag_rates is True
               else {n.lower() for n in flag_rates} if flag_rates else set())
+    repeated = repeated_key(table)
     for c in flags_here:
         if wanted is not None and c.name.lower() not in wanted:
             continue
         row = dialect.flag_rate_expr(dialect.ident(c.name), boolean=c.type == "boolean")
+        binding = _distinct_rate(row, dialect.ident(repeated[0])) if repeated else f"AVG({row})"
+        among = f"{repeated[0]} values" if repeated else "rows"
         out.append({"name": flag_rate_name(t, c.name),
-                    "calculation": f"Fraction of {t} where {c.name} is true, among the rows "
+                    "calculation": f"Fraction of {t} where {c.name} is true, among the {among} "
                                    f"where {c.name} is set (rows where it is NULL are left out)",
-                    "bindings": {st: f"AVG({row})"},
+                    "bindings": {st: binding},
                     "source_tables": [t],
                     "_proposal": {"flags": [], "columns": [c.name], "row_expr": row}})
     ts_cols = [c for c in table.columns
                if not c.primary_key and c.description_source != "ai_unknown"
-               and c.type in _TS_TYPES]
+               and c.type in _TS_TYPES and not repeated]
     pairs = _duration_pairs(ts_cols)
     for s, e, fam, flags in pairs:
         days = dialect.duration_days_expr(dialect.ident(s.name), dialect.ident(e.name),
@@ -1083,6 +1132,7 @@ __all__ = [
     "infer_cardinality", "cluster_by_family", "group_by_joins", "make_area", "make_table_ref",
     "propose_subject_areas", "extract_cross_area_relationships",
     "suggest_metrics", "flag_columns", "flag_rate_name", "suspected_pii", "suspected_reason",
+    "repeat_caveat", "repeated_key", "is_repeat_caveat",
     "canonical_description",
     "write_tree", "WriteReport",
 ]

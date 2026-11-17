@@ -83,6 +83,7 @@ def test_every_field_the_model_declares_is_read_back(tmp_path, monkeypatch):
         org_id="00000000-0000-0000-0000-000000000001",
         version=3,
         fiscal_year_start_month=9,
+        fiscal_year_start_confirmed=True,
         key_terminology={"order": "a purchase"},
         ambiguities=[
             {

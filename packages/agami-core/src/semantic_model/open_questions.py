@@ -15,7 +15,12 @@ The patterns, each generic and found from the model alone:
 * `amount`: two or more amount columns on one table (a subtotal beside a total with tax);
 * `join`: two joins from one table to the same key of another (the issued vs the redeemed sale);
 * `current`: a versioned table (a current flag or a valid-to date), or a table beside its history;
-* `fiscal`: a datasource whose fiscal year doesn't start in January.
+* `fiscal`: a datasource whose fiscal year doesn't start in January;
+* `unit`: the `amount` pattern when the amounts are one figure in different currencies or units,
+  a fact whose card offers the units and no way of behaving.
+
+A fiscal start nobody gave (`fiscal_start`) is always asked, January included, since the build never
+writes one (ACE-182).
 
 Beside them come the questions only a person can answer that the build already knows it couldn't:
 coded values whose meaning enrichment left blank, columns it marked unreadable, and look-alike tables
@@ -45,6 +50,7 @@ from . import dialects as D
 from . import introspect as I
 from .models import Column, Datasource, Table, table_key
 from .plain_names import plain_words
+from .units import CURRENCY_SYMBOLS
 
 Runner = Callable[[str], list[dict]]
 
@@ -338,7 +344,7 @@ def _candidate(
     question: str,
     evidence: str,
     options: list[dict],
-    op: dict,
+    op: Optional[dict],
     share: Optional[float] = None,
 ) -> dict:
     """`share` is how far apart the readings are when their values don't say it (a join's readings
@@ -590,20 +596,35 @@ def _plan_amounts(p: _Probe) -> None:
         return
     aliases = [p.add(f"SUM({p.q(c.name)})") for c in cols]
 
+    # The same amount in different currencies or units (ACE-182): the person names the one people
+    # report in, a fact, so each reading is labelled by its unit and the card offers only those.
+    units = [c.unit or B.name_currency(c.name) for c in cols]
+    by_unit = all(units) and len(set(units)) == len(units)
+    if by_unit and any(c.startswith(_REPORTED_IN) for c in p.table.caveats):
+        return  # answered: the table already says which one people report in
+
     def check(_row: dict):
         options = [
-            _reading(plain_words(c.name), f"SUM({p.label}.{c.name})", p.value(a))
-            for c, a in zip(cols, aliases)
+            _reading(u if by_unit else plain_words(c.name), f"SUM({p.label}.{c.name})", p.value(a))
+            for c, a, u in zip(cols, aliases, units)
             if p.value(a) is not None  # a column empty on every row is no reading of "how much"
         ]
         if len(options) < 2 or not differ([o["value"] for o in options]):
             return None, "the amount columns add up to the same total", "amount"
         tw = _phrase(p.table.name)
+        which = (
+            ("currency" if all(u in CURRENCY_SYMBOLS for u in units) else "unit")
+            if by_unit
+            else "amount"
+        )
+        if by_unit:
+            cand = _unit_candidate(p, cols, units, options, tw, which)
+            return cand, None if cand else "a unit or column name is not one short line", "unit"
         return (
             _candidate(
-                "amount",
+                "unit" if by_unit else "amount",
                 p.label,
-                f"When someone asks how much {tw} came to, which amount do they mean?",
+                f"When someone asks how much {tw} came to, which {which} do they mean?",
                 "all rows: " + "; ".join(f"{o['shown']} in {o['label']}" for o in options),
                 options,
                 _op(
@@ -618,6 +639,38 @@ def _plan_amounts(p: _Probe) -> None:
         )
 
     p.checks.append(check)
+
+
+_REPORTED_IN = "Amounts are reported in "
+
+
+def _unit_candidate(
+    p: _Probe, cols: list[Column], units: list[str], options: list[dict], tw: str, which: str
+) -> Optional[dict]:
+    """A unit is a fact, not a meaning to choose per question: each option carries the ops that
+    record it, every column's unit (as `sm set-units` writes it) and a caveat on the table naming
+    the one people report in. No ambiguity is declared, so the agent never offers the others."""
+    stamp = [
+        _table_op(p.table, p.area, column=c.name, field="unit", value=u)
+        for c, u in zip(cols, units)
+        if not c.unit
+    ]
+    for o in options:
+        column = next(c.name for c, u in zip(cols, units) if u == o["label"])
+        note = f"{_REPORTED_IN}{o['label']}: use {column} unless a question names another {which}."
+        o["ops"] = [
+            *stamp,
+            _table_op(p.table, p.area, field="caveats", value=[*p.table.caveats, note]),
+        ]
+    cand = _candidate(
+        "unit",
+        p.label,
+        f"When someone asks how much {tw} came to, which {which} do they mean?",
+        "all rows: " + "; ".join(f"{o['shown']} in {o['label']}" for o in options),
+        options,
+        None,
+    )
+    return None if _unsafe({"options": options}) else cand
 
 
 # ---------------------------------------------------------------------------
@@ -966,6 +1019,21 @@ def _fiscal_candidate(
     ), None
 
 
+# The months offered for a fiscal start: the calendar year first, then the commonest other starts.
+# Any other month is typed in Other.
+_FISCAL_MONTHS = (1, 4, 7)
+
+
+def _fiscal_start_question() -> dict:
+    """The month the fiscal year starts in, asked whenever nobody has said (ACE-182). A fact with
+    one answer, so its options are months, never how the agent should behave."""
+    return {
+        "kind": "fiscal_start",
+        "question": "Which month does your fiscal year start in? Type another month in Other.",
+        "options": [{"label": calendar.month_name[m], "month": m} for m in _FISCAL_MONTHS],
+    }
+
+
 # ---------------------------------------------------------------------------
 # What the build already knows it couldn't read
 # ---------------------------------------------------------------------------
@@ -1047,7 +1115,9 @@ def _says(q: dict, o: dict) -> str:
     """What one reading's answer is, in a few words, for its option's description."""
     if q["pattern"] == "date":
         return f"{o['shown']} in {q['evidence'].split(':', 1)[0]}"
-    unit = {"amount": "over all rows", "join": "rows have one"}.get(q["pattern"], "rows")
+    unit = {"amount": "over all rows", "unit": "over all rows", "join": "rows have one"}.get(
+        q["pattern"], "rows"
+    )
     return f"{o['shown']} {unit}"
 
 
@@ -1057,6 +1127,8 @@ def _card(q: dict, header: str) -> dict:
     person knows), and Skip the rest on every one, so a long list ends in one press."""
     if q["kind"] == "ambiguity":
         shown = q["options"][:2]
+        if q["pattern"] == "unit":
+            shown = q["options"][:3]  # a unit is a fact: its values, and no way of behaving
         options = [
             {
                 "label": o["label"],
@@ -1065,13 +1137,19 @@ def _card(q: dict, header: str) -> dict:
             }
             for o in shown
         ]
-        options.append(
-            {
-                "label": "Ask each time",
-                "description": "agami asks which one when a question doesn't say",
-                "preview": "\n".join(f"{o['label']}: {o['shown']}" for o in q["options"]),
-            }
-        )
+        if q["pattern"] != "unit":
+            options.append(
+                {
+                    "label": "Ask each time",
+                    "description": "agami asks which one when a question doesn't say",
+                    "preview": "\n".join(f"{o['label']}: {o['shown']}" for o in q["options"]),
+                }
+            )
+    elif q["kind"] == "fiscal_start":
+        options = [
+            {"label": o["label"], "description": f"The fiscal year starts on {o['label']} 1"}
+            for o in q["options"]
+        ]
     elif q["kind"] == "look_alike":
         options = [
             {
@@ -1191,9 +1269,9 @@ def open_questions(
     failed: list[dict] = []
 
     def keep(cand: Optional[dict], why: Optional[str], table: Optional[str], pattern: str) -> None:
-        if cand and cand["op"]["name"] in declared:
+        if cand and cand["op"] and cand["op"]["name"] in declared:
             dropped.append({"table": table, "pattern": pattern, "reason": "already declared"})
-        elif cand and _unsafe(cand["op"]):
+        elif cand and _unsafe(cand["op"] or {}):
             dropped.append(
                 {
                     "table": table,
@@ -1234,7 +1312,7 @@ def open_questions(
         elif kind == "look_alike" and not _answered(base[0], other[0]):
             look_alikes.append(_look_alike(base, other, probes))
 
-    if org.fiscal_year_start_month != 1 and "fiscal_year" not in declared:
+    if org.fiscal_year_start_month not in (None, 1) and "fiscal_year" not in declared:
         try:
             pool = [p for p in eligible if p.label in probes or len(probes) < MAX_TABLES]
             cand, why = _fiscal_candidate(org, counted, dialect, pool, today)
@@ -1244,12 +1322,13 @@ def open_questions(
 
     candidates.sort(key=lambda c: -c["spread"])
     coded, unknown = _unread_columns(tables)
-    questions = (candidates + look_alikes + coded + unknown)[:MAX_QUESTIONS]
+    asked = [_fiscal_start_question()] if org.fiscal_year_start_unasked() else []
+    questions = (asked + candidates + look_alikes + coded + unknown)[:MAX_QUESTIONS]
     for i, q in enumerate(questions, 1):
         q["card"] = _card(q, f"Ask {i}/{len(questions)}")
     return {
         "questions": questions,
-        "more": max(0, len(candidates + look_alikes + coded + unknown) - MAX_QUESTIONS),
+        "more": max(0, len(asked + candidates + look_alikes + coded + unknown) - MAX_QUESTIONS),
         "counts": {
             "ambiguities": len(candidates),
             "look_alike": len(look_alikes),
