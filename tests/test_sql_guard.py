@@ -1095,6 +1095,18 @@ def test_a_trailing_semicolon_still_passes(sql: str) -> None:
     assert check_read_only(sql) is None, sql
 
 
+def test_many_comment_markers_are_peeled_in_linear_time() -> None:
+    # Rebuilding the suffix's character set for every `--` made this quadratic: a statement just
+    # under the length cap took ~1.8 s before reaching the database. Linear, it takes milliseconds.
+    import time
+
+    sql = "SELECT 1 -- " + "-- " * ((_MAX_SQL_CHARS - 20) // 3) + "'"
+    assert len(sql) < _MAX_SQL_CHARS
+    started = time.perf_counter()
+    check_read_only(sql)
+    assert time.perf_counter() - started < 0.5
+
+
 @pytest.mark.parametrize(
     ("sql", "hint"),
     [("SELECT a FROM t WHERE p = 'C:\\'", "CHR(92)"), ("SELECT a FROM t WHERE b = ''''", "CHR(39)")],

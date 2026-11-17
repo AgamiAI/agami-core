@@ -130,12 +130,12 @@ def _without_trailing_separators(sql: str) -> str:
                 continue
         # The leftmost `-- ` on the last line, not the last `--`: in `-- note --x` the comment
         # starts at the first marker and the second is its text.
+        # The body may hold none of `_TAIL_FORBIDDEN`, so the opener must come after the last
+        # such character on the line; finding that once keeps the search linear.
         line = max(text.rfind("\n"), text.rfind("\r")) + 1
-        start = text.find("--", line)
-        while start != -1:
-            body = text[start + 2 :]
-            if (not body or body[0] in " \t") and not _TAIL_FORBIDDEN & set(body):
-                break
+        floor = max([line] + [text.rfind(ch, line) + 1 for ch in _TAIL_FORBIDDEN])
+        start = text.find("--", floor)
+        while start != -1 and text[start + 2 : start + 3] not in ("", " ", "\t"):
             start = text.find("--", start + 1)
         if start != -1:
             text = text[:start]
