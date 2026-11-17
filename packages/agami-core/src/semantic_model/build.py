@@ -1050,8 +1050,9 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
 
     Each dict also carries `_proposal`, which is not a Metric field and is popped before writing:
     `flags` (why a person should look before it is kept — an ambiguous or audit pairing, a table
-    under TINY_TABLE_ROWS rows), `columns` (what the binding reads) and `row_expr` (the per-row
-    value the binding averages, which a test run checks for a constant result).
+    under TINY_TABLE_ROWS rows), `columns` (every column the binding reads, a repeated table's
+    record key included, so a test run can evaluate the binding itself) and `row_expr` (the
+    per-row value the binding aggregates, which a test run checks for a constant result).
 
     A plain COUNT(*) / SUM(col) / AVG(col) is never proposed. `runtime._check_aggregation_semantics`
     enforces a column's `aggregation` class on every statement with or without a named metric, and
@@ -1091,7 +1092,9 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
                                    f"where {c.name} is set (rows where it is NULL are left out)",
                     "bindings": {st: binding},
                     "source_tables": [t],
-                    "_proposal": {"flags": [], "columns": [c.name], "row_expr": row}})
+                    # The record key is read too, so a test run evaluates this same binding.
+                    "_proposal": {"flags": [], "row_expr": row,
+                                  "columns": [c.name, *([repeated[0]] if repeated else [])]}})
     ts_cols = [c for c in table.columns
                if not c.primary_key and c.description_source != "ai_unknown"
                and c.type in _TS_TYPES and not repeated]

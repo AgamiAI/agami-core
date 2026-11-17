@@ -3,7 +3,9 @@
 Most AI data agents quietly pick a join, quietly pick a definition of "revenue",
 and quietly return a number. agami makes every one of those decisions **auditable**:
 each one is either derived from something your database already guarantees, or
-approved by a named person — and every answer carries a receipt showing which.
+approved by a named person — and every answer carries a receipt showing which. The receipt, and
+everything else sent to the AI client, says only *whether* a definition is approved; who approved
+it stays in the model, for the people who own it.
 
 This page is the deep dive. For the summary, see the [README](../README.md#the-trust-layer).
 

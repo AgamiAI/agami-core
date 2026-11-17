@@ -4565,8 +4565,7 @@ def assemble_receipt(
         # per-relationship build had — it printed a signed-off trail beside a join written on the
         # wrong column. Composed as one dict so both branches carry the identical key set.
         signoff: dict[str, Any] = {key: None for key in (
-            "name", "cardinality", "confidence", "origin", "review_state", "signed_off_by",
-            "signed_off_role", "signed_off_at", "cross_schema", "on")}
+            "name", "cardinality", "confidence", "origin", "review_state", "cross_schema", "on")}
         if match is not None:
             signoff = {
                 "name": f"{match.from_table}_to_{match.to_table}",
@@ -4576,10 +4575,8 @@ def assemble_receipt(
                 # else was proposed by introspection and is a guess until someone signs it off.
                 "origin": "fk" if match.confidence == "confirmed" else "introspect_heuristic",
                 # The sign-off state a consumer filters on to raise its own unreviewed-join banner.
+                # Only the state: who signed it off stays in the model and never reaches the client.
                 "review_state": match.review_state,
-                "signed_off_by": match.signed_off_by,
-                "signed_off_role": match.signed_off_role,
-                "signed_off_at": match.signed_off_at,
                 "cross_schema": match.cross_schema,
                 "on": match.on,
             }
@@ -4720,7 +4717,7 @@ def assemble_receipt(
         # Composed as one dict so every branch carries the identical key set.
         trust: dict[str, Any] = {key: None for key in (
             "name", "area", "definition_prose", "expression", "confidence", "origin",
-            "review_state", "signed_off_by", "signed_off_role", "signed_off_at", "source_tables")}
+            "review_state", "source_tables")}
         if match is not None:
             trust = {
                 "name": match.metric.name, "area": match.area,
@@ -4739,10 +4736,8 @@ def assemble_receipt(
                 # Reported, never used as a filter on which metrics were considered: the approved
                 # body checked signed-off metrics only, so a hand-roll of a `proposed` metric was
                 # silent, which is the opposite of what the section is for.
+                # Only the state, as for a join: who signed it off stays in the model.
                 "review_state": match.metric.review_state,
-                "signed_off_by": match.metric.signed_off_by,
-                "signed_off_role": match.metric.signed_off_role,
-                "signed_off_at": match.metric.signed_off_at,
             }
         output_items.append({
             # Which of the two kinds of item in this section this is. Stated on the item rather than

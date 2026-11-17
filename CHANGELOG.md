@@ -276,6 +276,11 @@ below corresponds to one such version.
 
 ### Changed
 
+- **Receipts and schema replies say only whether a definition is approved, not who approved it.**
+  The `execute_sql` receipt's joins and metrics no longer carry `signed_off_by`, `signed_off_role`
+  or `signed_off_at` (nor does the copy the audit trail stores), and neither do the schema reply's
+  joins and metrics or the `sm context` / `sm bundle` payloads; `review_state` is unchanged. The
+  signer stays in the model files, curation, `sm history` and the model explorer.
 - **Connect no longer guesses how long a build takes.** The per-database time table and every
   duration claim are gone from the connect skill; it says what the build does and reports progress
   from the engine's own counts (`joins: checking 78 on the data`, `profiled 20/42 tables`).
