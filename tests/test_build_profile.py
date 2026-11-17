@@ -902,7 +902,7 @@ REDSHIFT_SCHEMAS = D.Redshift().sql_schemas()
 
 def _catalog_reads(dialect: D.Dialect) -> dict[str, str]:
     """Every built-in catalog statement `dialect` renders, by method name, with stand-in names."""
-    stand_in = {"schemas": ["sales", "ops"], "schema": "sales", "table": "orders"}
+    stand_in = {"schemas": ["sales", "ops"], "schema": "sales", "table": "orders", "cap": 5_000_000}
     out = {}
     for name, method in inspect.getmembers(dialect, inspect.ismethod):
         if name.startswith("sql_"):
