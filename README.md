@@ -106,7 +106,8 @@ right step):
 
 - what your organisation does, in a sentence or two;
 - what system the data comes from (a product such as ServiceNow, or your own application), and
-  anything about the database: when your fiscal year starts, what currency amounts are in;
+  anything about the database: when your fiscal year starts, what currency amounts are in, and
+  whether the warehouse already controls who sees personal data (then agami flags none of it);
 - definitions of the tables and columns (a data dictionary, a spec workbook, a dbt or LookML project);
 - definitions of your metrics and business terms;
 - the questions people ask. They become checked examples, and how many of them agami answers

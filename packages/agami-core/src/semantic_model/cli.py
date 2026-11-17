@@ -207,11 +207,13 @@ def cmd_set_org(args) -> int:
     record = OR.set_org_fields(
         args.artifacts_dir, name=args.name, description=args.description,
         fiscal_year_start_month=args.fiscal_year_start_month, currency=args.currency,
+        personal_data=args.personal_data,
     )
     _print_json(
         {"org_id": record.org_id, "name": record.name, "description": record.description,
          "fiscal_year_start_month": record.fiscal_year_start_month,
-         "currency": record.display_conventions.currency}
+         "currency": record.display_conventions.currency,
+         "personal_data": record.personal_data or OR.PERSONAL_DATA_DEFAULT}
     )
     return 0
 
@@ -574,11 +576,18 @@ def cmd_sensitive(args) -> int:
     uses this count to decide whether to open the explorer (so the gate stops re-opening
     once the user has excluded the flagged columns)."""
     from . import curate
+    from . import org_record as OR
     org = L.load_datasource(args.root, include_rejected=True)
     flagged = curate.sensitive_columns(org)
-    suspected = curate.suspected_sensitive_columns(org)
     # `count`/`columns` keep their meaning (flagged PII — the gate signal); `suspected` is the
     # second review tier (might-be-PII the strict flag missed, for the PII tab to confirm).
+    if OR.warehouse_enforces_personal_data(Path(args.root).parent):
+        # The warehouse controls it (#675): nothing to suspect. A flag still on a column was set before
+        # the setting, possibly by a person, so it is still counted.
+        _print_json({**flagged, "suspected": [], "suspected_count": 0,
+                     "personal_data": OR.PERSONAL_DATA_ENFORCED})
+        return 0
+    suspected = curate.suspected_sensitive_columns(org)
     _print_json({**flagged, "suspected": suspected["columns"], "suspected_count": suspected["count"]})
     return 0
 
@@ -2072,6 +2081,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--fiscal-year-start-month", type=int, choices=range(1, 13), default=None,
                     metavar="1-12", help="the month the company's fiscal year starts (7 = July)")
     sp.add_argument("--currency", default=None, help="the currency amounts are in, an ISO code (USD)")
+    sp.add_argument("--personal-data", default=None, choices=["enforced_by_warehouse", "flagged_by_agami"],
+                    help="who keeps people from seeing personal data: the warehouse's own security "
+                         "(a build then flags nothing), or agami's flags (the default)")
     sp.set_defaults(func=cmd_set_org)
 
     sp = sub.add_parser("examples", help="rank prompt examples for a query")

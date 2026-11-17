@@ -359,7 +359,7 @@ def test_4a_unparseable_other_is_reasked_never_guessed():
 def test_4a_personal_data_card_hides_columns_with_exclude_ops():
     s = _phase_4()
     assert "Hide these from queries" in s
-    assert "Keep them all queryable" in s
+    assert "**Keep them queryable**" in s and "- Always last: **Keep them all queryable**" not in s
     assert "multiSelect" in s
     assert '"op":"exclude","kind":"table"' in s and '"column"' in s
     assert "grouped by table" in s.lower()
@@ -1030,3 +1030,24 @@ def test_password_page_sends_the_person_back_to_the_card():
     page = HELPER_PAGE.read_text(encoding="utf-8")
     assert "Go back to Claude and pick <b>I've saved it</b>." in page
     assert "The result shows in Claude" not in page
+
+
+# --- #675: personal data per organisation ---------------------------------------------------------
+
+
+def test_4a_keep_option_says_what_stays():
+    s = _phase_4()
+    assert "but a raw value is never shown. Suspected ones stay ordinary columns." in s
+
+
+def test_4a_skips_the_personal_data_question_when_the_warehouse_enforces_it():
+    s = _phase_4()
+    skip = s[s.index("**When `sm sensitive` prints `personal_data: enforced_by_warehouse`"):]
+    skip = skip[: skip.index("\n\n")]
+    assert "skip this question" in skip and "one line" in skip
+
+
+def test_0a_0_sets_the_personal_data_setting_from_the_source_answer():
+    s = _between("### 0a.0 ", "### 0a.1 ")
+    assert 'set-org "<artifacts_dir>" --personal-data enforced_by_warehouse' in s
+    assert "whether the warehouse already controls who sees personal data" in s

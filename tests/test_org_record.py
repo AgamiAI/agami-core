@@ -227,3 +227,39 @@ def test_set_org_cli_refuses_a_month_out_of_range(tmp_path):
     with pytest.raises(SystemExit):
         cli.main(["set-org", str(tmp_path), "--fiscal-year-start-month", "13"])
     assert OR.load_org_record(tmp_path) is None
+
+
+# --- #675: personal data enforced by the warehouse, one organisation setting --------------------
+
+
+def test_personal_data_setting_loads_and_round_trips(tmp_path):
+    OR.record_path(tmp_path).write_text(
+        "org_id: abc123\nname: Acme\npersonal_data: enforced_by_warehouse\n", encoding="utf-8")
+    rec = OR.load_org_record(tmp_path)
+    assert rec.personal_data == "enforced_by_warehouse"
+    OR.write_org_record(tmp_path, rec)
+    doc = yaml.safe_load(OR.record_path(tmp_path).read_text(encoding="utf-8"))
+    assert doc["personal_data"] == "enforced_by_warehouse"
+    assert OR.load_org_record(tmp_path) == rec
+
+
+def test_personal_data_setting_is_omitted_by_default(tmp_path):
+    # Omitted, so a record without it still loads on a core that predates the key.
+    OR.write_org_record(tmp_path, OrgRecord(org_id="abc123"))
+    assert "personal_data" not in OR.record_path(tmp_path).read_text(encoding="utf-8")
+    assert OrgRecord(org_id="x").personal_data is None
+
+
+def test_personal_data_setting_refuses_an_unknown_value():
+    with pytest.raises(ValueError):
+        OrgRecord(org_id="x", personal_data="sometimes")
+
+
+def test_set_org_cli_sets_and_clears_the_personal_data_setting(tmp_path):
+    from semantic_model import cli
+
+    assert cli.main(["set-org", str(tmp_path), "--personal-data", "enforced_by_warehouse"]) == 0
+    assert OR.load_org_record(tmp_path).personal_data == "enforced_by_warehouse"
+    assert cli.main(["set-org", str(tmp_path), "--personal-data", "flagged_by_agami"]) == 0
+    assert OR.load_org_record(tmp_path).personal_data is None
+    assert "personal_data" not in OR.record_path(tmp_path).read_text(encoding="utf-8")

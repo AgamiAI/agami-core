@@ -50,6 +50,18 @@ LEGACY_BRIDGES_PATH = ("local", "cross_profile_relationships.yaml")
 METRICS_FILENAME = "cross_datasource_metrics.yaml"
 
 
+# The #675 setting's two answers on the command line. The default is never written: it is the absence
+# of the key, so `flagged_by_agami` clears it.
+PERSONAL_DATA_ENFORCED = "enforced_by_warehouse"
+PERSONAL_DATA_DEFAULT = "flagged_by_agami"
+
+
+def warehouse_enforces_personal_data(artifacts_dir: str | Path) -> bool:
+    """The organisation said its warehouse controls who sees personal data (#675): a build flags nothing."""
+    record = load_org_record(artifacts_dir)
+    return record is not None and record.personal_data == PERSONAL_DATA_ENFORCED
+
+
 def record_path(artifacts_dir: str | Path) -> Path:
     return Path(artifacts_dir) / RECORD_FILENAME
 
@@ -269,15 +281,19 @@ def set_org_fields(
     description: Optional[str] = None,
     fiscal_year_start_month: Optional[int] = None,
     currency: Optional[str] = None,
+    personal_data: Optional[str] = None,
 ) -> OrgRecord:
     """Set the human-authored company fields on the record, minting it first if absent. Only the fields
     passed (non-``None``) are updated; the rest are left untouched. Persists and returns the record.
     This is the write path onboarding uses to populate ``name``/``description`` (the record is otherwise
     minted with just an ``org_id``), and the fiscal year and currency the person states about the
-    database before the build (#673)."""
+    database before the build (#673). ``personal_data`` is the #675 setting: ``enforced_by_warehouse``
+    sets it, ``flagged_by_agami`` clears it back to the default."""
     record = ensure_org_record(artifacts_dir)
     changes = {k: v for k, v in {"name": name, "description": description,
                                  "fiscal_year_start_month": fiscal_year_start_month}.items() if v is not None}
+    if personal_data is not None:
+        changes["personal_data"] = None if personal_data == PERSONAL_DATA_DEFAULT else personal_data
     if currency is not None:
         changes["display_conventions"] = record.display_conventions.model_copy(update={"currency": currency})
     if changes:

@@ -130,16 +130,18 @@ After each card, apply its answers in one `sm curate` batch (approvals with `--s
 
 **Any other "Other" you can't act on is re-asked, never guessed.** A question ("show me the SQL", "why?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). An empty change, a column or table the model doesn't have, or words you can't turn into one field's new value: say in one line what didn't match, and ask the same card again. The same when `sm curate` returns `errors` or `skipped` for the edit: show them, and ask the same card again.
 
+**When `sm sensitive` prints `personal_data: enforced_by_warehouse`, skip this question.** The organisation set that its warehouse controls who sees personal data (`sm set-org --personal-data`), so the build flagged nothing; say so in one line, *"Personal data: your warehouse controls who sees it, so nothing was flagged or hidden."*, and ask nothing about it. A column still flagged from before the setting stays as it is.
+
 **Personal-data columns (when `sm sensitive` reports `count` or `suspected_count` > 0).** Run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"`: `{count, columns:[{area, table, column, label}], suspected, suspected_count}`. `columns` are flagged personal, `suspected` look personal but weren't flagged (a phone-like or birth-date-like sample, a name like `ip_address`). This question can share the sign-off card (two questions on one AskUserQuestion call). Show both in one table, `Table | Columns`, marking each suspected column "(suspected)", e.g. `customers | email, phone, ip_address (suspected)` (a table in the chat may show identifiers; the card names them in words); at most 15 rows and *"and N more"*. Then one multiSelect question (header `Personal`), **"Hide these from queries"**: *"These columns look like personal data. Which should queries never read?"*
 
 Flagged and suspected columns are picked the same way:
 
 - 3 columns or fewer in all: one option per column, named by its `label`, **Email on Customers**, or **IP address on Customers (suspected)**; the identifier (`customers.email`) goes in the option's description.
 - More: grouped by table, one option per table with its count, the table and columns in words, **Customers (3: Email, Phone, IP address (suspected))**; picking a table hides every listed column in it, suspected ones included. With more than 3 tables, the options are **All <n> listed columns**, the table with the most listed columns, and **Review on a page** (Phase 5 with `initial_tab=pii`: every listed column on one page, each hidden, kept or marked there, saved from the page).
-- Always last: **Keep them all queryable**.
+- Always last: **Keep them queryable**, its description saying what stays: *"Flagged ones can still be counted and filtered, but a raw value is never shown. Suspected ones stay ordinary columns."* (The old label, *Keep them all queryable*, read as "ordinary columns" while the flags stayed on.)
 - "Other" takes `table.column` names to hide, flagged, suspected or any other column in the model.
 
-Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them all queryable** writes nothing. A name in "Other" that isn't a column in the model, or **Keep them all queryable** or **Review on a page** picked together with anything else, is said back and the same card asked again; never guess which column was meant.
+Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them queryable** writes nothing; say in one line what that leaves (flagged columns queryable, raw values never shown). A name in "Other" that isn't a column in the model, or **Keep them queryable** or **Review on a page** picked together with anything else, is said back and the same card asked again; never guess which column was meant.
 
 When the queue is done (or skipped), recount with `sm review-items` and go back to the overview card. **When agami-connect sent the person here** (its Phase 7 `Review what needs sign-off`), go back to agami-connect Phase 8 instead, the starter questions, so onboarding still ends on a first question.
 
@@ -397,7 +399,7 @@ agami: 3 metrics need sign-off.
  → Personal-data columns (5)
 
 [card "Personal": customers (3: email, phone, ip_address (suspected)) /
- leads (2: email, ssn) / Keep them all queryable]  → both tables
+ leads (2: email, ssn) / Keep them queryable]  → both tables
 
 agami: Hidden 5 columns; 0 personal-data columns are still queryable.
 ```
