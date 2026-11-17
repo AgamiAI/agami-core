@@ -89,3 +89,101 @@ def test_a_group_by_position_is_read_in_its_own_select_list():
         )
         is None
     )
+
+
+# --- 2. a window calculation over an aggregate --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sql, metric",
+    [
+        (
+            "SELECT month, SUM(COUNT(DISTINCT number)) OVER (ORDER BY month) AS v "
+            "FROM incidents GROUP BY month",
+            "incident_count",
+        ),
+        (
+            "SELECT status, SUM(SUM(total_amount)) OVER (ORDER BY status) AS v "
+            "FROM orders GROUP BY status",
+            "total_sales",
+        ),
+        (
+            "SELECT status, SUM(total_amount) * 1.0 / SUM(SUM(total_amount)) OVER () AS v "
+            "FROM orders GROUP BY status",
+            "total_sales",
+        ),
+        ("SELECT opened, SUM(total_amount) OVER (ORDER BY opened) AS v FROM orders", "total_sales"),
+        (
+            "SELECT month, LAG(COUNT(DISTINCT number)) OVER (ORDER BY month) AS v "
+            "FROM incidents GROUP BY month",
+            "incident_count",
+        ),
+    ],
+    ids=["running-count", "running-sum", "share", "running-over-rows", "lag"],
+)
+def test_a_window_over_a_matching_aggregate_is_undetermined_and_says_so(org, sql, metric):
+    item = _one(org, sql, "v")
+    assert (item["status"], item["name"]) == (rt.UNDETERMINED, None)
+    assert "window calculation" in item["reason"] and metric in item["reason"]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # A count of rows where the metric counts distinct records.
+        "SELECT month, SUM(COUNT(*)) OVER (ORDER BY month) AS v FROM incidents GROUP BY month",
+        # A metric's expression over a table the metric is not defined on.
+        "SELECT status, SUM(COUNT(DISTINCT number)) OVER (ORDER BY status) AS v "
+        "FROM orders GROUP BY status",
+        # A different aggregate.
+        "SELECT status, SUM(MAX(total_amount)) OVER (ORDER BY status) AS v "
+        "FROM orders GROUP BY status",
+    ],
+    ids=["count-star-vs-distinct", "wrong-table", "other-aggregate"],
+)
+def test_a_window_over_a_wrong_base_is_still_not_the_metric(org, sql):
+    """The window does not excuse its base: when the inner aggregate is not the metric, the item
+    says so exactly as it would for the inner aggregate alone."""
+    item = _one(org, sql, "v")
+    assert item["status"] in (rt.UNMATCHED, rt.COMPUTED_DIFFERENTLY)
+    assert item["name"] is None
+    assert "window calculation" not in (item["reason"] or "")
+
+
+def test_a_window_over_a_wrong_base_reports_what_the_inner_aggregate_lacks(org):
+    """`SUM(total_amount)` over `payments` only: the metric's table is never read, and the item
+    names it, as the plain aggregate would."""
+    window = _one(
+        org,
+        "SELECT SUM(SUM(amount)) OVER () AS v FROM payments",
+        "v",
+    )
+    plain = _one(org, "SELECT SUM(amount) AS v FROM payments", "v")
+    assert plain["status"] == rt.MATCHED  # payment_total: the control
+    assert window["status"] == rt.UNDETERMINED and "payment_total" in window["reason"]
+    wrong = _one(org, "SELECT SUM(SUM(total_amount)) OVER () AS v FROM payments", "v")
+    wrong_plain = _one(org, "SELECT SUM(total_amount) AS v FROM payments", "v")
+    assert wrong["status"] == wrong_plain["status"] != rt.UNDETERMINED
+    assert wrong["missing_tables"] == wrong_plain["missing_tables"]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT status, COUNT(*) AS v FROM orders o JOIN payments p ON p.order_id = o.id "
+        "GROUP BY status",
+        "SELECT COUNT(DISTINCT number) AS v FROM orders",
+        "SELECT MAX(total_amount) AS v FROM orders",
+        "SELECT COUNT(*) AS v FROM incidents",
+    ],
+    ids=["through-a-join", "wrong-table", "other-aggregate", "count-star"],
+)
+def test_a_plain_aggregate_that_is_not_the_metric_is_still_not_undetermined(org, sql):
+    """Only window outputs move: a plain aggregate's error is still reported as one."""
+    item = _one(org, sql, "v")
+    assert item["status"] != rt.UNDETERMINED or "window" not in (item["reason"] or "")
+    assert item["status"] != rt.MATCHED or item["name"] == "order_count"
+
+
+def test_a_plain_count_star_on_the_wrong_table_stays_unmatched(org):
+    assert _one(org, "SELECT COUNT(*) AS v FROM incidents", "v")["status"] == rt.UNMATCHED

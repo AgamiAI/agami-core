@@ -338,6 +338,13 @@ below corresponds to one such version.
   expression it points at in that query's own select list; when it points at nothing, or the list
   holds a `*`, `by` is null (the grouping could not be read) instead of a number.
 
+- **A running total over a metric is undetermined, not "not the agreed definition".** A window
+  calculation (`SUM(COUNT(*)) OVER (ORDER BY month)`, a share of a total, a `LAG`) came back
+  `unmatched` with no reason. What the window is computed over is now compared on its own: when
+  that is the metric, the item is `undetermined` and its reason names the window and the metric;
+  when it is not (another table, a missing condition, `COUNT(*)` for `COUNT(DISTINCT …)`), the item
+  says so exactly as the plain aggregate would. A plain aggregate is unaffected.
+
 - **`sm introspect` says why the database couldn't be used.** A credentials profile missing its
   password read every table, got no columns, and ended with "every name yielded zero columns. Check
   the --tables list", pointing at shell quoting. A failure about the connection (missing

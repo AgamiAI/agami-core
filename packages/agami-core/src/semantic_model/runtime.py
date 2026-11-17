@@ -10827,6 +10827,47 @@ def _upper(flow: _Flow, tr: _Trace) -> "tuple[list, list]":
     return rows, after
 
 
+_WHY_WINDOW_CALC = ("it is a running total or other window calculation over {}, which the receipt "
+                    "cannot compare to a metric definition")
+
+
+def _window_parts(expr: "exp.Expression | None") -> "list | None":
+    """The aggregates a window calculation is computed over, or None when the value holds no
+    window over an aggregate (a plain aggregate, or a `ROW_NUMBER()` over rows).
+
+    For `SUM(COUNT(*)) OVER (…)` that is the `COUNT(*)` inside; for `SUM(x) OVER (…)` over plain rows
+    it is the `SUM(x)` itself; and an aggregate beside the window (`SUM(x) / SUM(SUM(x)) OVER ()`)
+    is one too. Only the outermost aggregate of each nest is a part."""
+    if expr is None:
+        return None
+    windows = _own_nodes(expr, exp.Window)
+    if not windows:
+        return None
+
+    def outermost(node: "exp.Expression", stop: "exp.Expression") -> bool:
+        p = node.parent
+        while p is not None and p is not stop:
+            if isinstance(p, (exp.AggFunc, exp.Window)):
+                return False
+            p = p.parent
+        return True
+
+    parts: list = []
+    windowed = False
+    for w in windows:
+        func = w.this
+        inner = [a for a in _find_all(func, exp.AggFunc) if a is not func and outermost(a, func)]
+        if not inner and isinstance(func, exp.AggFunc):
+            inner = [func]
+        windowed = windowed or bool(inner)
+        parts.extend(inner)
+    if not windowed:
+        return None
+    parts.extend(a for a in _own_nodes(expr, exp.AggFunc)
+                 if a.find_ancestor(exp.Window) is None and outermost(a, expr.parent))
+    return parts
+
+
 class _ColumnMatch(NamedTuple):
     """`_match_output_column`'s answer. The tuples hold condition nodes, rendered by the assembler
     (`_restriction_text`), which is the one place the sensitive index is read."""
@@ -10962,6 +11003,24 @@ def _match_output_column(oc: OutputColumn, unread: bool,
         return _match_built_on(oc, flow, unread, by_binding, visible, dialect, memo,
                                by_binding_grouped, binding_shapes, tr, join_status or {},
                                second_order)
+    parts = _window_parts(flow.expr)
+    if parts is not None:
+        # A window calculation (a running total, a share of a total, a LAG) is not what any metric
+        # binding describes, so it is never matched. What it is computed OVER is compared, each
+        # aggregate on its own, exactly as a plain aggregate would be: a base that is not the
+        # metric is reported as such, and only a base that is the metric leaves the window
+        # itself as the one thing the receipt cannot compare.
+        names: list = []
+        for part in parts:
+            inner = _match_output_column(
+                OutputColumn(oc.key, part.copy(), oc.scope, flow.sel), unread, by_binding,
+                visible, dialect, memo, by_binding_grouped, binding_shapes, trace=tr,
+                join_status=join_status, second_order=second_order)
+            if inner.status != MATCHED:
+                return inner._replace(aggregating=True)
+            names.append(inner.match.metric.name)
+        return _ColumnMatch(UNDETERMINED, None, aggregating=True,
+                            reason=_WHY_WINDOW_CALC.format(", ".join(dict.fromkeys(names))))
     sel, expr, value = flow.sel, flow.expr, flow.value
     aggregating = bool(_own_nodes(expr, exp.AggFunc))
     missing: list = []
