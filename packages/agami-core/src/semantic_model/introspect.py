@@ -252,10 +252,8 @@ class ExecuteSqlFailure(RuntimeError):
         self.kind: Optional[str] = EXIT_TO_FAILURE_KIND.get(returncode)
 
 
-
-
 class ConnectionUnusable(RuntimeError):
-    """The database could not be used at all, so introspection stopped before reading anything."""
+    """The database connection could not be used, so introspection or discovery stopped before writing anything."""
 
 
 class _ConnectionWatch:
@@ -285,7 +283,7 @@ class _ConnectionWatch:
     def check(self) -> None:
         if self.failure is not None:
             raise ConnectionUnusable(
-                f"the database connection could not be used, so nothing was read: {self.failure}")
+                f"the database connection could not be used, so nothing was written: {self.failure}")
 
 
 def make_execute_sql_runner(
@@ -589,6 +587,9 @@ def introspect(
                        prior=set(existing) if refreshing else set())
     _progress(pp, "join candidates: testing columns no join covers…")
     _scan_join_candidates(dialect, runner, rels, built, report, sg)
+    # Every probe above swallows its own failure, which is right for one probe's bad statement and
+    # wrong for a connection lost mid-build: the model would be written without its joins.
+    watch.check()
     if refreshing:   # counted after the join merge and relabel, which are changes too
         report.notes.append(
             f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
@@ -1132,7 +1133,9 @@ def discover_inventory(
         dialect = D.BigQuery(region=bigquery_region)
 
     report = IntrospectReport(profile=profile, db_type=db_type, out_dir="", dry_run=True)
+    runner = watch = _ConnectionWatch(runner)
     pairs = _discover_tables(dialect, runner, tables, report)
+    watch.check()   # a dead connection reads as an empty catalog: say so, not "locked down"
     if schemas:
         keep = {s for s in schemas}
         pairs = [(s, t) for s, t in pairs if s in keep]
@@ -1170,6 +1173,7 @@ def discover_inventory(
             if not used_bulk:
                 column_mode = cmode
         inv_tables.append({"schema": schema, "table": table, "columns": cols})
+    watch.check()
 
     return {
         "profile": profile,

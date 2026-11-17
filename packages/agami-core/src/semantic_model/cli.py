@@ -1925,14 +1925,18 @@ def cmd_discover(args) -> int:
 
     runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True,
                                            artifacts_dir=args.artifacts)
-    inventory = INTRO.discover_inventory(
-        args.profile,
-        args.db_type,
-        runner=runner,
-        tables=args.tables,
-        schemas=args.schemas,
-        bigquery_region=args.bigquery_region,
-    )
+    try:
+        inventory = INTRO.discover_inventory(
+            args.profile,
+            args.db_type,
+            runner=runner,
+            tables=args.tables,
+            schemas=args.schemas,
+            bigquery_region=args.bigquery_region,
+        )
+    except INTRO.ConnectionUnusable as exc:
+        sys.stderr.write(f"agami: {exc}\n")   # as `sm introspect`: a setup problem, not a traceback
+        return 2
 
     artifacts = Path(args.artifacts).expanduser()
     inv_path = (Path(args.inventory_out).expanduser() if args.inventory_out

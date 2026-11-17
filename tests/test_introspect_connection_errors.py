@@ -114,3 +114,92 @@ def test_the_cli_and_introspection_share_one_list_of_connection_failures():
 
     assert cli._CONNECTION_KINDS is failure_kinds.CONNECTION_KINDS
     assert INTRO.CONNECTION_KINDS is failure_kinds.CONNECTION_KINDS
+
+
+# A connection lost after the columns were read: relationship, placeholder and join probes each
+# swallow their own failure, so without a last check the run wrote a model missing every join.
+_SHOP = (
+    "CREATE TABLE customers(id INTEGER PRIMARY KEY, name TEXT);"
+    "CREATE TABLE orders(id INTEGER PRIMARY KEY, cust_ref INTEGER, amount REAL);"
+    "INSERT INTO customers VALUES (1, 'a'), (2, 'b'), (3, 'c');"
+    "INSERT INTO orders VALUES (1, 1, 2.0), (2, 2, 3.0), (3, 3, 1.0);"
+)
+
+
+def _shop_runner(tmp_path: Path, fail_from: str, code: int, *, once: bool = False):
+    """A SQLite runner that fails from the first statement containing `fail_from` on: every later
+    one too (a dead connection), or only that one (`once`, a statement's own error)."""
+    import sqlite3
+
+    db = tmp_path / "shop.db"
+    con = sqlite3.connect(db)
+    con.executescript(_SHOP)
+    con.close()
+    state = {"failed": False}
+
+    def run(sql: str) -> list[dict]:
+        if (fail_from in sql and not (once and state["failed"])) or (state["failed"] and not once):
+            state["failed"] = True
+            raise INTRO.ExecuteSqlFailure("could not connect to server: Connection timed out"
+                                          if code == 10 else "type mismatch in one probe", code)
+        c = sqlite3.connect(db)
+        try:
+            cur = c.execute(sql)
+            names = [d[0] for d in cur.description or []]
+            return [dict(zip(names, row)) for row in cur.fetchall()]
+        finally:
+            c.close()
+
+    return run, state
+
+
+@pytest.mark.parametrize("phase", ["AS from_table", "g.v AS v", "AS sampled"],
+                         ids=["relationships", "placeholders", "join-candidates"])
+def test_a_connection_lost_mid_build_stops_before_anything_is_written(tmp_path, phase):
+    run, state = _shop_runner(tmp_path, phase, 10)
+    out = tmp_path / "acme"
+    with pytest.raises(INTRO.ConnectionUnusable) as err:
+        INTRO.introspect("acme", "sqlite", runner=run, artifacts_dir=tmp_path, out_dir=out)
+    assert state["failed"], f"the build never reached {phase!r}"
+    assert "Connection timed out" in str(err.value)
+    assert not (out / "datasource.yaml").exists()
+    assert not (out / ".introspect" / "join_candidates.json").exists()
+
+
+def test_one_probe_failing_on_its_own_statement_does_not_stop_the_build(tmp_path):
+    run, state = _shop_runner(tmp_path, "AS sampled", 5, once=True)
+    out = tmp_path / "acme"
+    INTRO.introspect("acme", "sqlite", runner=run, artifacts_dir=tmp_path, out_dir=out)
+    assert state["failed"]
+    assert (out / "datasource.yaml").exists()
+
+
+@pytest.mark.parametrize("tables", [None, TABLES], ids=["catalog", "allowlist"])
+def test_discovery_stops_with_the_connection_message_not_the_table_list_advice(tables):
+    run, calls = _failing_runner(4, "password authentication failed for user \"reader\"")
+    with pytest.raises(INTRO.ConnectionUnusable) as err:
+        INTRO.discover_inventory("acme", "postgres", runner=run, tables=tables)
+    assert "password authentication failed" in str(err.value)
+    assert "explicit" not in str(err.value)
+    assert len(calls) == 1
+
+
+def test_discovery_with_a_locked_catalog_still_gives_the_table_list_advice():
+    run, _ = _failing_runner(9, "permission denied for schema information_schema")
+    with pytest.raises(RuntimeError) as err:
+        INTRO.discover_inventory("acme", "postgres", runner=run)
+    assert not isinstance(err.value, INTRO.ConnectionUnusable)
+    assert "explicit" in str(err.value)
+
+
+def test_sm_discover_says_why_and_exits_2(tmp_path, monkeypatch, capsys):
+    from semantic_model import cli
+
+    monkeypatch.setattr(INTRO, "make_execute_sql_runner", lambda *a, **kw: _failing_runner(
+        10, "could not connect to server: Connection refused")[0])
+    rc = cli.main(["discover", "--profile", "acme", "--db-type", "postgres",
+                   "--artifacts", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "Connection refused" in err and "Traceback" not in err
+    assert not (tmp_path / "acme" / ".introspect" / "inventory.json").exists()
