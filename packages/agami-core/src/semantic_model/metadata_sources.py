@@ -20,7 +20,7 @@ job — this module never touches the DB or disk.
 from __future__ import annotations
 
 import re
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 # A (table, column) pair, lower-cased, used to filter source rows down to columns the model
 # actually has — a dictionary table describes the whole platform, most of which isn't modelled.
@@ -48,6 +48,15 @@ PRESETS: dict[str, dict] = {
             "type_col": "internal_type", "reference_col": "reference",
             "reference_type": "reference",
         },
+        # The class table: each class names its parent class by the parent's record id. A child's
+        # record is also a row of every ancestor (an incident is also a task), with the same id.
+        "hierarchy": {
+            "source": "sys_db_object",
+            "table_col": "name", "id_col": "sys_id", "parent_col": "super_class",
+        },
+        # Every record's id column, and how an export names a link column holding one (ACE-181).
+        "key": "sys_id",
+        "link_suffix": "_sys_id",
         # KNOWN reference graph — purely declarative config (field name → target table) for
         # ServiceNow's standard, published reference fields. This exists because a sparse export's
         # sys_dictionary often DOESN'T declare these (the joins live as sys_id GUIDs with no
@@ -92,25 +101,18 @@ def self_evident_pattern(preset: Optional[str]):
 
 
 # A preset value carries the platform's facts as dicts ("choice"/"dictionary"/"reference_graph")
-# OR scalars ("self_evident" is a regex string). Only the dict roles name a source TABLE, so the
-# detection/usability helpers consider dict values only.
+# OR scalars ("self_evident" is a regex string). Only the dict roles name a source TABLE, so
+# detection considers dict values only.
 def detect_preset(table_names: Iterable[str]) -> Optional[str]:
     """The preset whose source table(s) are present in the model, else None. Matches if ANY of a
     preset's sources exist (a model might carry `sys_dictionary` but not `sys_choice`, or vice
-    versa) — the caller then uses whichever roles are actually available via `usable_sources`."""
+    versa); `sm enrich-metadata` then reads whichever of its roles it finds."""
     have = {t.lower() for t in table_names}
     for key, spec in PRESETS.items():
         if any(isinstance(role, dict) and role.get("source", "").lower() in have
                for role in spec.values()):
             return key
     return None
-
-
-def usable_sources(preset: str, table_names: Iterable[str]) -> dict[str, dict]:
-    """The preset's roles whose source table is actually present in the model."""
-    have = {t.lower() for t in table_names}
-    return {role: cfg for role, cfg in PRESETS.get(preset, {}).items()
-            if isinstance(cfg, dict) and cfg.get("source", "").lower() in have}
 
 
 # ---------------------------------------------------------------------------
@@ -230,3 +232,177 @@ def reference_declarations(
     for el in conflict:
         target.pop(el, None)
     return target
+
+
+# ---------------------------------------------------------------------------
+# Renamed layers: a platform's tables reach the warehouse under other names (ACE-181)
+# ---------------------------------------------------------------------------
+# An export renames every table the same way (`acme_task_v`), splits a reference into its own
+# `<field>_sys_id` column, and parks the platform's metadata beside it (`sys_dictionary_raw`). The
+# affixes are read off the names themselves: a first or last word many names share is a layer's.
+
+
+def common_affixes(names: Iterable[str], *, min_share: float = 0.0) -> tuple[set[str], set[str]]:
+    """(prefix words, suffix words) that start or end at least two of `names` and at least
+    `min_share` of them: the words a renamed layer puts on every table."""
+    split = [n.lower().split("_") for n in names]
+    split = [w for w in split if len(w) > 1]
+    need = max(2, int(min_share * len(split) + 0.999))
+    firsts: dict[str, int] = {}
+    lasts: dict[str, int] = {}
+    for w in split:
+        firsts[w[0]] = firsts.get(w[0], 0) + 1
+        lasts[w[-1]] = lasts.get(w[-1], 0) + 1
+    return ({w for w, n in firsts.items() if n >= need}, {w for w, n in lasts.items() if n >= need})
+
+
+def stems(name: str, prefixes: set[str], suffixes: set[str]) -> list[str]:
+    """`name` with layer words stripped from either end, the least stripped first:
+    `acme_task_v` -> acme_task_v, acme_task, task_v, task."""
+    words = name.lower().split("_")
+    out: list[tuple[int, str]] = []
+    for i in range(len(words)):
+        if i and words[i - 1] not in prefixes:
+            break
+        for j in range(len(words) - i):
+            if j and words[len(words) - j] not in suffixes:
+                break
+            out.append((i + j, "_".join(words[i:len(words) - j])))
+    return [s for _, s in sorted(out, key=lambda x: x[0])]
+
+
+def locate(source: str, catalog: Iterable[tuple[Optional[str], str]],
+           prefer_schemas: Iterable[Optional[str]] = (),
+           fits: Optional[Callable[[Optional[str], str], bool]] = None) -> Optional[tuple[Optional[str], str]]:
+    """The catalog object a preset's source table is, in any schema: its own name, else the name a
+    renamed layer gave it, and only one that `fits` (has the columns the role reads), so a sibling
+    such as `sys_choice_set` is never taken for `sys_choice`. The least-renamed match wins; a tie
+    between schemas goes to one the model already reads, and is otherwise left unresolved."""
+    catalog = list(catalog)
+    pre, suf = common_affixes(t for _, t in catalog)
+    best = [(0 if t.lower() == source.lower() else 1, (s, t)) for s, t in catalog
+            if source.lower() in stems(t, pre, suf) and (fits is None or fits(s, t))]
+    if not best:
+        return None
+    top = [x for c, x in best if c == min(c for c, _ in best)]
+    preferred = {(p or "").lower() for p in prefer_schemas}
+    if len(top) > 1:
+        top = [x for x in top if (x[0] or "").lower() in preferred]
+    return top[0] if len(top) == 1 else None
+
+
+def class_parents(rows: Iterable[dict], *, table_col: str, id_col: str, parent_col: str) -> dict[str, str]:
+    """`class -> parent class` from a class table whose rows name their parent by its record id."""
+    rows = list(rows)
+    by_id = {_norm(r.get(id_col)): _norm(r.get(table_col)).lower() for r in rows}
+    out = {}
+    for r in rows:
+        parent = by_id.get(_norm(r.get(parent_col)))
+        if parent and _norm(r.get(table_col)):
+            out[_norm(r.get(table_col)).lower()] = parent
+    return out
+
+
+def ancestors(cls: str, parents: dict[str, str]) -> list[str]:
+    """`cls`'s parent classes, nearest first (a loop in the class table stops the walk)."""
+    out: list[str] = []
+    start = cls
+    while (cls := parents.get(cls, "")) and cls not in out and cls != start:
+        out.append(cls)
+    return out
+
+
+def column_field(column: str, key: str, link_suffix: str) -> Optional[str]:
+    """The platform field a column carries: `assigned_to_sys_id` -> `assigned_to`; the record's own id
+    is no field."""
+    c = column.lower()
+    if c == key.lower():
+        return None
+    return c[: -len(link_suffix)] if link_suffix and c.endswith(link_suffix.lower()) and len(c) > len(link_suffix) else c
+
+
+def fields_by_class(rows: Iterable[dict], *, table_col: str, column_col: str) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for r in rows:
+        cls, el = _norm(r.get(table_col)).lower(), _norm(r.get(column_col)).lower()
+        if cls and el:
+            out.setdefault(cls, set()).add(el)
+    return out
+
+
+def references_by_class(rows: Iterable[dict], *, table_col: str, column_col: str, type_col: str,
+                        reference_col: str, reference_type: str = "reference") -> dict[tuple[str, str], str]:
+    """`(class, field) -> target class` for every reference field the dictionary declares. Keyed by
+    the declaring class as well, so a field name two classes point at different targets (`parent`)
+    keeps both, where `reference_declarations` has to drop it."""
+    out = {}
+    for r in rows:
+        if _norm(r.get(type_col)).lower() == reference_type.lower() and _norm(r.get(reference_col)):
+            out[(_norm(r.get(table_col)).lower(), _norm(r.get(column_col)).lower())] = _norm(r.get(reference_col)).lower()
+    return out
+
+
+# A table maps by its fields only when the best class shares this many of them and leads the
+# runner-up by this much of the overlap score: otherwise the guess is left unmade.
+MAP_MIN_SHARED = 3
+MAP_MARGIN = 0.1
+
+
+def map_tables(tables: dict[str, set[str]], fields: dict[str, set[str]], parents: dict[str, str],
+               *, key: str, link_suffix: str) -> dict[str, dict]:
+    """`table -> {"class", "by", ...evidence}` for each modelled table that is one of the platform's
+    classes: by name once the layer's words are stripped, else by the fields its columns carry (a
+    class's own and its parents'), when one class clearly leads."""
+    pre, suf = common_affixes(tables, min_share=0.25)
+    # A field most classes declare is bookkeeping (created on, updated by): sharing it says nothing
+    # about which class a table is, and let a custom table map to a class that has little else.
+    declared_by: dict[str, int] = {}
+    for f in fields.values():
+        for name in f:
+            declared_by[name] = declared_by.get(name, 0) + 1
+    common = {n for n, k in declared_by.items() if len(fields) >= 3 and k * 2 > len(fields)}
+    full = {c: set(f).union(*(fields.get(a, set()) for a in ancestors(c, parents))) - common
+            for c, f in fields.items()}
+    out: dict[str, dict] = {}
+    for t, cols in tables.items():
+        named = next((s for s in stems(t, pre, suf) if s in fields), None)
+        if named:
+            out[t] = {"class": named, "by": "name"}
+            continue
+        have = {f for f in (column_field(c, key, link_suffix) for c in cols) if f} - common
+        scored = sorted(((len(have & f) / len(have | f), len(have & f), c) for c, f in full.items() if have & f),
+                        reverse=True)
+        if not scored or scored[0][1] < MAP_MIN_SHARED:
+            continue
+        runner_up = scored[1][0] if len(scored) > 1 else 0.0
+        if scored[0][0] - runner_up >= MAP_MARGIN:
+            out[t] = {"class": scored[0][2], "by": "fields", "shared_fields": scored[0][1],
+                      "score": round(scored[0][0], 3), "runner_up_score": round(runner_up, 3)}
+    return out
+
+
+def view_choice_ops(rows: Iterable[dict], *, table_col: str, column_col: str, value_col: str, label_col: str,
+                    held: dict[str, dict[str, list[str]]], chains: dict[str, list[str]], key: str,
+                    link_suffix: str) -> list[dict]:
+    """`choice_field` ops for renamed tables: the labels the choice table gives a class's field (or a
+    parent class's), keyed by the values each column actually holds (`held`: table -> column ->
+    values). A held value matches a choice's value or its label ignoring case, so an export that
+    wrote `NEW` where the platform stores `new` and shows `New` still gets its label."""
+    labels: dict[tuple[str, str], dict[str, str]] = {}
+    for r in rows:
+        cls, el, lab, val = (_norm(r.get(table_col)).lower(), _norm(r.get(column_col)).lower(),
+                             _norm(r.get(label_col)), _norm(r.get(value_col)))
+        if cls and el and lab and val:
+            m = labels.setdefault((cls, el), {})
+            m.setdefault(val.lower(), lab)
+            m.setdefault(lab.lower(), lab)
+    ops = []
+    for t, cols in sorted(held.items()):
+        for col, values in sorted(cols.items()):
+            f = column_field(col, key, link_suffix)
+            m = next((labels[(a, f)] for a in chains.get(t, []) if (a, f) in labels), None)
+            mapping = {v: m[v.lower()] for v in values if m and v.lower() in m}
+            if mapping:
+                ops.append({"op": "edit", "kind": "table", "name": t, "column": col,
+                            "field": "choice_field", "value": mapping})
+    return ops

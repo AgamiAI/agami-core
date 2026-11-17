@@ -322,8 +322,9 @@ def make_execute_sql_runner(
     model doesn't list yet. Those skip the semantic-model pass, which confines a statement to the
     tables an existing model declares, so once any model exists it refuses every one of them (#428):
     a second batch, a re-introspection and a new schema all came back with no readable columns. The
-    always-on gate still runs, so these reads stay read-only. Everything that answers or validates
-    against the model (seed examples, enrichment) keeps the default and is confined as before.
+    always-on gate still runs, so these reads stay read-only. `sm enrich-metadata` uses it too, to read
+    a platform's dictionary where it lies without modelling it (ACE-181). Everything that answers or
+    validates against the model (seed examples) keeps the default and is confined as before.
 
     They keep `--no-safety` rather than `--build-profile` alone (#523): probing reads tables the model
     does not declare yet, probe mode samples with `SELECT *`, and catalogs such as Redshift's `svv_*`,
