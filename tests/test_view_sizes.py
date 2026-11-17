@@ -13,6 +13,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -93,7 +94,6 @@ def built(tmp_path):
         runner=_runner(_db(tmp_path), seen),
         artifacts_dir=tmp_path,
         out_dir=tmp_path / "demo",
-        dry_run=True,
     )
     tables = {t.name: t for sa in org.subject_areas for t in sa.tables_defined}
     rels = [r for sa in org.subject_areas for r in sa.relationships] + list(
@@ -106,10 +106,14 @@ def _about(view: str, seen: list[str]) -> list[str]:
     return [s for s in seen if f'"{view}"' in s or f" {view}" in s]
 
 
+def _kind(v):
+    return None if v is None else (int(v), getattr(v, "kind", None))
+
+
 def test_a_small_view_gets_its_exact_count_and_every_full_probe(built):
     tables, rels, report, seen = built
-    hints = tables["small_orders_v"].performance_hints
-    assert (hints.estimated_row_count, hints.estimated_row_count_kind) == (600, None)
+    assert tables["small_orders_v"].performance_hints.estimated_row_count == 600
+    assert report.counted_sizes["main.small_orders_v"] == (600, None)
     mine = _about("small_orders_v", seen)
     assert any("COUNT(DISTINCT" in s for s in mine)  # the grain probe ran
     assert tables["small_orders_v"].grain == ["order_id"]
@@ -122,10 +126,8 @@ def test_a_small_view_gets_its_exact_count_and_every_full_probe(built):
 def test_a_view_over_the_cap_or_with_a_failed_count_gets_every_guard(built, view, kind):
     tables, rels, report, seen = built
     t = tables[view]
-    assert (
-        t.performance_hints.estimated_row_count,
-        t.performance_hints.estimated_row_count_kind,
-    ) == (CAP + 1, kind)
+    assert t.performance_hints.estimated_row_count == CAP + 1
+    assert report.counted_sizes[f"main.{view}"] == (CAP + 1, kind)
     mine = _about(view, seen)
     assert not any("AS distinct_count" in s for s in mine)  # the key check is skipped
     assert t.grain == []
@@ -147,6 +149,17 @@ def test_a_view_over_the_cap_or_with_a_failed_count_gets_every_guard(built, view
     assert t.performance_hints.recommended_filters == ["placed_on"]
 
 
+def test_the_written_model_carries_no_new_key(built, tmp_path):
+    """An older core forbids unknown keys, so a model built here must load there: the size is the
+    one field it already reads, and how it was counted stays in this run's report."""
+    texts = [f.read_text() for f in (tmp_path / "demo").rglob("*.yaml")]
+    big = next(
+        t for f, t in zip((tmp_path / "demo").rglob("*.yaml"), texts) if f.stem == "big_orders_v"
+    )
+    assert f"estimated_row_count: {CAP + 1}" in big
+    assert not any("kind" in t or "lower_bound" in t for t in texts)
+
+
 def test_each_unknown_table_costs_exactly_one_capped_count(built):
     _, _, _, seen = built
     capped = [s for s in seen if CAPPED in s]
@@ -158,20 +171,76 @@ def test_each_unknown_table_costs_exactly_one_capped_count(built):
 def test_the_report_says_how_each_size_was_read_and_notes_a_failed_count_once(built):
     _, _, report, _ = built
     text = report.render()
-    assert f"big_orders_v: at least {CAP:,} rows (counted up to the limit)" in text
-    assert "small_orders_v: 600 rows" in text
+    assert f"main.big_orders_v: at least {CAP:,} rows (counted up to the limit)" in text
+    assert "main.small_orders_v: 600 rows" in text
+    assert f"large table big_orders_v: at least {CAP:,} rows;" in text
     failed = [n for n in report.notes if n.startswith("size unknown")]
     assert (
         len(failed) == 1
         and "treated as large" in failed[0]
-        and failed[0].endswith(": lost_orders_v")
+        and failed[0].endswith(": main.lost_orders_v")
     )
 
 
-def test_the_answer_receipt_says_unknown_only_when_the_count_failed(tmp_path):
+def test_a_size_at_the_cap_is_never_quoted_as_a_count(built):
+    """The receipt's scan-risk sentence, the schema reply's large tables and the model page say "at
+    least" for the cap + 1, never a measured 5,000,001."""
+    import admin
+    import tools
     from semantic_model import runtime as rt
 
-    org, _ = I.introspect(
+    tables, _, _, _ = built
+    assert f"at least {CAP:,} rows" in rt.scan_sentence({"table": "big_orders_v", "rows": CAP + 1})
+    assert "about 1,200 rows" in rt.scan_sentence({"table": "t", "rows": 1200})
+    org = SimpleNamespace(subject_areas=[SimpleNamespace(tables_defined=list(tables.values()))])
+    large = tools._large_tables(org)
+    assert large["big_orders_v"] == f"at least {CAP:,}" and "small_orders_v" not in large
+    assert admin._table_size(tables["big_orders_v"]) == "≥ 5M"
+    assert admin._table_size(tables["small_orders_v"]) == "≈ 600"
+
+
+def test_the_cap_is_at_least_every_size_guard():
+    assert I._SIZE_COUNT_CAP >= max(I._GRAIN_PROBE_MAX_ROWS, I._OVERLAP_PROBE_MAX_ROWS)
+    assert I._SIZE_COUNT_CAP >= I.PF.JOIN_TARGET_MAX_ROWS
+
+
+def test_a_refused_sample_clause_falls_back_to_the_first_rows():
+    """Postgres refuses TABLESAMPLE on a view. The overlap probe of a large view then reads its first
+    rows, as a join check does, instead of reading the refusal as "no values shared"."""
+    from semantic_model import models as m
+
+    pg = D.get_dialect("postgres")
+    big = m.Table(
+        name="big_v", schema="s", performance_hints=m.PerformanceHints(estimated_row_count=CAP + 1)
+    )
+    dim = m.Table(name="customers", schema="s", grain=["id"])
+    seen: list[str] = []
+
+    def run(sql):
+        seen.append(sql)
+        if "TABLESAMPLE" in sql:
+            raise RuntimeError("TABLESAMPLE clause can only be applied to tables")
+        return [{"matched": "3"}]
+
+    assert I._overlap_count(pg, run, big, "customer_id", dim, "id") == 3
+    assert "TABLESAMPLE" in seen[0] and "TABLESAMPLE" not in seen[1]
+    assert f"LIMIT {I.PF.JOIN_SAMPLE_ROWS}) rows_read" in seen[1]
+
+
+def test_a_stand_in_estimate_that_returns_a_plain_int_still_fits(tmp_path, monkeypatch):
+    """Other tests patch `_estimate_rows` with `fake(dialect, runner, schema, table, budget=None) -> int`;
+    the build calls it that way and takes a plain int as a catalog estimate."""
+    real = I._estimate_rows
+
+    def fake(dialect, runner, schema, table, budget=None):
+        return (
+            10_000_000
+            if table == "small_orders_v"
+            else real(dialect, runner, schema, table, budget)
+        )
+
+    monkeypatch.setattr(I, "_estimate_rows", fake)
+    org, report = I.introspect(
         "demo",
         "sqlite",
         runner=_runner(_db(tmp_path), []),
@@ -179,27 +248,9 @@ def test_the_answer_receipt_says_unknown_only_when_the_count_failed(tmp_path):
         out_dir=tmp_path / "demo",
         dry_run=True,
     )
-    rows = {}
-    for view in VIEWS:
-        items = rt.assemble_receipt(org, f"SELECT COUNT(*) FROM main.{view}")["tables"]["items"]
-        rows[view] = items[0]["rows"]
-    assert rows == {"small_orders_v": 600, "big_orders_v": CAP + 1, "lost_orders_v": None}
-
-
-def test_the_model_page_says_at_least_or_unknown():
-    from types import SimpleNamespace as NS
-
-    import admin
-
-    def size(n, kind):
-        return admin._table_size(
-            NS(performance_hints=NS(estimated_row_count=n, estimated_row_count_kind=kind))
-        )
-
-    assert size(CAP + 1, "at_least") == "≥ 5M"
-    assert size(CAP + 1, "unknown") == "size unknown"
-    assert size(6591, None) == "≈ 6.6k"
-    assert admin._table_size(NS(performance_hints=None)) == ""
+    t = next(t for sa in org.subject_areas for t in sa.tables_defined if t.name == "small_orders_v")
+    assert t.performance_hints.estimated_row_count == 10_000_000
+    assert "main.small_orders_v" not in report.counted_sizes
 
 
 def test_the_capped_count_is_written_in_each_engines_own_limit():
@@ -218,20 +269,22 @@ def test_the_capped_count_is_written_in_each_engines_own_limit():
 
 def test_a_count_under_the_cap_is_exact_and_one_over_is_a_lower_bound():
     d = D.get_dialect("redshift")
-    assert I._estimate_rows(
+    under = I._estimate_rows(
         d, lambda sql: [{"estimated_rows": str(CAP)}] if "LIMIT" in sql else [], "s", "v"
-    ) == (CAP, None)
-    assert I._estimate_rows(
+    )
+    over = I._estimate_rows(
         d, lambda sql: [{"estimated_rows": str(CAP + 1)}] if "LIMIT" in sql else [], "s", "v"
-    ) == (CAP + 1, "at_least")
+    )
+    assert (_kind(under), _kind(over)) == ((CAP, None), (CAP + 1, "at_least"))
 
 
 def test_a_spent_budget_treats_the_table_as_large_without_counting():
     seen: list[str] = []
     budget = I._CountBudget(seconds_left=0.0)
-    assert I._estimate_rows(
+    got = I._estimate_rows(
         D.get_dialect("redshift"), lambda sql: seen.append(sql) or [], "s", "v", budget
-    ) == (CAP + 1, "unknown")
+    )
+    assert _kind(got) == (CAP + 1, "unknown")
     assert not any("LIMIT" in s for s in seen) and budget.skipped == 1
 
 
@@ -240,7 +293,8 @@ def test_an_engine_that_offers_no_estimate_or_no_count_leaves_the_size_unknown(e
     """Trino offers no estimate query at all; MySQL's view has none and MySQL gets no count (#459).
     Neither is counted, and neither is guessed large: the size stays unsized, as before."""
     seen: list[str] = []
-    assert I._estimate_rows(
-        D.get_dialect(engine), lambda sql: seen.append(sql) or [], "s", "v"
-    ) == (None, None)
+    assert (
+        I._estimate_rows(D.get_dialect(engine), lambda sql: seen.append(sql) or [], "s", "v")
+        is None
+    )
     assert not any("capped" in s for s in seen)

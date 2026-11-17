@@ -407,7 +407,7 @@ def test_a_big_table_whose_sample_fails_is_not_scanned(shop, tmp_path, monkeypat
         return run(sql)
 
     # Row count unknown: no sample proves nothing, so the table is skipped.
-    monkeypatch.setattr(I, "_estimate_rows", lambda *a, **k: (None, None))
+    monkeypatch.setattr(I, "_estimate_rows", lambda *a, **k: None)
     _, rep = I.introspect("shop", "sqlite", runner=failing, artifacts_dir=tmp_path / "b", dry_run=True)
     assert not any('"shipments"' in q for q in _scans(seen))
     assert not any(x.startswith("shipments.") for x in rep.placeholders)

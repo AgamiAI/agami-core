@@ -1164,7 +1164,6 @@ def test_a_table_the_catalog_cannot_size_is_counted(tmp_path, dialect, estimate)
     view = org.subject_areas[0].defined_table("orders_v")
     # Counted only up to the cap: past it the size is a lower bound, never the whole view read.
     assert view.performance_hints.estimated_row_count == I._SIZE_COUNT_CAP + 1
-    assert view.performance_hints.estimated_row_count_kind == "at_least"
     # Large, so it carries the filter the scan-risk check names.
     assert view.performance_hints.recommended_filters == ["submitted_on"]
     assert any(f"LIMIT {I._SIZE_COUNT_CAP + 1}) capped" in s for s in seen)
@@ -1182,11 +1181,12 @@ def test_a_table_with_a_catalog_estimate_is_not_counted(tmp_path):
 def test_a_count_that_fails_reads_as_large(tmp_path, dialect, estimate):
     seen: list[str] = []
     run = _estimate_runner("orders_v", estimate=estimate, count=None, seen=seen)
-    org, _ = I.introspect("fin", dialect, runner=run, artifacts_dir=tmp_path, dry_run=True)
+    org, report = I.introspect("fin", dialect, runner=run, artifacts_dir=tmp_path, dry_run=True)
     hints = org.subject_areas[0].defined_table("orders_v").performance_hints
-    # Never the catalog's -1 or 0, and never small: an unknown size is the cap's, marked unknown, so
-    # every cost guard skips or samples it.
-    assert (hints.estimated_row_count, hints.estimated_row_count_kind) == (I._SIZE_COUNT_CAP + 1, "unknown")
+    # Never the catalog's -1 or 0, and never small: an unknown size is the cap's, so every cost guard
+    # skips or samples it, and the run's report says it is unknown.
+    assert hints.estimated_row_count == I._SIZE_COUNT_CAP + 1
+    assert report.counted_sizes["public.orders_v"] == (I._SIZE_COUNT_CAP + 1, "unknown")
     assert any("COUNT(*) AS estimated_rows" in s for s in seen)  # the fallback was tried
 
 
@@ -1197,8 +1197,7 @@ def test_a_spent_count_budget_treats_the_rest_as_large(tmp_path, monkeypatch):
     seen: list[str] = []
     run = _estimate_runner("orders_v", estimate=None, count=7_000_000, seen=seen)
     org, report = I.introspect("fin", "redshift", runner=run, artifacts_dir=tmp_path, dry_run=True)
-    hints = org.subject_areas[0].defined_table("orders_v").performance_hints
-    assert hints.estimated_row_count_kind == "unknown"
+    assert report.counted_sizes["public.orders_v"] == (I._SIZE_COUNT_CAP + 1, "unknown")
     assert not any("COUNT(*) AS estimated_rows" in s for s in seen)
     assert any("1 of them not counted" in n for n in report.notes)
 
@@ -1207,8 +1206,8 @@ def test_a_count_spends_the_budget():
     from semantic_model import dialects as D
 
     budget = I._CountBudget(seconds_left=5.0)
-    assert I._estimate_rows(D.get_dialect("redshift"), lambda sql: [], "s", "v", budget) == \
-        (I._SIZE_COUNT_CAP + 1, "unknown")
+    got = I._estimate_rows(D.get_dialect("redshift"), lambda sql: [], "s", "v", budget)
+    assert (got, got.kind) == (I._SIZE_COUNT_CAP + 1, "unknown")
     assert budget.seconds_left < 5.0 and budget.skipped == 0
 
 
@@ -1224,7 +1223,7 @@ def test_an_engine_whose_estimate_is_the_count_runs_it_once(rows):
         seen.append(sql)
         return [{"estimated_rows": str(rows)}]
 
-    assert I._estimate_rows(D.get_dialect("sqlite"), run, None, "t") == (rows, None)
+    assert I._estimate_rows(D.get_dialect("sqlite"), run, None, "t") == rows
     assert len(seen) == 1
 
 

@@ -64,6 +64,7 @@ from . import dialects as D
 from . import placeholders as P
 from . import profile as PF
 from .models import (
+    ROW_COUNT_CAP,
     Column,
     Datasource,
     PerformanceHints,
@@ -73,6 +74,7 @@ from .models import (
     Table,
     bare_name,
     on_text_key,
+    rows_text,
     table_key,
 )
 
@@ -131,7 +133,7 @@ _OVERLAP_PROBE_MAX_ROWS = 3_000_000
 # A table the catalog cannot size (a view keeps no statistics) is counted only this far: one count of
 # at most this many rows plus one, the largest line any size guard draws. Past it the size is "at least
 # the cap", which every guard reads as large, and a 100M-row view is never read to the end.
-_SIZE_COUNT_CAP = max(_GRAIN_PROBE_MAX_ROWS, _OVERLAP_PROBE_MAX_ROWS)
+_SIZE_COUNT_CAP = ROW_COUNT_CAP   # at least every guard's line; a test holds it there
 # Per-run cap on the uniqueness probes that check a join's many side on the data (one
 # COUNT(DISTINCT) each), on the same budget as the declared-FK overlap confirmation.
 _UNIQUE_PROBE_CAP = FK_OVERLAP_PROBE_CAP
@@ -301,7 +303,8 @@ class IntrospectReport:
     # a warehouse that is often load timestamps nobody asks a question about.
     large_tables: dict[str, tuple[int, list[str]]] = field(default_factory=dict)
     # Tables the catalog could not size, so the build counted them (up to `_SIZE_COUNT_CAP`):
-    # name -> (rows, PerformanceHints.estimated_row_count_kind).
+    # `schema.table` -> (rows, kind), kind `at_least` past the cap, `unknown` when the count failed.
+    # The run's own record: the model keeps only the rows, so a reader that predates it still loads.
     counted_sizes: dict[str, tuple[int, Optional[str]]] = field(default_factory=dict)
     sensitive_columns: int = 0
     # Joins tested on the data but not written (#512): each an `add` op plus its evidence.
@@ -345,8 +348,7 @@ class IntrospectReport:
             *(f"changed {t}: " + "; ".join(f"{k} {', '.join(v)}" for k, v in c.items())
               for t, c in self.changes.items()),
             f"deep tables: {', '.join(self.deep_tables) or '(none)'}",
-            *(f"large table {t}: {_size_words(rows, self.counted_sizes.get(t, (0, None))[1])}; "
-              f"date columns: {', '.join(cols) or '(none)'}"
+            *(f"large table {t}: {rows_text(rows)}; date columns: {', '.join(cols) or '(none)'}"
               for t, (rows, cols) in self.large_tables.items()),
             *(["sized by a count (no catalog estimate): " + "; ".join(
                 f"{t}: {_size_words(rows, kind, about=False)}" for t, (rows, kind) in self.counted_sizes.items())]
@@ -546,7 +548,7 @@ def _introspect(
     keys_unread: set[tuple] = set()   # (schema, table) whose unique keys couldn't be read
     samples: dict[tuple, tuple] = {}   # (schema, table) -> (sample, est_rows), for the placeholder scan
     built = _read_tables(dialect, runner, pairs, conn_name, report, budget, reads, keys_unread, samples, pp)
-    unknown = [t for t, (_, kind) in report.counted_sizes.items() if kind == "unknown"]
+    unknown = [q for q, (_, kind) in report.counted_sizes.items() if kind == "unknown"]
     if unknown:
         spent = (f"; {budget.skipped} of them not counted because the run's {_COUNT_BUDGET_S:.0f}s for "
                  "counts ran out (build those in a separate run to size them)") if budget.skipped else ""
@@ -1561,7 +1563,12 @@ def _build_table(
 
     # Estimate row count ONCE up front (a catalog stat — instant, zero scan). Reused for
     # the grain-probe size guard below AND for performance_hints, so we never fetch twice.
-    est_rows, size_kind = _estimate_rows(dialect, runner, schema, table, budget, report)
+    # Called with exactly these arguments, so a patched stand-in that returns a plain int still fits.
+    est = _estimate_rows(dialect, runner, schema, table, budget)
+    size_kind = getattr(est, "kind", None)
+    est_rows = None if est is None else int(est)
+    if isinstance(est, _Counted):
+        report.counted_sizes[_qualified_name(schema, table)] = (est_rows, size_kind)
 
     # grain: catalog PKs, else uniqueness probe (skipped on very large tables — see _grain)
     grain, gmode = _grain(dialect, runner, schema, table, cols, est_rows=est_rows, report=report)
@@ -1612,7 +1619,6 @@ def _build_table(
         perf = PerformanceHints(
             estimated_row_count=est_rows,
             estimated_row_count_at=_NOW,  # so the receipt can show "estimated as of <date>"
-            estimated_row_count_kind=size_kind,
         )
 
     # On a large table, seed `recommended_filters` with the date/time columns — the natural
@@ -1773,34 +1779,47 @@ class _TableReads:
             self.turn.notify_all()
 
 
+class _Counted(int):
+    """A row count the build took itself because the catalog had none, with how it came out: `kind`
+    is None for an exact count under the cap, `at_least` past it, `unknown` when the count failed.
+    An int, so every caller (and a stand-in that returns a plain int) reads it as a size."""
+
+    kind: Optional[str]
+
+    def __new__(cls, rows: int, kind: Optional[str] = None) -> "_Counted":
+        obj = super().__new__(cls, rows)
+        obj.kind = kind
+        return obj
+
+
 def _estimate_rows(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
-    budget: Optional[_CountBudget] = None, report: Optional[IntrospectReport] = None,
-) -> tuple[Optional[int], Optional[str]]:
-    """The table's row count and how it was read (`PerformanceHints.estimated_row_count_kind`): the
-    catalog statistics (pg_class.reltuples, etc.) — instant, no scan — and, when the catalog has no
-    usable figure, one count capped at `_SIZE_COUNT_CAP` rows (#451).
+    budget: Optional[_CountBudget] = None,
+) -> Optional[int]:
+    """The table's row count: the catalog statistics (pg_class.reltuples, etc.) — instant, no scan —
+    and, when the catalog has no usable figure, one count capped at `_SIZE_COUNT_CAP` rows (#451),
+    returned as a `_Counted`.
 
     A view has no statistics on any engine: Redshift's `svv_table_info` lists only tables, and
     Postgres reports `reltuples` 0 or -1 (by version) for a view or a table it has never analysed. An
     exact count of a 100M-row view runs out of time, and an unknown size read as small to every cost
     guard (overlap, grain, key and value reads), so the biggest views got full scans. The capped count
-    answers the only question a guard asks, under the cap or not; past the cap the size is a lower
-    bound (`at_least`), and a count that fails or that the run's count budget has no time left for
-    reads as large (`unknown`), never small. (None, None) when the dialect offers no estimate or no
-    count at all (#459): such an object stays unsized, as before."""
+    answers the only question a guard asks, under the cap or not; past the cap the size is the cap + 1,
+    a lower bound, and a count that fails or that the run's count budget has no time left for reads as
+    that too, never small. None when the dialect offers no estimate or no count at all (#459): such an
+    object stays unsized, as before."""
     q = dialect.sql_row_estimate(schema, table)
     if not q:
-        return None, None
+        return None
     est = _rows_from(_try(runner, q))
     if est is not None and est > 0:
-        return est, None
+        return est
     if est is not None and est >= 0 and q == dialect.sql_row_count(schema, table):
-        return est, None   # the estimate query was itself the exact count (no catalog statistics here)
+        return est   # the estimate query was itself the exact count (no catalog statistics here)
     # The catalog's 0 is not taken either: an unanalysed table with rows would read as empty.
     count_q = dialect.sql_row_count_capped(schema, table, _SIZE_COUNT_CAP)
     if not count_q:
-        return None, None
+        return None
     rows: Optional[int] = None
     if budget is None or budget.start():
         started = time.monotonic()
@@ -1809,11 +1828,13 @@ def _estimate_rows(
         finally:
             if budget is not None:
                 budget.spend(time.monotonic() - started)
-    size = ((_SIZE_COUNT_CAP + 1, "unknown") if rows is None
-            else (_SIZE_COUNT_CAP + 1, "at_least") if rows > _SIZE_COUNT_CAP else (rows, None))
-    if report is not None:
-        report.counted_sizes[table] = size
-    return size
+    if rows is None:
+        return _Counted(_SIZE_COUNT_CAP + 1, "unknown")
+    return _Counted(_SIZE_COUNT_CAP + 1, "at_least") if rows > _SIZE_COUNT_CAP else _Counted(rows)
+
+
+def _qualified_name(schema: Optional[str], table: str) -> str:
+    return f"{schema}.{table}" if schema else table
 
 
 def _size_words(rows: Optional[int], kind: Optional[str], *, about: bool = True) -> str:
@@ -2704,7 +2725,7 @@ def _too_big_to_probe(t: Table) -> bool:
 
 
 def overlap_sql(dialect: D.Dialect, ft: Table, fc: str, tt: Table, tc: str,
-                from_rows: Optional[int] = None) -> str:
+                from_rows: Optional[int] = None, spread: bool = True) -> str:
     """The overlap probe as one statement: 50 sampled distinct values of `ft.fc`, counted against
     `tt.tc`. Split out of `_overlaps` so a caller that must not run SQL itself, the reconcile skill's
     join check, which hands every probe to the execution tier, emits exactly the probe introspection
@@ -2713,13 +2734,15 @@ def overlap_sql(dialect: D.Dialect, ft: Table, fc: str, tt: Table, tc: str,
     The sample is bounded through `Dialect.limited`, so the 50-row cap now holds on TOP and FETCH
     engines too; it used to apply only where the row-limit keyword was `LIMIT`. `from_rows` draws the
     values from that many of `ft`'s rows instead of all of them: a DISTINCT over a table above the
-    overlap guard reads every row before its LIMIT applies."""
+    overlap guard reads every row before its LIMIT applies. `spread` samples them across the table where
+    the engine can; off, they are its first rows."""
     fq_from = dialect.qualified(ft.schema_name, ft.name)
     fq_to = dialect.qualified(tt.schema_name, tt.name)
     col_f = dialect.quote_ident(fc)
     col_t = dialect.quote_ident(tc)
     if from_rows:
-        rows, _ = dialect.sampled_rows(f"SELECT {col_f} FROM {fq_from}", from_rows, _rows_of_table(ft))
+        rows, _ = dialect.sampled_rows(f"SELECT {col_f} FROM {fq_from}", from_rows,
+                                       _rows_of_table(ft) if spread else None)
         fq_from = f"({rows}) rows_read"
     sample = dialect.limited(f"SELECT DISTINCT {col_f} AS v FROM {fq_from} WHERE {col_f} IS NOT NULL", 50)
     return (
@@ -2753,6 +2776,10 @@ def _overlap_count(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: T
     reads one (`profile.JOIN_SAMPLE_ROWS`); under it, from the whole table, as always."""
     bound = PF.JOIN_SAMPLE_ROWS if _too_big_to_probe(ft) else None
     res = _try(runner, overlap_sql(dialect, ft, fc, tt, tc, from_rows=bound))
+    if res is None and bound:
+        # A sampling clause some engines refuse on a view (Postgres's TABLESAMPLE): the first rows
+        # instead, as a join check falls back, rather than lose a join the whole scan used to find.
+        res = _try(runner, overlap_sql(dialect, ft, fc, tt, tc, from_rows=bound, spread=False))
     if not res:
         return 0
     try:

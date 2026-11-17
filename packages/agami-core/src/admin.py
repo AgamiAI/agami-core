@@ -1106,15 +1106,13 @@ def _est_rows_obj(table: Any) -> int | None:
 
 
 def _table_size(table: Any) -> str:
-    """The table's size for the page: `≈ 6.6k`, `≥ 5M` when the build counted it only up to its cap
-    (a view keeps no estimate), `size unknown` when even that count failed, '' when never sized."""
-    ph = getattr(table, "performance_hints", None)
-    kind = getattr(ph, "estimated_row_count_kind", None) if ph is not None else None
+    """The table's size for the page: `≈ 6.6k`, or `≥ 5M` when the build counted it only up to its
+    cap (a view keeps no estimate, `ROW_COUNT_CAP`), '' when never sized."""
+    from semantic_model.models import ROW_COUNT_CAP
+
     n = _est_rows_obj(table)
-    if kind == "unknown":
-        return "size unknown"
-    if kind == "at_least" and n:
-        return "≥ " + _human_count(n - 1).removeprefix("≈ ")   # recorded as the cap + 1
+    if n == ROW_COUNT_CAP + 1:
+        return "≥ " + _human_count(ROW_COUNT_CAP).removeprefix("≈ ")
     return _human_count(n)
 
 

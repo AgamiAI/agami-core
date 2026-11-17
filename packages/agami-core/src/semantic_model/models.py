@@ -553,17 +553,24 @@ class IndexHint(_Base):
     is_unique: bool = False
 
 
+# A table the catalog cannot size (a view keeps no statistics) is counted by the build only up to this
+# many rows, the largest line any size guard draws. Past it, or when that count fails, the model records
+# ROW_COUNT_CAP + 1: a lower bound, never a measured size, so every guard reads the table as large and
+# nothing says it holds exactly that many rows. No key of its own, so an older reader takes the model.
+ROW_COUNT_CAP = 5_000_000
+
+
+def rows_text(rows: int) -> str:
+    """A table's recorded size in words: `about 1,234 rows`, or `at least 5,000,000 rows` for the cap."""
+    return f"at least {ROW_COUNT_CAP:,} rows" if rows == ROW_COUNT_CAP + 1 else f"about {rows:,} rows"
+
+
 class PerformanceHints(_Base):
     estimated_row_count: Optional[int] = None
     # ISO-8601 UTC timestamp of when `estimated_row_count` was last measured (introspection
     # time). Lets the trust receipt show "≈N rows (estimated as of <date>)" so a reader knows
     # the count is a point-in-time estimate, not a live COUNT(*).
     estimated_row_count_at: Optional[str] = None
-    # How `estimated_row_count` was read when the catalog had no figure (a view keeps none) and the
-    # count stopped at the size guards' cap: `at_least` means the table holds at least that many rows;
-    # `unknown` means even that count failed, and the figure is the cap's, so every cost guard treats
-    # the table as large rather than scan it. None: a catalog estimate or an exact count.
-    estimated_row_count_kind: Optional[Literal["at_least", "unknown"]] = None
     recommended_filters: list[str] = Field(default_factory=list)
     indexes: list[IndexHint] = Field(default_factory=list)
 
