@@ -191,6 +191,18 @@ class Dialect:
             return f"CASE WHEN {col} THEN 1.0 WHEN NOT {col} THEN 0.0 END"
         return f"CASE WHEN {col} <> 0 THEN 1.0 WHEN {col} = 0 THEN 0.0 END"
 
+    # True where a UNION is typed two arms at a time, so a column NULL in the first two arms is text
+    # before a later arm's integer reaches it (`tagged_union`).
+    union_types_pairwise: bool = False
+    # Catalog types (lower-case, without their parameters) this engine cannot compare, so cannot
+    # DISTINCT, GROUP BY or MIN: such a column is read alone, never inside a combined statement it
+    # would fail whole.
+    not_comparable_types: frozenset = frozenset()
+
+    def comparable(self, raw_type: Optional[str]) -> bool:
+        base = re.split(r"[(<]", (raw_type or "").strip().lower(), maxsplit=1)[0].strip()
+        return base not in self.not_comparable_types
+
     # --- row-limit syntax (probe mode) ---
 
     def sample_sql(self, schema: Optional[str], table: str, n: int) -> str:
@@ -434,7 +446,8 @@ class Dialect:
         are ever converted to share a type with another's: each arrives exactly as its own read
         returns it. The row bound stays inside each arm, where every engine accepts it (TOP and
         FETCH FIRST included). No `AS` before a table alias: Oracle refuses it."""
-        return tagged_union([self.distinct_sql(schema, table, col, n) for col in columns], ("v",))
+        return tagged_union([self.distinct_sql(schema, table, col, n) for col in columns], ("v",),
+                            typed_first=self.union_types_pairwise)
 
     def count_distinct_many_sql(self, schema: Optional[str], table: str, columns: list[str]) -> str:
         """`count_distinct_sql` for several columns in one pass: the row count once, then each
@@ -469,7 +482,8 @@ class Dialect:
         own order, since a column's later `v{j}` are NULL on every other arm's rows."""
         arms = [self.placeholder_scan_sql(schema, table, col, ctype, n) for col, ctype in columns]
         order = ", ".join(f"v{i}" for i in range(len(arms)))
-        return f"{tagged_union(arms, ('v', 'lo', 'hi'), ('n', 'total'))} ORDER BY c, n DESC, {order}"
+        union = tagged_union(arms, ("v", "lo", "hi"), ("n", "total"), typed_first=self.union_types_pairwise)
+        return f"{union} ORDER BY c, n DESC, {order}"
 
     # --- type mapping ---
 
@@ -477,12 +491,23 @@ class Dialect:
         return normalize_type(raw, numeric_scale=numeric_scale)
 
 
-def tagged_union(arms: list[str], own: tuple[str, ...], shared: tuple[str, ...] = ()) -> str:
+def tagged_union(arms: list[str], own: tuple[str, ...], shared: tuple[str, ...] = (), *,
+                 typed_first: bool = False) -> str:
     """Several reads in one statement: each `arm` unchanged as a derived table, tagged `c` (its
     position) and stacked with UNION ALL. Arm i's `own` columns come back as `{name}{i}` and are NULL
     on every other arm's rows, so no read's values are converted to share a type with another's;
-    `shared` columns (counts) are one column for all. No `AS` before a table alias: Oracle refuses it."""
+    `shared` columns (counts) are one column for all. No `AS` before a table alias: Oracle refuses it.
+
+    `typed_first` leads with a zero-row arm that selects every arm's columns at once (tagged -1), for
+    an engine that types a UNION two arms at a time: there the first two arms' bare NULLs in `v2` are
+    typed text, and arm 2's integer then cannot be matched. The engine folds `WHERE 1=0`, so it reads
+    nothing."""
     out = []
+    if typed_first:
+        picked = [f"t{j}.{k} AS {k}{j}" for k in own for j in range(len(arms))]
+        picked += [f"t0.{k} AS {k}" for k in shared]
+        froms = ", ".join(f"({arm}) t{j}" for j, arm in enumerate(arms))
+        out.append(f"SELECT -1 AS c, {', '.join(picked)} FROM {froms} WHERE 1=0")
     for i, arm in enumerate(arms):
         picked = [f"b{i}.{k} AS {k}{j}" if j == i else f"NULL AS {k}{j}" for k in own for j in range(len(arms))]
         picked += [f"b{i}.{k} AS {k}" for k in shared]
@@ -498,6 +523,8 @@ def tagged_union(arms: list[str], own: tuple[str, ...], shared: tuple[str, ...] 
 class PostgreSQL(Dialect):
     name = "PostgreSQL"
     folds_unquoted = "lower"
+    union_types_pairwise = True
+    not_comparable_types = frozenset({"json", "xml", "point", "line", "lseg", "box", "path", "polygon", "circle"})
 
     def tablesample(self, percent: str) -> Optional[str]:
         return f"TABLESAMPLE SYSTEM ({percent})"   # whole pages: reads only the share asked for
@@ -647,6 +674,10 @@ class Supabase(PostgreSQL):
 
 class Redshift(PostgreSQL):
     name = "Redshift"
+    # Measured on a live cluster: a combined read with bigint and timestamp columns past the first
+    # two arms types each column from all its arms, so it needs no typing arm.
+    union_types_pairwise = False
+    not_comparable_types = frozenset({"super", "geometry", "geography", "hllsketch", "varbyte"})
     duration_rounds = True
     fk_enforced = False  # Redshift declares but does not enforce FKs
     unique_enforced = False  # nor unique keys
@@ -948,6 +979,7 @@ class Trino(Dialect):
 
 class SQLServer(Dialect):
     name = "SQLServer"
+    not_comparable_types = frozenset({"text", "ntext", "image", "xml", "geography", "geometry"})
     limit_style = "top"
     duration_rounds = True
     reserved_extra = frozenset({
@@ -1045,6 +1077,7 @@ class SQLServer(Dialect):
 
 class BigQuery(Dialect):
     name = "BigQuery"
+    not_comparable_types = frozenset({"array", "struct", "json", "geography"})
     scans_unsized = False   # a LIMIT bills every byte of the columns it reads
     backslash_escapes = True
 
@@ -1270,6 +1303,7 @@ class SQLite(Dialect):
 
 class Oracle(Dialect):
     name = "Oracle"
+    not_comparable_types = frozenset({"clob", "nclob", "blob", "long", "long raw", "bfile", "xmltype"})
     limit_style = "fetch"
     folds_unquoted = "upper"
 

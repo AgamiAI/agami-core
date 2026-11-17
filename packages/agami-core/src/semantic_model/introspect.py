@@ -321,6 +321,10 @@ class IntrospectReport:
     new_tables: list[str] = field(default_factory=list)
     # Tables whose combined per-column read failed and were read a column at a time instead.
     read_column_by_column: list[str] = field(default_factory=list, repr=False)
+    # (schema, table) whose combined read ran out of time: read a column at a time for the rest of the run.
+    combined_too_slow: list[tuple] = field(default_factory=list, repr=False)
+    # (schema, table) -> columns the catalog types as ones the engine cannot compare (`Dialect.comparable`).
+    uncomparable: dict[tuple, list[str]] = field(default_factory=dict, repr=False)
 
     def render(self) -> str:
         lines = [
@@ -1535,8 +1539,11 @@ def _build_table(
 ) -> Table:
     # columns: catalog first, probe fallback
     probe_sample: list = []
-    cols, mode = _columns(dialect, runner, schema, table, probe_sample=probe_sample)
+    uncomparable: list[str] = []
+    cols, mode = _columns(dialect, runner, schema, table, probe_sample=probe_sample, uncomparable=uncomparable)
     report.mode_per_capability.setdefault("columns", mode)
+    if uncomparable:
+        report.uncomparable[(schema, table)] = uncomparable
 
     # Estimate row count ONCE up front (a catalog stat — instant, zero scan). Reused for
     # the grain-probe size guard below AND for performance_hints, so we never fetch twice.
@@ -1622,10 +1629,11 @@ def _build_table(
 
 def _columns(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
-    *, probe_sample: Optional[list] = None,
+    *, probe_sample: Optional[list] = None, uncomparable: Optional[list] = None,
 ) -> tuple[list[Column], str]:
     """The columns and how they were read. In probe mode the probe's sample rows are put in
-    `probe_sample`, so enrichment reuses them instead of reading the table again."""
+    `probe_sample`, so enrichment reuses them instead of reading the table again. The columns of a type
+    the engine cannot compare are put in `uncomparable`, so they are never read inside a combined read."""
     sql = dialect.sql_columns(schema, table)
     # `_try` answers None for a FAILED read and [] for a table with no columns. One failure is
     # retried: on a wide build over a VPN or tunnel a single dropped connection otherwise fell through
@@ -1641,6 +1649,8 @@ def _columns(
             scale_i = int(scale) if scale not in (None, "", "NULL") else None
             ctype = dialect.map_type(r.get("data_type", ""), numeric_scale=scale_i)
             cols.append(Column(name=r["column_name"], type=ctype, description=""))
+            if uncomparable is not None and not dialect.comparable(r.get("data_type")):
+                uncomparable.append(r["column_name"])
         return cols, "catalog"
     # probe: header for names, sample for types
     pcols, sample = _probe_columns(dialect, runner, schema, table)
@@ -1809,7 +1819,12 @@ def _grain(
     # probe: a single id-ish column that is unique + non-null
     candidates = [c.name for c in cols if c.name.lower() == "id" or c.name.lower().endswith("_id")]
     candidates = candidates or [c.name for c in cols[:3]]
-    for cand, res in _count_reads(dialect, runner, schema, table, candidates, report):
+    # The first candidate alone, then the rest together: it is usually `id`, and unique, which ends it.
+    def reads() -> Iterator[tuple[str, Optional[list[dict]]]]:
+        yield from _count_reads(dialect, runner, schema, table, candidates[:1], report)
+        yield from _count_reads(dialect, runner, schema, table, candidates[1:], report)
+
+    for cand, res in reads():
         if not res:
             continue
         row = res[0]
@@ -1873,9 +1888,19 @@ def _unique_keys(
     return kept
 
 
-def _chunks(items: list, size: int) -> Iterator[list]:
-    for i in range(0, len(items), max(1, size)):
-        yield items[i:i + max(1, size)]
+def _row_cap() -> int:
+    """The result row cap `execute_sql.py` applies (`AGAMI_SQL_MAX_ROWS`, 1000 when unset or unusable)."""
+    raw = os.environ.get("AGAMI_SQL_MAX_ROWS", "").strip()
+    return int(raw) if raw.isdecimal() and int(raw) > 0 else 1000
+
+
+def _combined_size(rows_each: int) -> int:
+    """How many columns a combined read takes: COMBINED_READ_COLUMNS, fewer where the row cap would
+    refuse that many columns' rows (a refused statement costs a round trip and then reads them one by
+    one anyway)."""
+    if rows_each <= 1:
+        return COMBINED_READ_COLUMNS
+    return max(1, min(COMBINED_READ_COLUMNS, _row_cap() // rows_each))
 
 
 def _read_column_by_column(report: Optional[IntrospectReport], table: str) -> None:
@@ -1883,21 +1908,61 @@ def _read_column_by_column(report: Optional[IntrospectReport], table: str) -> No
         report.read_column_by_column.append(table)
 
 
+def _combined(
+    runner: Runner, sql: str, report: Optional[IntrospectReport], schema: Optional[str], table: str,
+) -> Optional[list[dict]]:
+    """A combined read's rows, or None when it failed. One that ran out of time marks the table, and
+    the table's later reads go a column at a time without trying again: each would wait as long."""
+    if report is not None and (schema, table) in report.combined_too_slow:
+        return None
+    try:
+        return runner(sql)
+    except Exception as exc:
+        if report is not None and PF.too_slow(exc):
+            report.combined_too_slow.append((schema, table))
+        return None
+
+
+def _per_column_reads(
+    runner: Runner, schema: Optional[str], table: str, columns: list[str], rows_each: int,
+    many: Callable[[list[int]], str], one: Callable[[int], str],
+    split: Callable[[Optional[list[dict]], int], Optional[list]], report: Optional[IntrospectReport],
+) -> list:
+    """Each column's result (None for a failed read), in `columns` order, read several columns to a
+    statement (`_combined_size`). `many` builds the combined statement for some of `columns`' positions,
+    `one` a column's own read, and `split` cuts a combined result into the reads it holds, or answers
+    None when it isn't one. A combined read that fails is read a column at a time, so one column of an
+    odd type costs only that statement; a column the catalog types as one the engine cannot compare
+    (`Dialect.comparable`) is read alone from the start."""
+    alone = set((report.uncomparable.get((schema, table), ()) if report is not None else ()))
+    out: list = [None] * len(columns)
+    together = [i for i, c in enumerate(columns) if c not in alone]
+    for i in (i for i, c in enumerate(columns) if c in alone):
+        out[i] = _try(runner, one(i))
+    size = _combined_size(rows_each)
+    for k in range(0, len(together), size):
+        chunk = together[k:k + size]
+        got = None
+        if len(chunk) > 1:
+            got = split(_combined(runner, many(chunk), report, schema, table), len(chunk))
+            if got is None:
+                _read_column_by_column(report, table)
+        for pos, i in enumerate(chunk):
+            out[i] = got[pos] if got is not None else _try(runner, one(i))
+    return out
+
+
 def _count_reads(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, columns: list[str],
     report: Optional[IntrospectReport] = None,
-) -> Iterator[tuple[str, Optional[list[dict]]]]:
-    """Each column with its `count_distinct_sql` result (None for a failed read), read
-    COMBINED_READ_COLUMNS to a statement. A combined read that fails, or answers something else, is
-    read a column at a time, so one column of an odd type costs only that statement."""
-    for chunk in _chunks(columns, COMBINED_READ_COLUMNS):
-        got = None
-        if len(chunk) > 1:
-            got = _split_counts(_try(runner, dialect.count_distinct_many_sql(schema, table, chunk)), len(chunk))
-            if got is None:
-                _read_column_by_column(report, table)
-        for i, col in enumerate(chunk):
-            yield col, ([got[i]] if got is not None else _try(runner, dialect.count_distinct_sql(schema, table, col)))
+) -> list[tuple[str, Optional[list[dict]]]]:
+    """Each column with its `count_distinct_sql` result (None for a failed read), as `_per_column_reads`."""
+    got = _per_column_reads(
+        runner, schema, table, columns, 1,
+        lambda idx: dialect.count_distinct_many_sql(schema, table, [columns[i] for i in idx]),
+        lambda i: dialect.count_distinct_sql(schema, table, columns[i]),
+        lambda rows, n: None if (cut := _split_counts(rows, n)) is None else [[r] for r in cut], report)
+    return list(zip(columns, got))
 
 
 def _split_counts(rows: Optional[list[dict]], n: int) -> Optional[list[dict]]:
@@ -1921,17 +1986,12 @@ def _split_counts(rows: Optional[list[dict]], n: int) -> Optional[list[dict]]:
 def _value_reads(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, columns: list[str], n: int,
     report: Optional[IntrospectReport] = None,
-) -> Iterator[Optional[list[dict]]]:
-    """Each column's `distinct_sql` result (None for a failed read), in `columns` order, read
-    COMBINED_READ_COLUMNS to a statement and falling back to a column at a time as `_count_reads`."""
-    for chunk in _chunks(columns, COMBINED_READ_COLUMNS):
-        got = None
-        if len(chunk) > 1:
-            got = _split_tagged(_try(runner, dialect.distinct_many_sql(schema, table, chunk, n)), len(chunk))
-            if got is None:
-                _read_column_by_column(report, table)
-        for i, col in enumerate(chunk):
-            yield got[i] if got is not None else _try(runner, dialect.distinct_sql(schema, table, col, n))
+) -> list[Optional[list[dict]]]:
+    """Each column's `distinct_sql` result (None for a failed read), as `_per_column_reads`."""
+    return _per_column_reads(
+        runner, schema, table, columns, n,
+        lambda idx: dialect.distinct_many_sql(schema, table, [columns[i] for i in idx], n),
+        lambda i: dialect.distinct_sql(schema, table, columns[i], n), _split_tagged, report)
 
 
 def _split_tagged(
@@ -1957,19 +2017,14 @@ def _split_tagged(
 def _placeholder_reads(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, columns: list[Column],
     report: Optional[IntrospectReport] = None,
-) -> Iterator[Optional[list[dict]]]:
-    """Each column's `placeholder_scan_sql` result (None for a failed read), in `columns` order, read
-    COMBINED_READ_COLUMNS to a statement and falling back to a column at a time as `_count_reads`."""
-    for chunk in _chunks(columns, COMBINED_READ_COLUMNS):
-        got = None
-        if len(chunk) > 1:
-            sql = dialect.placeholder_scan_many_sql(schema, table, [(c.name, c.type) for c in chunk], _PLACEHOLDER_TOP)
-            got = _split_tagged(_try(runner, sql), len(chunk), ("v", "lo", "hi"), ("n", "total"))
-            if got is None:
-                _read_column_by_column(report, table)
-        for i, c in enumerate(chunk):
-            yield got[i] if got is not None else _try(
-                runner, dialect.placeholder_scan_sql(schema, table, c.name, c.type, _PLACEHOLDER_TOP))
+) -> list[Optional[list[dict]]]:
+    """Each column's `placeholder_scan_sql` result (None for a failed read), as `_per_column_reads`."""
+    return _per_column_reads(
+        runner, schema, table, [c.name for c in columns], _PLACEHOLDER_TOP,
+        lambda idx: dialect.placeholder_scan_many_sql(
+            schema, table, [(columns[i].name, columns[i].type) for i in idx], _PLACEHOLDER_TOP),
+        lambda i: dialect.placeholder_scan_sql(schema, table, columns[i].name, columns[i].type, _PLACEHOLDER_TOP),
+        lambda rows, n: _split_tagged(rows, n, ("v", "lo", "hi"), ("n", "total")), report)
 
 
 def _distinct_rows(
