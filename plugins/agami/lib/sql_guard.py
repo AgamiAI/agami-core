@@ -125,7 +125,16 @@ def _without_trailing_separators(sql: str) -> str:
         if text.endswith("*/"):
             start = text.rfind("/*", 0, len(text) - 2)
             body = text[start + 2 : -2] if start != -1 else ""
-            if start != -1 and not body.startswith("!") and not _TAIL_FORBIDDEN & set(body):
+            # No newline in the body: a `/*` that sits inside an earlier line's `--` comment is no
+            # opener, and peeling from it would strip a live line (and its `;`) on engines this
+            # scan cannot read, such as SQL Server's `[…]` names.
+            if (
+                start != -1
+                and not body.startswith("!")
+                and "\n" not in body
+                and "\r" not in body
+                and not _TAIL_FORBIDDEN & set(body)
+            ):
                 text = text[:start]
                 continue
         # The leftmost `-- ` on the last line, not the last `--`: in `-- note --x` the comment

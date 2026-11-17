@@ -1095,6 +1095,13 @@ def test_a_trailing_semicolon_still_passes(sql: str) -> None:
     assert check_read_only(sql) is None, sql
 
 
+def test_a_block_comment_spanning_lines_is_not_peeled() -> None:
+    # SQL Server reads `[']` as a name, so the `;` is live and `/*` sits inside a line comment:
+    # the DELETE on the next line runs. Peeling from that `/*` stripped the `;` from view.
+    assert check_read_only("SELECT 1 AS [']; -- /*\nDELETE FROM canary -- */") is not None
+    assert check_read_only("SELECT 1;\n/* done */\n") is None
+
+
 def test_many_comment_markers_are_peeled_in_linear_time() -> None:
     # Rebuilding the suffix's character set for every `--` made this quadratic: a statement just
     # under the length cap took ~1.8 s before reaching the database. Linear, it takes milliseconds.
