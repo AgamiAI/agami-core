@@ -72,7 +72,8 @@ single-provider login is **free**. Per-org (multi-tenant) SSO, SAML, and SCIM ar
 sign in, and their address is treated as proven; Microsoft turns work and school accounts away. The
 app registration must allow personal Microsoft accounts. `common` and `organizations` are refused,
 because Microsoft documents no claim that proves a work account's address. A company server should
-keep its tenant id. The admin can't sign in with Microsoft on `consumers`; use a password or Google.
+keep its tenant id. The admin can't sign in with Microsoft on `consumers`, so keep
+`AGAMI_ADMIN_PASSWORD` set or use Google for the admin; with neither, no admin login works.
 
 > **Serverless note:** on a managed-container platform (Cloud Run, ECS/Fargate, Container Apps) the server
 > runs under a cloud identity — scope it to a dedicated least-privilege one, not the platform default. See
