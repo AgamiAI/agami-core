@@ -44,6 +44,8 @@ def _probe_runner(sql):
         raise RuntimeError("permission denied")
     if "WHERE 1=0" in s:
         return []
+    if "AS estimated_rows" in s:   # the catalog is closed, so each table gets the capped count
+        return [{"estimated_rows": "3"}]
     if "COUNT(DISTINCT" in s:
         return [{"total": "3", "distinct_count": "3", "null_count": "0"}]
     if "EXISTS" in s:
@@ -1160,10 +1162,11 @@ def test_a_table_the_catalog_cannot_size_is_counted(tmp_path, dialect, estimate)
     run = _estimate_runner("orders_v", estimate=estimate, count=7_000_000, seen=seen)
     org, _ = I.introspect("fin", dialect, runner=run, artifacts_dir=tmp_path, dry_run=True)
     view = org.subject_areas[0].defined_table("orders_v")
-    assert view.performance_hints.estimated_row_count == 7_000_000
+    # Counted only up to the cap: past it the size is a lower bound, never the whole view read.
+    assert view.performance_hints.estimated_row_count == I._SIZE_COUNT_CAP + 1
     # Large, so it carries the filter the scan-risk check names.
     assert view.performance_hints.recommended_filters == ["submitted_on"]
-    assert any("COUNT(*) AS estimated_rows" in s for s in seen)
+    assert any(f"LIMIT {I._SIZE_COUNT_CAP + 1}) capped" in s for s in seen)
 
 
 def test_a_table_with_a_catalog_estimate_is_not_counted(tmp_path):
@@ -1175,34 +1178,36 @@ def test_a_table_with_a_catalog_estimate_is_not_counted(tmp_path):
 
 
 @pytest.mark.parametrize("dialect, estimate", [("redshift", None), ("postgres", -1), ("postgres", 0)])
-def test_a_count_that_fails_leaves_the_size_unknown(tmp_path, dialect, estimate):
+def test_a_count_that_fails_reads_as_large(tmp_path, dialect, estimate):
     seen: list[str] = []
     run = _estimate_runner("orders_v", estimate=estimate, count=None, seen=seen)
-    org, _ = I.introspect("fin", dialect, runner=run, artifacts_dir=tmp_path, dry_run=True)
+    org, report = I.introspect("fin", dialect, runner=run, artifacts_dir=tmp_path, dry_run=True)
     hints = org.subject_areas[0].defined_table("orders_v").performance_hints
-    # Unknown, not -1: a never-analysed Postgres table no longer stores the catalog's -1.
-    assert hints is None or hints.estimated_row_count is None
+    # Never the catalog's -1 or 0, and never small: an unknown size is the cap's, so every cost guard
+    # skips or samples it, and the run's report says it is unknown.
+    assert hints.estimated_row_count == I._SIZE_COUNT_CAP + 1
+    assert report.counted_sizes["public.orders_v"] == (I._SIZE_COUNT_CAP + 1, "unknown")
     assert any("COUNT(*) AS estimated_rows" in s for s in seen)  # the fallback was tried
 
 
-def test_a_spent_count_budget_leaves_the_rest_unknown(tmp_path, monkeypatch):
-    """Counts run serially, so one run-level budget bounds them all; past it a table stays unsized
-    and the report says how many were skipped."""
+def test_a_spent_count_budget_treats_the_rest_as_large(tmp_path, monkeypatch):
+    """One run-level budget bounds every count; past it a table is not counted, reads as large, and
+    the report says how many were skipped."""
     monkeypatch.setattr(I, "_COUNT_BUDGET_S", 0.0)
     seen: list[str] = []
     run = _estimate_runner("orders_v", estimate=None, count=7_000_000, seen=seen)
     org, report = I.introspect("fin", "redshift", runner=run, artifacts_dir=tmp_path, dry_run=True)
-    hints = org.subject_areas[0].defined_table("orders_v").performance_hints
-    assert hints is None or hints.estimated_row_count is None
+    assert report.counted_sizes["public.orders_v"] == (I._SIZE_COUNT_CAP + 1, "unknown")
     assert not any("COUNT(*) AS estimated_rows" in s for s in seen)
-    assert any("1 table(s) left unsized" in n for n in report.notes)
+    assert any("1 of them not counted" in n for n in report.notes)
 
 
 def test_a_count_spends_the_budget():
     from semantic_model import dialects as D
 
     budget = I._CountBudget(seconds_left=5.0)
-    assert I._estimate_rows(D.get_dialect("redshift"), lambda sql: [], "s", "v", budget) is None
+    got = I._estimate_rows(D.get_dialect("redshift"), lambda sql: [], "s", "v", budget)
+    assert (got, got.kind) == (I._SIZE_COUNT_CAP + 1, "unknown")
     assert budget.seconds_left < 5.0 and budget.skipped == 0
 
 

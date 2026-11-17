@@ -238,6 +238,8 @@ def test_a_declared_but_unenforced_unique_key_is_kept_only_when_the_data_bears_i
         unique={"users": [["email"], ["handle"]]})
 
     def runner(sql: str) -> list[dict]:
+        if "AS estimated_rows" in sql:   # Redshift keeps no estimate here, so the table is counted
+            return [{"estimated_rows": "10"}]
         if "COUNT(DISTINCT" in sql:
             distinct = "10" if '"email"' in sql else "7"
             return [{"total": "10", "distinct_count": distinct, "null_count": "0"}]

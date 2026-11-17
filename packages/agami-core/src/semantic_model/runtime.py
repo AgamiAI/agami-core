@@ -84,6 +84,7 @@ from .models import (
     Table,
     example_metric_hits,
     metric_tags,
+    rows_text,
     stored_identity,
 )
 from .models import (
@@ -899,7 +900,7 @@ def scan_sentence(finding: dict[str, Any]) -> str:
     """One outer-join finding in words a caller can act on, for the receipt."""
     table, rows = _echo_name(finding["table"]), finding["rows"]
     small = _echo_name(str(finding.get("from") or "the preserved table"))
-    return (f"`{table}` (about {rows:,} rows) is the outer side of a join from `{small}`: every "
+    return (f"`{table}` ({rows_text(rows)}) is the outer side of a join from `{small}`: every "
             f"`{small}` row is kept, so the engine cannot narrow `{table}` by the join first and "
             f"can read or move all of it. Start FROM `{table}` and INNER JOIN `{small}`, keeping the "
             f"outer join only if `{small}` rows with no match are needed.")

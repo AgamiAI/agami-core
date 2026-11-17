@@ -1609,14 +1609,18 @@ def _metric_full(
     return out
 
 
-def _large_tables(org) -> dict[str, int]:
-    out: dict[str, int] = {}
+def _large_tables(org) -> dict[str, int | str]:
+    """{table: estimated rows} for every large table, or `at least 5,000,000` where the build counted a
+    view only up to its cap: the model's cap + 1 is a lower bound, never a size to quote."""
+    from semantic_model.models import ROW_COUNT_CAP
+
+    out: dict[str, int | str] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             ph = t.performance_hints
             rc = ph.estimated_row_count if ph else None
             if rc and rc >= _LARGE_TABLE_ROWS:
-                out[t.name] = rc
+                out[t.name] = f"at least {ROW_COUNT_CAP:,}" if rc == ROW_COUNT_CAP + 1 else rc
     return out
 
 

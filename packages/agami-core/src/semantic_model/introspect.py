@@ -65,6 +65,7 @@ from . import dialects as D
 from . import placeholders as P
 from . import profile as PF
 from .models import (
+    ROW_COUNT_CAP,
     Column,
     Datasource,
     PerformanceHints,
@@ -74,6 +75,7 @@ from .models import (
     Table,
     bare_name,
     on_text_key,
+    rows_text,
     table_key,
 )
 
@@ -129,6 +131,10 @@ FK_OVERLAP_PROBE_CAP = 300
 # guard that stops a 50-table Redshift introspect from crawling for half an hour on big fact
 # tables (incident/task/metric_instance). Mirrors the grain-probe size guard.
 _OVERLAP_PROBE_MAX_ROWS = 3_000_000
+# A table the catalog cannot size (a view keeps no statistics) is counted only this far: one count of
+# at most this many rows plus one, the largest line any size guard draws. Past it the size is "at least
+# the cap", which every guard reads as large, and a 100M-row view is never read to the end.
+_SIZE_COUNT_CAP = ROW_COUNT_CAP   # at least every guard's line; a test holds it there
 # Per-run cap on the uniqueness probes that check a join's many side on the data (one
 # COUNT(DISTINCT) each), on the same budget as the declared-FK overlap confirmation.
 _UNIQUE_PROBE_CAP = FK_OVERLAP_PROBE_CAP
@@ -297,6 +303,10 @@ class IntrospectReport:
     # Listed so whoever builds the model confirms the filters; the seed is every date column, and on
     # a warehouse that is often load timestamps nobody asks a question about.
     large_tables: dict[str, tuple[int, list[str]]] = field(default_factory=dict)
+    # Tables the catalog could not size, so the build counted them (up to `_SIZE_COUNT_CAP`):
+    # `schema.table` -> (rows, kind), kind `at_least` past the cap, `unknown` when the count failed.
+    # The run's own record: the model keeps only the rows, so a reader that predates it still loads.
+    counted_sizes: dict[str, tuple[int, Optional[str]]] = field(default_factory=dict)
     sensitive_columns: int = 0
     # Joins tested on the data but not written (#512): each an `add` op plus its evidence.
     join_candidates: list[dict] = field(default_factory=list)
@@ -325,6 +335,10 @@ class IntrospectReport:
     new_tables: list[str] = field(default_factory=list)
     # Tables whose combined per-column read failed and were read a column at a time instead.
     read_column_by_column: list[str] = field(default_factory=list, repr=False)
+    # (schema, table) whose combined read ran out of time: read a column at a time for the rest of the run.
+    combined_too_slow: list[tuple] = field(default_factory=list, repr=False)
+    # (schema, table) -> columns the catalog types as ones the engine cannot compare (`Dialect.comparable`).
+    uncomparable: dict[tuple, list[str]] = field(default_factory=dict, repr=False)
 
     def render(self) -> str:
         lines = [
@@ -340,8 +354,11 @@ class IntrospectReport:
             *(f"changed {t}: " + "; ".join(f"{k} {', '.join(v)}" for k, v in c.items())
               for t, c in self.changes.items()),
             f"deep tables: {', '.join(self.deep_tables) or '(none)'}",
-            *(f"large table {t}: about {rows:,} rows; date columns: {', '.join(cols) or '(none)'}"
+            *(f"large table {t}: {rows_text(rows)}; date columns: {', '.join(cols) or '(none)'}"
               for t, (rows, cols) in self.large_tables.items()),
+            *(["sized by a count (no catalog estimate): " + "; ".join(
+                f"{t}: {_size_words(rows, kind, about=False)}" for t, (rows, kind) in self.counted_sizes.items())]
+              if self.counted_sizes else []),
             f"sensitive columns: {self.sensitive_columns}",
             *self._render_profile(),
             *self._render_join_checks(),
@@ -557,10 +574,13 @@ def _introspect(
     samples: dict[tuple, tuple] = {}   # (schema, table) -> (sample, est_rows), for the placeholder scan
     built = _read_tables(dialect, runner, pairs, conn_name, report, budget, reads, keys_unread, samples, pp,
                          repeats_unread)
-    if budget.skipped:
+    unknown = [q for q, (_, kind) in report.counted_sizes.items() if kind == "unknown"]
+    if unknown:
+        spent = (f"; {budget.skipped} of them not counted because the run's {_COUNT_BUDGET_S:.0f}s for "
+                 "counts ran out (build those in a separate run to size them)") if budget.skipped else ""
         report.notes.append(
-            f"{budget.skipped} table(s) left unsized: exact row counts stopped after {_COUNT_BUDGET_S:.0f}s "
-            "in total; build those tables in a separate run to size them")
+            f"size unknown for {len(unknown)} table(s): the count failed, so each is treated as large "
+            f"(key checks and join probes skipped or sampled){spent}: {', '.join(unknown)}")
     if reads.skipped:
         report.notes.append(
             f"{reads.skipped} column(s) got no value list: the run's {DISTINCT_READ_CAP} DISTINCT reads were "
@@ -1642,19 +1662,27 @@ def _build_table(
 ) -> Table:
     # columns: catalog first, probe fallback
     probe_sample: list = []
-    cols, mode = _columns(dialect, runner, schema, table, probe_sample=probe_sample)
+    uncomparable: list[str] = []
+    cols, mode = _columns(dialect, runner, schema, table, probe_sample=probe_sample, uncomparable=uncomparable)
     report.mode_per_capability.setdefault("columns", mode)
+    if uncomparable:
+        report.uncomparable[(schema, table)] = uncomparable
 
     # Estimate row count ONCE up front (a catalog stat — instant, zero scan). Reused for
     # the grain-probe size guard below AND for performance_hints, so we never fetch twice.
-    est_rows = _estimate_rows(dialect, runner, schema, table, budget)
+    # Called with exactly these arguments, so a patched stand-in that returns a plain int still fits.
+    est = _estimate_rows(dialect, runner, schema, table, budget)
+    size_kind = getattr(est, "kind", None)
+    est_rows = None if est is None else int(est)
+    if isinstance(est, _Counted):
+        report.counted_sizes[_qualified_name(schema, table)] = (est_rows, size_kind)
 
     # grain: catalog PKs, else uniqueness probe (skipped on very large tables — see _grain)
     grain, gmode = _grain(dialect, runner, schema, table, cols, est_rows=est_rows, report=report)
     report.mode_per_capability.setdefault("grain", gmode)
     if gmode == "probe_skipped_large":
         report.notes.append(
-            f"{table}: skipped grain probe (~{est_rows:,} rows > "
+            f"{table}: skipped grain probe ({_size_words(est_rows, size_kind)}; the probe stops at "
             f"{_GRAIN_PROBE_MAX_ROWS:,}) — left grain empty rather than full-scanning "
             f"each id column. A composite/absent grain is expected for a fact table this "
             f"size; set it by hand if you know the key."
@@ -1797,10 +1825,11 @@ def _repeat_check(
 
 def _columns(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
-    *, probe_sample: Optional[list] = None,
+    *, probe_sample: Optional[list] = None, uncomparable: Optional[list] = None,
 ) -> tuple[list[Column], str]:
     """The columns and how they were read. In probe mode the probe's sample rows are put in
-    `probe_sample`, so enrichment reuses them instead of reading the table again."""
+    `probe_sample`, so enrichment reuses them instead of reading the table again. The columns of a type
+    the engine cannot compare are put in `uncomparable`, so they are never read inside a combined read."""
     sql = dialect.sql_columns(schema, table)
     # `_try` answers None for a FAILED read and [] for a table with no columns. One failure is
     # retried: on a wide build over a VPN or tunnel a single dropped connection otherwise fell through
@@ -1816,6 +1845,8 @@ def _columns(
             scale_i = int(scale) if scale not in (None, "", "NULL") else None
             ctype = dialect.map_type(r.get("data_type", ""), numeric_scale=scale_i)
             cols.append(Column(name=r["column_name"], type=ctype, description=""))
+            if uncomparable is not None and not dialect.comparable(r.get("data_type")):
+                uncomparable.append(r["column_name"])
         return cols, "catalog"
     # probe: header for names, sample for types
     pcols, sample = _probe_columns(dialect, runner, schema, table)
@@ -1923,40 +1954,72 @@ class _TableReads:
             self.turn.notify_all()
 
 
+class _Counted(int):
+    """A row count the build took itself because the catalog had none, with how it came out: `kind`
+    is None for an exact count under the cap, `at_least` past it, `unknown` when the count failed.
+    An int, so every caller (and a stand-in that returns a plain int) reads it as a size."""
+
+    kind: Optional[str]
+
+    def __new__(cls, rows: int, kind: Optional[str] = None) -> "_Counted":
+        obj = super().__new__(cls, rows)
+        obj.kind = kind
+        return obj
+
+
 def _estimate_rows(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
     budget: Optional[_CountBudget] = None,
 ) -> Optional[int]:
-    """Row count from the catalog statistics (pg_class.reltuples, etc.) — instant, no scan — and,
-    when the catalog has no usable figure, an exact count instead (#451).
+    """The table's row count: the catalog statistics (pg_class.reltuples, etc.) — instant, no scan —
+    and, when the catalog has no usable figure, one count capped at `_SIZE_COUNT_CAP` rows (#451),
+    returned as a `_Counted`.
 
     A view has no statistics on any engine: Redshift's `svv_table_info` lists only tables, and
-    Postgres reports `reltuples` 0 or -1 (by version) for a view or a table it has never analysed. Read as-is,
-    a fact view with millions of rows came back unknown (or as empty), so it never reached `large_tables` and
-    never got the `recommended_filters` the scan-risk check names. The count is a read-only query,
-    bounded by the same statement limit as every introspection read; if it is refused or runs out of
-    time the size stays unknown, as before. None also when the dialect deliberately offers no
-    estimate query at all."""
+    Postgres reports `reltuples` 0 or -1 (by version) for a view or a table it has never analysed. An
+    exact count of a 100M-row view runs out of time, and an unknown size read as small to every cost
+    guard (overlap, grain, key and value reads), so the biggest views got full scans. The capped count
+    answers the only question a guard asks, under the cap or not; past the cap the size is the cap + 1,
+    a lower bound, and a count that fails or that the run's count budget has no time left for reads as
+    that too, never small. None when the dialect offers no estimate or no count at all (#459): such an
+    object stays unsized, as before."""
     q = dialect.sql_row_estimate(schema, table)
     if not q:
         return None
     est = _rows_from(_try(runner, q))
     if est is not None and est > 0:
         return est
-    count_q = dialect.sql_row_count(schema, table)
-    if count_q and count_q != q:
-        # A distinct count was tried, so its answer replaces the catalog's: when it fails, the size
-        # is unknown, never the catalog's 0 (an unanalysed table with rows would read as empty).
-        if budget is not None and not budget.start():
-            return None
+    if est is not None and est >= 0 and q == dialect.sql_row_count(schema, table):
+        return est   # the estimate query was itself the exact count (no catalog statistics here)
+    # The catalog's 0 is not taken either: an unanalysed table with rows would read as empty.
+    count_q = dialect.sql_row_count_capped(schema, table, _SIZE_COUNT_CAP)
+    if not count_q:
+        return None
+    rows: Optional[int] = None
+    if budget is None or budget.start():
         started = time.monotonic()
         try:
-            return _rows_from(_try(runner, count_q))
+            rows = _rows_from(_try(runner, count_q))
         finally:
             if budget is not None:
                 budget.spend(time.monotonic() - started)
-    # The estimate query was itself the exact count (no catalog statistics on this engine).
-    return est if est is not None and est >= 0 else None
+    if rows is None:
+        return _Counted(_SIZE_COUNT_CAP + 1, "unknown")
+    return _Counted(_SIZE_COUNT_CAP + 1, "at_least") if rows > _SIZE_COUNT_CAP else _Counted(rows)
+
+
+def _qualified_name(schema: Optional[str], table: str) -> str:
+    return f"{schema}.{table}" if schema else table
+
+
+def _size_words(rows: Optional[int], kind: Optional[str], *, about: bool = True) -> str:
+    """A table's size as the report says it: `about 1,234 rows`, `at least 5,000,000 rows (counted
+    up to the limit)`, or `size unknown` when even the capped count failed."""
+    if kind == "unknown":
+        return "size unknown (the count failed; treated as large)"
+    if kind == "at_least":
+        return f"at least {_SIZE_COUNT_CAP:,} rows (counted up to the limit)"
+    return f"{'about ' if about else ''}{rows or 0:,} rows"
 
 
 def _rows_from(rows: Optional[list[dict]]) -> Optional[int]:
@@ -1984,7 +2047,12 @@ def _grain(
     # probe: a single id-ish column that is unique + non-null
     candidates = [c.name for c in cols if c.name.lower() == "id" or c.name.lower().endswith("_id")]
     candidates = candidates or [c.name for c in cols[:3]]
-    for cand, res in _count_reads(dialect, runner, schema, table, candidates, report):
+    # The first candidate alone, then the rest together: it is usually `id`, and unique, which ends it.
+    def reads() -> Iterator[tuple[str, Optional[list[dict]]]]:
+        yield from _count_reads(dialect, runner, schema, table, candidates[:1], report)
+        yield from _count_reads(dialect, runner, schema, table, candidates[1:], report)
+
+    for cand, res in reads():
         if not res:
             continue
         row = res[0]
@@ -2048,9 +2116,19 @@ def _unique_keys(
     return kept
 
 
-def _chunks(items: list, size: int) -> Iterator[list]:
-    for i in range(0, len(items), max(1, size)):
-        yield items[i:i + max(1, size)]
+def _row_cap() -> int:
+    """The result row cap `execute_sql.py` applies (`AGAMI_SQL_MAX_ROWS`, 1000 when unset or unusable)."""
+    raw = os.environ.get("AGAMI_SQL_MAX_ROWS", "").strip()
+    return int(raw) if raw.isdecimal() and int(raw) > 0 else 1000
+
+
+def _combined_size(rows_each: int) -> int:
+    """How many columns a combined read takes: COMBINED_READ_COLUMNS, fewer where the row cap would
+    refuse that many columns' rows (a refused statement costs a round trip and then reads them one by
+    one anyway)."""
+    if rows_each <= 1:
+        return COMBINED_READ_COLUMNS
+    return max(1, min(COMBINED_READ_COLUMNS, _row_cap() // rows_each))
 
 
 def _read_column_by_column(report: Optional[IntrospectReport], table: str) -> None:
@@ -2058,21 +2136,61 @@ def _read_column_by_column(report: Optional[IntrospectReport], table: str) -> No
         report.read_column_by_column.append(table)
 
 
+def _combined(
+    runner: Runner, sql: str, report: Optional[IntrospectReport], schema: Optional[str], table: str,
+) -> Optional[list[dict]]:
+    """A combined read's rows, or None when it failed. One that ran out of time marks the table, and
+    the table's later reads go a column at a time without trying again: each would wait as long."""
+    if report is not None and (schema, table) in report.combined_too_slow:
+        return None
+    try:
+        return runner(sql)
+    except Exception as exc:
+        if report is not None and PF.too_slow(exc):
+            report.combined_too_slow.append((schema, table))
+        return None
+
+
+def _per_column_reads(
+    runner: Runner, schema: Optional[str], table: str, columns: list[str], rows_each: int,
+    many: Callable[[list[int]], str], one: Callable[[int], str],
+    split: Callable[[Optional[list[dict]], int], Optional[list]], report: Optional[IntrospectReport],
+) -> list:
+    """Each column's result (None for a failed read), in `columns` order, read several columns to a
+    statement (`_combined_size`). `many` builds the combined statement for some of `columns`' positions,
+    `one` a column's own read, and `split` cuts a combined result into the reads it holds, or answers
+    None when it isn't one. A combined read that fails is read a column at a time, so one column of an
+    odd type costs only that statement; a column the catalog types as one the engine cannot compare
+    (`Dialect.comparable`) is read alone from the start."""
+    alone = set((report.uncomparable.get((schema, table), ()) if report is not None else ()))
+    out: list = [None] * len(columns)
+    together = [i for i, c in enumerate(columns) if c not in alone]
+    for i in (i for i, c in enumerate(columns) if c in alone):
+        out[i] = _try(runner, one(i))
+    size = _combined_size(rows_each)
+    for k in range(0, len(together), size):
+        chunk = together[k:k + size]
+        got = None
+        if len(chunk) > 1:
+            got = split(_combined(runner, many(chunk), report, schema, table), len(chunk))
+            if got is None:
+                _read_column_by_column(report, table)
+        for pos, i in enumerate(chunk):
+            out[i] = got[pos] if got is not None else _try(runner, one(i))
+    return out
+
+
 def _count_reads(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, columns: list[str],
     report: Optional[IntrospectReport] = None,
-) -> Iterator[tuple[str, Optional[list[dict]]]]:
-    """Each column with its `count_distinct_sql` result (None for a failed read), read
-    COMBINED_READ_COLUMNS to a statement. A combined read that fails, or answers something else, is
-    read a column at a time, so one column of an odd type costs only that statement."""
-    for chunk in _chunks(columns, COMBINED_READ_COLUMNS):
-        got = None
-        if len(chunk) > 1:
-            got = _split_counts(_try(runner, dialect.count_distinct_many_sql(schema, table, chunk)), len(chunk))
-            if got is None:
-                _read_column_by_column(report, table)
-        for i, col in enumerate(chunk):
-            yield col, ([got[i]] if got is not None else _try(runner, dialect.count_distinct_sql(schema, table, col)))
+) -> list[tuple[str, Optional[list[dict]]]]:
+    """Each column with its `count_distinct_sql` result (None for a failed read), as `_per_column_reads`."""
+    got = _per_column_reads(
+        runner, schema, table, columns, 1,
+        lambda idx: dialect.count_distinct_many_sql(schema, table, [columns[i] for i in idx]),
+        lambda i: dialect.count_distinct_sql(schema, table, columns[i]),
+        lambda rows, n: None if (cut := _split_counts(rows, n)) is None else [[r] for r in cut], report)
+    return list(zip(columns, got))
 
 
 def _split_counts(rows: Optional[list[dict]], n: int) -> Optional[list[dict]]:
@@ -2096,17 +2214,12 @@ def _split_counts(rows: Optional[list[dict]], n: int) -> Optional[list[dict]]:
 def _value_reads(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, columns: list[str], n: int,
     report: Optional[IntrospectReport] = None,
-) -> Iterator[Optional[list[dict]]]:
-    """Each column's `distinct_sql` result (None for a failed read), in `columns` order, read
-    COMBINED_READ_COLUMNS to a statement and falling back to a column at a time as `_count_reads`."""
-    for chunk in _chunks(columns, COMBINED_READ_COLUMNS):
-        got = None
-        if len(chunk) > 1:
-            got = _split_tagged(_try(runner, dialect.distinct_many_sql(schema, table, chunk, n)), len(chunk))
-            if got is None:
-                _read_column_by_column(report, table)
-        for i, col in enumerate(chunk):
-            yield got[i] if got is not None else _try(runner, dialect.distinct_sql(schema, table, col, n))
+) -> list[Optional[list[dict]]]:
+    """Each column's `distinct_sql` result (None for a failed read), as `_per_column_reads`."""
+    return _per_column_reads(
+        runner, schema, table, columns, n,
+        lambda idx: dialect.distinct_many_sql(schema, table, [columns[i] for i in idx], n),
+        lambda i: dialect.distinct_sql(schema, table, columns[i], n), _split_tagged, report)
 
 
 def _split_tagged(
@@ -2132,19 +2245,14 @@ def _split_tagged(
 def _placeholder_reads(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, columns: list[Column],
     report: Optional[IntrospectReport] = None,
-) -> Iterator[Optional[list[dict]]]:
-    """Each column's `placeholder_scan_sql` result (None for a failed read), in `columns` order, read
-    COMBINED_READ_COLUMNS to a statement and falling back to a column at a time as `_count_reads`."""
-    for chunk in _chunks(columns, COMBINED_READ_COLUMNS):
-        got = None
-        if len(chunk) > 1:
-            sql = dialect.placeholder_scan_many_sql(schema, table, [(c.name, c.type) for c in chunk], _PLACEHOLDER_TOP)
-            got = _split_tagged(_try(runner, sql), len(chunk), ("v", "lo", "hi"), ("n", "total"))
-            if got is None:
-                _read_column_by_column(report, table)
-        for i, c in enumerate(chunk):
-            yield got[i] if got is not None else _try(
-                runner, dialect.placeholder_scan_sql(schema, table, c.name, c.type, _PLACEHOLDER_TOP))
+) -> list[Optional[list[dict]]]:
+    """Each column's `placeholder_scan_sql` result (None for a failed read), as `_per_column_reads`."""
+    return _per_column_reads(
+        runner, schema, table, [c.name for c in columns], _PLACEHOLDER_TOP,
+        lambda idx: dialect.placeholder_scan_many_sql(
+            schema, table, [(columns[i].name, columns[i].type) for i in idx], _PLACEHOLDER_TOP),
+        lambda i: dialect.placeholder_scan_sql(schema, table, columns[i].name, columns[i].type, _PLACEHOLDER_TOP),
+        lambda rows, n: _split_tagged(rows, n, ("v", "lo", "hi"), ("n", "total")), report)
 
 
 def _distinct_rows(
@@ -2799,26 +2907,38 @@ def _choose_key_target(column: str, cands: list[tuple[str, Table, int]]) -> Opti
     return top[0] if len(top) == 1 else None
 
 
+def _rows_of_table(t: Table) -> Optional[int]:
+    perf = getattr(t, "performance_hints", None)
+    return getattr(perf, "estimated_row_count", None) if perf else None
+
+
 def _too_big_to_probe(t: Table) -> bool:
     """True when a table's estimated row count is above the overlap-probe guard — scanning it to
     confirm a join would crawl, so we skip the scan and leave the join unverified."""
-    perf = getattr(t, "performance_hints", None)
-    rows = getattr(perf, "estimated_row_count", None) if perf else None
+    rows = _rows_of_table(t)
     return rows is not None and rows > _OVERLAP_PROBE_MAX_ROWS
 
 
-def overlap_sql(dialect: D.Dialect, ft: Table, fc: str, tt: Table, tc: str) -> str:
+def overlap_sql(dialect: D.Dialect, ft: Table, fc: str, tt: Table, tc: str,
+                from_rows: Optional[int] = None, spread: bool = True) -> str:
     """The overlap probe as one statement: 50 sampled distinct values of `ft.fc`, counted against
     `tt.tc`. Split out of `_overlaps` so a caller that must not run SQL itself, the reconcile skill's
     join check, which hands every probe to the execution tier, emits exactly the probe introspection
     already trusts rather than a second spelling of it.
 
     The sample is bounded through `Dialect.limited`, so the 50-row cap now holds on TOP and FETCH
-    engines too; it used to apply only where the row-limit keyword was `LIMIT`."""
+    engines too; it used to apply only where the row-limit keyword was `LIMIT`. `from_rows` draws the
+    values from that many of `ft`'s rows instead of all of them: a DISTINCT over a table above the
+    overlap guard reads every row before its LIMIT applies. `spread` samples them across the table where
+    the engine can; off, they are its first rows."""
     fq_from = dialect.qualified(ft.schema_name, ft.name)
     fq_to = dialect.qualified(tt.schema_name, tt.name)
     col_f = dialect.quote_ident(fc)
     col_t = dialect.quote_ident(tc)
+    if from_rows:
+        rows, _ = dialect.sampled_rows(f"SELECT {col_f} FROM {fq_from}", from_rows,
+                                       _rows_of_table(ft) if spread else None)
+        fq_from = f"({rows}) rows_read"
     sample = dialect.limited(f"SELECT DISTINCT {col_f} AS v FROM {fq_from} WHERE {col_f} IS NOT NULL", 50)
     return (
         f"SELECT COUNT(*) AS matched FROM ({sample}) src "
@@ -2846,8 +2966,15 @@ def dropped_rows_sql(dialect: D.Dialect, left: Table, lc: str, right: Table, rc:
 
 
 def _overlap_count(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: Table, tc: str) -> int:
-    """How many of the sampled from-column values exist in the target key (0 when the probe fails)."""
-    res = _try(runner, overlap_sql(dialect, ft, fc, tt, tc))
+    """How many of the sampled from-column values exist in the target key (0 when the probe fails).
+    Over the overlap guard the values come from a bounded read of the table, the way a join check
+    reads one (`profile.JOIN_SAMPLE_ROWS`); under it, from the whole table, as always."""
+    bound = PF.JOIN_SAMPLE_ROWS if _too_big_to_probe(ft) else None
+    res = _try(runner, overlap_sql(dialect, ft, fc, tt, tc, from_rows=bound))
+    if res is None and bound:
+        # A sampling clause some engines refuse on a view (Postgres's TABLESAMPLE): the first rows
+        # instead, as a join check falls back, rather than lose a join the whole scan used to find.
+        res = _try(runner, overlap_sql(dialect, ft, fc, tt, tc, from_rows=bound, spread=False))
     if not res:
         return 0
     try:

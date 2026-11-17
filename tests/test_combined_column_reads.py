@@ -8,6 +8,7 @@ reads now go 25 columns to a statement, and the model they produce is the same o
 from __future__ import annotations
 
 import math
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -124,8 +125,8 @@ def test_a_wide_table_reads_its_value_lists_in_a_few_statements_and_builds_the_s
         assert after == math.ceil(before / size)
         before, after = len(_placeholder_reads(alone, table)), len(_placeholder_reads(combined, table))
         assert before >= 30 and after == math.ceil(before / size)
-    # the view's grain: five id candidates, one statement
-    assert len(_grain_reads(alone, "wide_v")) == 5 and len(_grain_reads(combined, "wide_v")) == 1
+    # the view's grain: the first of five id candidates alone, then the other four together
+    assert len(_grain_reads(alone, "wide_v")) == 5 and len(_grain_reads(combined, "wide_v")) == 2
     assert len(combined) <= len(alone) - 2 * (N_CODES - 10)
     # what the reads found, so "the same" is not two empty models agreeing
     wide = _table(new[0], "wide")
@@ -184,6 +185,9 @@ def test_the_combined_value_read_is_each_column_read_tagged_and_stacked(db_type)
     d = D.get_dialect(db_type)
     sql = d.distinct_many_sql("s", "t", ["status", "kind"], 26)
     arms = sql.split(" UNION ALL ")
+    if d.union_types_pairwise:   # Postgres: the zero-row typing arm leads
+        assert arms.pop(0) == (f"SELECT -1 AS c, t0.v AS v0, t1.v AS v1 FROM ({d.distinct_sql('s', 't', 'status', 26)}) t0, "
+                               f"({d.distinct_sql('s', 't', 'kind', 26)}) t1 WHERE 1=0")
     assert len(arms) == 2
     for i, col in enumerate(["status", "kind"]):
         # each arm is the one-column read, unchanged, inside a derived table
@@ -275,3 +279,152 @@ def test_the_combined_placeholder_scan_keeps_each_column_read_and_its_order(db_t
     assert "b0.n AS n, b0.total AS total" in sql and "NULL AS lo1" in sql
     assert sql.endswith(" ORDER BY c, n DESC, v0, v1")
     sqlglot.parse_one(sql, read=_ENGINES[db_type])
+
+
+@pytest.mark.parametrize("db_type, typed", [("postgres", True), ("supabase", True), ("redshift", False),
+                                            ("snowflake", False), ("sqlserver", False), ("oracle", False)])
+def test_only_an_engine_that_types_a_union_pairwise_gets_the_typing_arm(db_type, typed):
+    d = D.get_dialect(db_type)
+    sql = d.distinct_many_sql("s", "t", ["a", "b", "n"], 26)
+    assert sql.startswith("SELECT -1 AS c, ") is typed and ("WHERE 1=0" in sql) is typed
+    scan = d.placeholder_scan_many_sql("s", "t", [("a", "string"), ("n", "integer")], 10)
+    assert scan.startswith("SELECT -1 AS c, t0.v AS v0, t1.v AS v1, t0.lo AS lo0") is typed
+    if typed:
+        assert "t0.n AS n, t0.total AS total FROM (" in scan
+    sqlglot.parse_one(scan, read=_ENGINES.get(db_type, "postgres"))
+
+
+def _pg():
+    """A live Postgres, opt-in as the other integration tests are: AGAMI_IT_PG_* (password required)."""
+    psycopg2 = pytest.importorskip("psycopg2")
+    if not os.environ.get("AGAMI_IT_PG_PASSWORD"):
+        pytest.skip("set AGAMI_IT_PG_PASSWORD to run against a live Postgres")
+    try:
+        return psycopg2.connect(host=os.environ.get("AGAMI_IT_PG_HOST", "127.0.0.1"),
+                                port=int(os.environ.get("AGAMI_IT_PG_PORT", "55432")),
+                                user=os.environ.get("AGAMI_IT_PG_USER", "agami_test"),
+                                password=os.environ["AGAMI_IT_PG_PASSWORD"],
+                                dbname=os.environ.get("AGAMI_IT_PG_DB", "shop"), connect_timeout=3)
+    except Exception as exc:
+        pytest.skip(f"no reachable Postgres ({exc})")
+
+
+def test_on_postgres_an_integer_and_a_date_after_two_text_columns_read_in_one_statement():
+    # Postgres types a UNION two arms at a time: without the typing arm, the NULLs arms 0 and 1 put in
+    # v2 are text, and arm 2's integer fails the whole statement ("UNION types text and integer").
+    con = _pg()
+    con.autocommit = True
+    cur = con.cursor()
+    cur.execute("DROP SCHEMA IF EXISTS agami_it_combined CASCADE; CREATE SCHEMA agami_it_combined")
+    try:
+        cur.execute("CREATE TABLE agami_it_combined.t (a text, b varchar(5), n int, d date, s char(3))")
+        cur.execute("INSERT INTO agami_it_combined.t VALUES ('x', 'p', 1, '2024-01-02', 'A'), "
+                    "('y', 'q', 2, NULL, 'B '), ('x', NULL, 1, '2024-01-03', NULL)")
+        d = D.PostgreSQL()
+        cols = ["a", "b", "n", "d", "s"]
+
+        def rows(sql):
+            cur.execute(sql)
+            names = [x[0] for x in cur.description]
+            return [dict(zip(names, r)) for r in cur.fetchall()]
+
+        split = I._split_tagged(rows(d.distinct_many_sql("agami_it_combined", "t", cols, 26)), len(cols))
+        for c, got in zip(cols, split):
+            alone = rows(d.distinct_sql("agami_it_combined", "t", c, 26))
+            assert sorted(map(repr, (r["v"] for r in got))) == sorted(map(repr, (r["v"] for r in alone)))
+        scan = [(c, t) for c, t in zip(cols, ["string", "string", "integer", "date", "string"])]
+        split = I._split_tagged(rows(d.placeholder_scan_many_sql("agami_it_combined", "t", scan, 10)),
+                                len(cols), ("v", "lo", "hi"), ("n", "total"))
+        for (c, t), got in zip(scan, split):
+            assert got == rows(d.placeholder_scan_sql("agami_it_combined", "t", c, t, 10))
+    finally:
+        cur.execute("DROP SCHEMA agami_it_combined CASCADE")
+        con.close()
+
+
+def test_a_view_whose_first_id_is_unique_reads_its_grain_in_one_statement(tmp_path):
+    db = tmp_path / "g.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, store_id INTEGER, region_id INTEGER)")
+    con.executemany("INSERT INTO t VALUES (?, ?, ?)", [(i, i % 3, i % 2) for i in range(20)])
+    con.execute("CREATE VIEW v AS SELECT id, store_id, region_id FROM t")
+    con.commit()
+    con.close()
+    seen: list[str] = []
+    org, _ = I.introspect("acme", "sqlite", runner=_runner(db, seen), artifacts_dir=tmp_path, dry_run=True)
+    assert _table(org, "v").grain == ["id"]
+    assert _grain_reads(seen, "v") == ['SELECT COUNT(*) AS total, COUNT(DISTINCT "id") AS distinct_count, '
+                                       'COUNT(*) - COUNT("id") AS null_count FROM "main"."v"']
+
+
+def test_a_lower_row_cap_takes_fewer_columns_to_a_statement(db, tmp_path, monkeypatch):
+    expected = _build(db, tmp_path / "a", [])
+    monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "100")   # three value lists of 26 rows, ten scans of 10
+    assert I._combined_size(I.ENUM_MAX_DISTINCT + 1) == 3 and I._combined_size(10) == 10
+    assert I._combined_size(1) == I.COMBINED_READ_COLUMNS
+    seen: list[str] = []
+    got = _build(db, tmp_path / "b", seen)
+    assert got[0].model_dump(mode="json") == expected[0].model_dump(mode="json")
+    assert len(_value_reads(seen, "wide")) == math.ceil(N_CODES / 3)
+    for raw, size in (("", 25), ("0", 25), ("x", 25), ("20", 1)):
+        monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", raw)
+        assert I._combined_size(26) == size
+
+
+def test_after_a_combined_read_times_out_the_table_is_read_a_column_at_a_time(db, tmp_path):
+    expected = _build(db, tmp_path / "a", [])
+    seen: list[str] = []
+    run = _runner(db, seen)
+
+    def slow(sql):
+        if "UNION ALL" in sql and '"main"."wide" WHERE' in sql and " AS c, b0.v AS v0" in sql:
+            seen.append(sql)
+            raise RuntimeError("canceling statement due to statement timeout")
+        return run(sql)
+
+    org, rep = I.introspect("acme", "sqlite", runner=slow, artifacts_dir=tmp_path / "b", dry_run=True)
+    assert org.model_dump(mode="json") == expected[0].model_dump(mode="json")
+    # the first combined read of `wide` timed out; neither its next chunk nor its placeholder scan tried again
+    assert sum(" AS c, b0.v AS v0" in q and '"main"."wide" WHERE' in q for q in seen) == 1
+    assert ("main", "wide") in rep.combined_too_slow
+    # another table is not held to it
+    assert sum(" AS c, b0.v AS v0" in q and '"main"."wide_v" WHERE' in q for q in seen) == 4
+
+
+@pytest.mark.parametrize("db_type, raw, ok", [
+    ("oracle", "CLOB", False), ("oracle", "NCLOB", False), ("oracle", "VARCHAR2(20)", True),
+    ("oracle", "LONG RAW", False), ("bigquery", "ARRAY<STRING>", False), ("bigquery", "STRUCT<a INT64>", False),
+    ("bigquery", "JSON", False), ("bigquery", "STRING", True), ("sqlserver", "ntext", False),
+    ("sqlserver", "text", False), ("sqlserver", "image", False), ("sqlserver", "nvarchar", True),
+    ("postgres", "json", False), ("postgres", "jsonb", True), ("postgres", "text", True),
+    ("redshift", "super", False), ("snowflake", "VARIANT", True), ("sqlite", None, True),
+])
+def test_a_type_the_engine_cannot_compare_is_known_by_its_catalog_name(db_type, raw, ok):
+    assert D.get_dialect(db_type).comparable(raw) is ok
+
+
+def test_a_column_of_such_a_type_is_read_alone_and_the_rest_together(db):
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    seen: list[str] = []
+
+    def run(sql):
+        seen.append(sql)
+        return [dict(r) for r in con.execute(sql)]
+
+    rep = I.IntrospectReport(profile="acme", db_type="sqlite", out_dir="", dry_run=True)
+    rep.uncomparable[("main", "wide")] = ["code_02"]
+    cols = ["code_01", "code_02", "code_03"]
+    got = I._value_reads(D.SQLite(), run, "main", "wide", cols, 26, rep)
+    assert [s.startswith("SELECT 0 AS c") for s in seen] == [False, True]
+    assert '"code_02"' in seen[0] and '"code_02"' not in seen[1]
+    assert [sorted(r["v"] for r in g) for g in got] == \
+        [sorted(r["v"] for r in run(D.SQLite().distinct_sql("main", "wide", c, 26))) for c in cols]
+
+
+def test_the_catalog_names_the_columns_no_combined_read_may_hold():
+    d = D.get_dialect("oracle")
+    out: list[str] = []
+    rows = [{"column_name": "NOTES", "data_type": "CLOB"}, {"column_name": "STATUS", "data_type": "VARCHAR2"}]
+    cols, mode = I._columns(d, lambda sql: rows, "S", "T", uncomparable=out)
+    assert mode == "catalog" and [c.name for c in cols] == ["NOTES", "STATUS"] and out == ["NOTES"]

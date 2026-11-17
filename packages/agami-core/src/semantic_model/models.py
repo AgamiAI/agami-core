@@ -553,6 +553,18 @@ class IndexHint(_Base):
     is_unique: bool = False
 
 
+# A table the catalog cannot size (a view keeps no statistics) is counted by the build only up to this
+# many rows, the largest line any size guard draws. Past it, or when that count fails, the model records
+# ROW_COUNT_CAP + 1: a lower bound, never a measured size, so every guard reads the table as large and
+# nothing says it holds exactly that many rows. No key of its own, so an older reader takes the model.
+ROW_COUNT_CAP = 5_000_000
+
+
+def rows_text(rows: int) -> str:
+    """A table's recorded size in words: `about 1,234 rows`, or `at least 5,000,000 rows` for the cap."""
+    return f"at least {ROW_COUNT_CAP:,} rows" if rows == ROW_COUNT_CAP + 1 else f"about {rows:,} rows"
+
+
 class PerformanceHints(_Base):
     estimated_row_count: Optional[int] = None
     # ISO-8601 UTC timestamp of when `estimated_row_count` was last measured (introspection
