@@ -47,6 +47,14 @@ PRESETS: dict[str, dict] = {
             "label_col": "column_label", "comment_col": "comments",
             "type_col": "internal_type", "reference_col": "reference",
             "reference_type": "reference",
+            # An export may write a reference as the referenced record's id rather than its name:
+            # these columns are then resolved through the named role's id -> name rows.
+            "resolve_ids": {"reference_col": "hierarchy", "type_col": "field_type"},
+        },
+        # The field-type table: only read to turn a type held as a record id back into its name.
+        "field_type": {
+            "source": "sys_glide_object",
+            "name_col": "name", "id_col": "sys_id",
         },
         # The class table: each class names its parent class by the parent's record id. A child's
         # record is also a row of every ancestor (an incident is also a task), with the same id.
@@ -57,6 +65,10 @@ PRESETS: dict[str, dict] = {
         # Every record's id column, and how an export names a link column holding one (ACE-181).
         "key": "sys_id",
         "link_suffix": "_sys_id",
+        # How an export may spell a role's column: as is, or as the `<field>_value` half of the
+        # value + link pair some exports write every reference field as (`reference_value` beside
+        # `reference_link`). The exact name is tried first.
+        "column_suffixes": ["", "_value"],
         # KNOWN reference graph — purely declarative config (field name → target table) for
         # ServiceNow's standard, published reference fields. This exists because a sparse export's
         # sys_dictionary often DOESN'T declare these (the joins live as sys_id GUIDs with no
@@ -289,6 +301,39 @@ def locate(source: str, catalog: Iterable[tuple[Optional[str], str]],
     if len(top) > 1:
         top = [x for x in top if (x[0] or "").lower() in preferred]
     return top[0] if len(top) == 1 else None
+
+
+def resolve_columns(cfg: dict, available: Iterable[str],
+                    suffixes: Iterable[str] = ("",)) -> Optional[dict[str, str]]:
+    """`role column -> the table's column that carries it` for every `*_col` a role reads, trying
+    each spelling in `suffixes` in order (`reference`, then `reference_value`); None when any one is
+    missing under every spelling, so a table without the role's columns is not the role's source."""
+    have = {c.lower(): c for c in available}
+    out: dict[str, str] = {}
+    for k, v in cfg.items():
+        if not k.endswith("_col"):
+            continue
+        hit = next((have[(v + s).lower()] for s in suffixes if (v + s).lower() in have), None)
+        if hit is None:
+            return None
+        out[v] = hit
+    return out
+
+
+def record_names(rows: Iterable[dict], cfg: dict) -> dict[str, str]:
+    """`record id -> name` from a role's rows (`id_col`, and `name_col` or `table_col`)."""
+    name_col = cfg.get("name_col") or cfg.get("table_col")
+    return {_norm(r.get(cfg["id_col"])): _norm(r.get(name_col)) for r in rows
+            if _norm(r.get(cfg["id_col"])) and _norm(r.get(name_col))}
+
+
+def resolve_record_ids(rows: list[dict], column: str, names: dict[str, str]) -> list[dict]:
+    """`rows` with each `column` value that is a known record id replaced by that record's name; a
+    value that is already a name, or an id nothing names, is left as it is."""
+    if not names:
+        return rows
+    return [{**r, column: names[_norm(r.get(column))]} if _norm(r.get(column)) in names else r
+            for r in rows]
 
 
 def class_parents(rows: Iterable[dict], *, table_col: str, id_col: str, parent_col: str) -> dict[str, str]:

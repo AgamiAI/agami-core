@@ -74,7 +74,9 @@ CHOICES = [("incident", "state", "new", "New"), ("incident", "state", "closed", 
            ("incident", "severity", "1", "High"), ("incident", "severity", "2", "Low")]
 
 
-def _warehouse(db: Path) -> None:
+def _warehouse(db: Path, spelling: str = "plain") -> None:
+    """`spelling="value"` writes the metadata the way some exports write every reference field: a
+    `<field>_value` / `<field>_link` pair, with a reference's target held as the class's record id."""
     con = sqlite3.connect(db)
     ex = con.execute
     ex("CREATE TABLE person_v(sys_id TEXT PRIMARY KEY, user_name TEXT, title TEXT, manager_sys_id TEXT, "
@@ -117,13 +119,26 @@ def _warehouse(db: Path) -> None:
     ex("CREATE TABLE sys_choice_set(name TEXT, sys_id TEXT)")
     ex("CREATE TABLE audit_set(id TEXT)")
     # the platform's own metadata, under the raw layer's suffix and never modelled
-    ex("CREATE TABLE sys_dictionary_raw(name TEXT, element TEXT, column_label TEXT, comments TEXT, "
-       "internal_type TEXT, reference TEXT)")
-    for cls, field, typ, ref in DICTIONARY:
-        ex("INSERT INTO sys_dictionary_raw VALUES (?,?,?,?,?,?)",
-           (cls, field, field.replace("_", " ").title(), f"The {field.replace('_', ' ')}.", typ, ref))
-    ex("CREATE TABLE sys_db_object_raw(name TEXT, sys_id TEXT, super_class TEXT)")
-    con.executemany("INSERT INTO sys_db_object_raw VALUES (?,?,?)", CLASSES)
+    if spelling == "value":
+        class_id = {name: i for name, i, _ in CLASSES}
+        ex("CREATE TABLE sys_dictionary_raw(name TEXT, element TEXT, column_label TEXT, comments TEXT, "
+           "internal_type_value TEXT, internal_type_link TEXT, reference_value TEXT, reference_link TEXT, "
+           "_fivetran_synced TEXT)")
+        for cls, field, typ, ref in DICTIONARY:
+            ex("INSERT INTO sys_dictionary_raw VALUES (?,?,?,?,?,?,?,?,?)",
+               (cls, field, field.replace("_", " ").title(), f"The {field.replace('_', ' ')}.", typ,
+                f"https://your-instance.example.com/api/{typ}", class_id.get(ref, ref),
+                f"https://your-instance.example.com/api/{ref}", "2026-01-01"))
+        ex("CREATE TABLE sys_db_object_raw(name TEXT, sys_id TEXT, super_class_value TEXT, super_class_link TEXT)")
+        con.executemany("INSERT INTO sys_db_object_raw VALUES (?,?,?,'')", CLASSES)
+    else:
+        ex("CREATE TABLE sys_dictionary_raw(name TEXT, element TEXT, column_label TEXT, comments TEXT, "
+           "internal_type TEXT, reference TEXT)")
+        for cls, field, typ, ref in DICTIONARY:
+            ex("INSERT INTO sys_dictionary_raw VALUES (?,?,?,?,?,?)",
+               (cls, field, field.replace("_", " ").title(), f"The {field.replace('_', ' ')}.", typ, ref))
+        ex("CREATE TABLE sys_db_object_raw(name TEXT, sys_id TEXT, super_class TEXT)")
+        con.executemany("INSERT INTO sys_db_object_raw VALUES (?,?,?)", CLASSES)
     ex("CREATE TABLE sys_choice_raw(name TEXT, element TEXT, value TEXT, label TEXT)")
     con.executemany("INSERT INTO sys_choice_raw VALUES (?,?,?,?)", CHOICES)
     con.commit()
@@ -138,9 +153,9 @@ def _sm(art: Path, *args: str) -> subprocess.CompletedProcess:
     )
 
 
-def _platform(tmp: Path) -> dict:
+def _platform(tmp: Path, spelling: str = "plain") -> dict:
     db = tmp / "wh.db"
-    _warehouse(db)
+    _warehouse(db, spelling)
     art = tmp / "art"
     (art / "local").mkdir(parents=True)
     creds = art / "local" / "credentials"
@@ -149,10 +164,11 @@ def _platform(tmp: Path) -> dict:
     return {"db": db, "art": art, "root": art / "wh"}
 
 
-@pytest.fixture(scope="module")
-def built(tmp_path_factory) -> dict:
-    """Introspect the views alone, then enrich from the platform's metadata: once for the module."""
-    wh = _platform(tmp_path_factory.mktemp("platform"))
+@pytest.fixture(scope="module", params=["plain", "value"])
+def built(request, tmp_path_factory) -> dict:
+    """Introspect the views alone, then enrich from the platform's metadata: once per spelling of the
+    metadata, and every claim below holds for both."""
+    wh = _platform(tmp_path_factory.mktemp("platform"), request.param)
     intro = _sm(wh["art"], "introspect", "--profile", "wh", "--db-type", "sqlite",
                 "--artifacts", str(wh["art"]), "--tables", *VIEWS)
     assert intro.returncode == 0, intro.stdout + intro.stderr
@@ -297,6 +313,32 @@ def test_a_table_maps_by_its_fields_only_with_a_clear_lead():
                         key="sys_id", link_suffix="_sys_id") == {}
     tie = {"a": {"x", "y", "z"}, "b": {"x", "y", "z"}}
     assert M.map_tables({"t_v": {"x", "y", "z"}}, tie, {}, key="sys_id", link_suffix="_sys_id") == {}
+
+
+def test_a_role_column_is_found_under_the_export_s_value_spelling():
+    cfg = {"source": "sys_dictionary", "table_col": "name", "column_col": "element", "reference_col": "reference"}
+    sfx = M.PRESETS["servicenow"]["column_suffixes"]
+    assert M.resolve_columns(cfg, ["NAME", "element", "reference_value", "reference_link"], sfx) == {
+        "name": "NAME", "element": "element", "reference": "reference_value"}
+    # the exact name wins over the value half, and a column missing under every spelling is no fit
+    assert M.resolve_columns(cfg, ["name", "element", "reference", "reference_value"], sfx)["reference"] == "reference"
+    assert M.resolve_columns(cfg, ["name", "element", "reference_link"], sfx) is None
+    assert M.resolve_columns(cfg, ["name", "element", "reference_value"]) is None    # no suffixes, no alias
+    # the choice table's decoy has neither spelling of the choice role's columns
+    choice = M.PRESETS["servicenow"]["choice"]
+    assert M.resolve_columns(choice, ["name", "sys_id", "name_value"], sfx) is None
+
+
+def test_a_reference_held_as_a_record_id_reads_as_that_record_s_name():
+    names = M.record_names([{"name": "sys_user", "sys_id": "c3"}, {"name": "", "sys_id": "c9"}],
+                           M.PRESETS["servicenow"]["hierarchy"])
+    assert names == {"c3": "sys_user"}
+    rows = [{"reference": "c3"}, {"reference": "cmn_location"}, {"reference": "c9"}, {"reference": None}]
+    assert M.resolve_record_ids(rows, "reference", names) == [
+        {"reference": "sys_user"}, {"reference": "cmn_location"}, {"reference": "c9"}, {"reference": None}]
+    assert M.resolve_record_ids(rows, "reference", {}) is rows
+    assert M.record_names([{"name": "reference", "sys_id": "t1"}], M.PRESETS["servicenow"]["field_type"]) == {
+        "t1": "reference"}
 
 
 def test_class_parents_resolve_ids_and_stop_on_a_loop():
