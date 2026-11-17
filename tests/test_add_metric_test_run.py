@@ -203,3 +203,70 @@ def test_the_runner_names_the_failure_kind_from_the_exit_code():
     assert INTRO.ExecuteSqlFailure("x", 4).kind == "auth"
     assert INTRO.ExecuteSqlFailure("x", 7).kind == "column_not_found"
     assert INTRO.ExecuteSqlFailure("x", 99).kind is None
+
+
+def _per_record(binding: dict | None = None) -> list[dict]:
+    """A per-record base and the second-order average over it — the documented way to average
+    once per record on a table that repeats rows."""
+    base = _metric("seconds_per_record", "SUM(id)", ["orders"])
+    avg = {
+        "name": "avg_seconds_per_record",
+        "description": "average seconds per record",
+        "calculation": "average of the per-record total",
+        "bindings": binding or {"PostgreSQL": "AVG({seconds_per_record})"},
+        "source_tables": ["orders"],
+        "inner_grain": ["customer_id"],
+    }
+    return [base, avg]
+
+
+def test_a_second_order_metric_runs_its_resolved_sql_not_its_placeholder(
+    tmp_path, monkeypatch, capsys
+):
+    def refuses_braces(sql: str):
+        if "{" in sql:
+            raise INTRO.ExecuteSqlFailure('syntax error at or near "{"', 7)
+        return []
+
+    rc, out, seen = _run(tmp_path, monkeypatch, capsys, _per_record(), runner=refuses_braces)
+    assert rc == 0, out
+    assert out["test_run"]["avg_seconds_per_record"] == {"ok": True}
+    sent = next(q for q in seen if "AVG(" in q)
+    assert "{" not in sent and "GROUP BY customer_id" in sent and "_inner" in sent
+
+
+def test_a_derived_metric_over_a_base_already_in_the_model_resolves(tmp_path, monkeypatch, capsys):
+    item = _metric("orders_doubled", "{order_count} * 2", [])
+    rc, out, seen = _run(tmp_path, monkeypatch, capsys, [item])
+    assert rc == 0 and out["test_run"]["orders_doubled"] == {"ok": True}
+    assert "(COUNT(*)) * 2" in seen[0] and '"public"."orders"' in seen[0]
+
+
+def test_a_derived_metric_over_an_unknown_base_fails_its_test_run(tmp_path, monkeypatch, capsys):
+    rc, out, seen = _run(
+        tmp_path, monkeypatch, capsys, [_metric("x", "AVG({no_such_metric})", ["orders"])]
+    )
+    assert rc == 1 and "could not be built" in out["test_run"]["x"]["error"] and seen == []
+
+
+@pytest.mark.parametrize("storage_type", ["Redshift", "PostgreSQL"])
+def test_the_second_order_sql_parses_and_runs_for_each_dialect(storage_type):
+    sqlglot = pytest.importorskip("sqlglot")
+    import sqlite3
+
+    from semantic_model import derived as DV
+    from semantic_model.models import Metric
+    from semantic_model.sql_dialect import sqlglot_dialect
+
+    base, avg = (
+        Metric.model_validate(m) for m in _per_record({storage_type: "AVG({seconds_per_record})"})
+    )
+    base = base.model_copy(update={"bindings": {storage_type: "SUM(id)"}})
+    sql = DV.resolve_metric_sql(avg, storage_type, {base.name: base, avg.name: avg})
+    stmt = f"SELECT\n{sql}\nAS v\nFROM orders\nWHERE 1 = 0"
+    sqlglot.parse_one(stmt, read=sqlglot_dialect(storage_type))
+    # Executed on SQLite too: two orders for one customer, one for another → AVG(3, 3) = 3.
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE orders (id INTEGER, customer_id INTEGER)")
+    db.executemany("INSERT INTO orders VALUES (?, ?)", [(1, 10), (2, 10), (3, 20)])
+    assert db.execute(f"SELECT {sql}").fetchone()[0] == 3
