@@ -1268,7 +1268,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/tmp
 
 Run `serve_page.py` with `run_in_background` and wait as rule 6a says. `--all` runs the same checks, with no cards (but the fiscal start's), adds the build's own guesses (a code list it filled in alone, an opaque column it described alone, never one a person signed) and reads up to five sample values of each unclear column (never a column flagged personal). What each row offers:
 
-- **a question**: the question in business words and the evidence numbers, and a dropdown of its readings (agami answers with the one picked and offers the other), **Ask each time** and **Don't know**; a look-alike pair offers its two tables, **Both are in use** and **Don't know**;
+- **a question**: the question in business words and the evidence numbers, and a dropdown of its readings (agami answers with the one picked and offers the other), **Ask each time** and **Don't know** (a `pattern: unit` question offers its units and **Don't know** only, and writes the picked unit's `ops`); a look-alike pair offers its two tables, **Both are in use** and **Don't know**;
 - **a code list**: each code with the build's guess pre-filled (Yes/No flags, plain numbers and codes that already carry their label are left off), and **The meanings shown are right** / **Fix them** (the labels become editable) / **Don't know**;
 - **an unclear column**: its sample values and the build's guess, and **That's right** (only when there is a guess) / **Fix it** (the words typed) / **Hide this column** / **Don't know**.
 
