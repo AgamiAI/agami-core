@@ -922,6 +922,35 @@ def test_and_operator_and_lookalikes_still_pass(sql: str) -> None:
     assert check_read_only(sql) is None, f"over-refused: {sql!r}"
 
 
+REJECT_ESCAPED_BACKTICK_NAME = [
+    # BigQuery decodes escapes inside a backtick name, so this resolves to EXTERNAL_QUERY while
+    # this scan sees `EXTERNAL_QUE\u0052Y` and no denied function.
+    r"SELECT `EXTERNAL_QUE\u0052Y`('demo.us.conn', 'SELECT 1')",
+    r"SELECT `a\x62c` FROM t",
+]
+
+
+@pytest.mark.parametrize("sql", REJECT_ESCAPED_BACKTICK_NAME)
+def test_rejects_a_backslash_inside_a_backtick_name(sql: str) -> None:
+    refusal = check_read_only(sql)
+    assert refusal is not None, f"escaped backtick name NOT caught: {sql!r}"
+    assert _lexer_remediation(sql) == _REMEDIATION["backtick_escape"]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # A combining mark (U+0301) continues the name `x\u0301`, so `$a$` after it opens nothing
+        # on the engine and must open nothing here either, or the call between is hidden.
+        "SELECT 1 AS x\u0301$a$, pg_sleep(9) AS y$a$",
+        # Any non-ASCII letter continues a name too.
+        "SELECT 1 AS \u00e9$a$, pg_sleep(9) AS y$a$",
+    ],
+)
+def test_a_dollar_after_a_non_ascii_name_character_hides_nothing(sql: str) -> None:
+    assert check_read_only(sql) is not None, f"call hidden behind a dollar after {sql[12]!r}"
+
+
 REJECT_NESTED_COMMENT = [
     # Postgres nests block comments, so its comment runs past the first `*/` and the `'` this
     # scan opened a literal at is inside it: the DELETE runs on a stock Postgres.
@@ -1058,6 +1087,8 @@ def test_a_semicolon_may_only_end_the_statement(sql: str) -> None:
         "SELECT 1;\n/* done */\n",
         "SELECT 1 -- every order\n;",
         "SELECT 1; -- a -- b",
+        "SELECT 1; -- note --x",
+        "SELECT 1; -- a --b --c",
     ],
 )
 def test_a_trailing_semicolon_still_passes(sql: str) -> None:

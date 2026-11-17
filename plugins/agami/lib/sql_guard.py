@@ -69,6 +69,7 @@ _REMEDIATION: dict[str, str] = {
         "or ends with a doubled quote. Compare with CHR(39) or the like instead."
     ),
     "q_quote": "Rewrite the q'…' alternative-quoted string as an ordinary '…' string.",
+    "backtick_escape": "Write the backtick-quoted name without a backslash.",
     "unicode_escape": (
         "Write the name or string plainly, without the U& prefix and its escapes; use CHR(n) for a "
         "character that cannot be typed."
@@ -127,17 +128,18 @@ def _without_trailing_separators(sql: str) -> str:
             if start != -1 and not body.startswith("!") and not _TAIL_FORBIDDEN & set(body):
                 text = text[:start]
                 continue
-        start = text.rfind("--")
-        if start != -1:
+        # The leftmost `-- ` on the last line, not the last `--`: in `-- note --x` the comment
+        # starts at the first marker and the second is its text.
+        line = max(text.rfind("\n"), text.rfind("\r")) + 1
+        start = text.find("--", line)
+        while start != -1:
             body = text[start + 2 :]
-            if (
-                (not body or body[0] in " \t")
-                and "\n" not in body
-                and "\r" not in body
-                and not _TAIL_FORBIDDEN & set(body)
-            ):
-                text = text[:start]
-                continue
+            if (not body or body[0] in " \t") and not _TAIL_FORBIDDEN & set(body):
+                break
+            start = text.find("--", start + 1)
+        if start != -1:
+            text = text[:start]
+            continue
         return text
 
 
@@ -425,6 +427,14 @@ def _neutralize(sql: str) -> _Neutralized:
             # literal here that blanked the SLEEP call those engines run. The content stays
             # visible, as with `"`, so nothing inside one is hidden from the checks below.
             j, closed, content = _scan_quoted(sql, i)
+            # BigQuery decodes escapes inside a backtick name, so `EXTERNAL_QUE\u0052Y` names a
+            # denied function this scan cannot see. No real name needs a backslash.
+            if sql[i] == "`" and "\\" in content:
+                raise _GuardReject(
+                    "a backslash inside a backtick-quoted name is an escape on some engines, so "
+                    "what the name refers to cannot be checked here",
+                    _REMEDIATION["backtick_escape"],
+                )
             # A pathological identifier like "a;b" reduces to a;b and trips the
             # multi-statement check — a deliberate, safe-direction hardening choice.
             #
@@ -476,7 +486,10 @@ def _neutralize(sql: str) -> _Neutralized:
             # the next `$a$`, a whole `; INSERT …;` included, while the engine ran it. A dollar
             # quote opens only where a name cannot be continuing.
             prev = sql[i - 1] if i else ""
-            m = None if (prev.isalnum() or prev in "_$") else _DOLLAR_OPEN_RE.match(sql, i)
+            # Any non-ASCII character counts as a name character: engines continue identifiers
+            # with combining marks (U+0301) that `isalnum` does not call letters.
+            continues = prev.isalnum() or prev in "_$" or (prev != "" and ord(prev) > 127)
+            m = None if continues else _DOLLAR_OPEN_RE.match(sql, i)
             close = sql.find(m.group(0), m.end()) if m else -1
             if m and close != -1:
                 i = close + len(m.group(0))
