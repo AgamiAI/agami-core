@@ -2742,7 +2742,14 @@ def _builtin_catalog_query(sql: str) -> bool:
 
     Matched by fingerprint, so only the literal values may differ from the query `dialects` builds:
     a statement an agent wrote, or one of these with anything added, does not match. False whenever
-    the list cannot be loaded, so the recon gate stays shut."""
+    the list cannot be loaded, so the recon gate stays shut.
+
+    A statement with any backslash never matches. The fingerprint blanks literals, and an engine
+    that reads backslash escapes can end a literal somewhere other than where the fingerprint did,
+    so the literal values are only safe to ignore when no backslash can move their ends. None of
+    agami's own catalog queries carries one."""
+    if "\\" in sql:
+        return False
     import sql_guard
 
     try:

@@ -12,6 +12,15 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Security
+
+- **A stricter read-only check.** It now reads quotes, comments and names the same way on every
+  database it supports, and refuses the few forms that databases read differently. A `;` is
+  allowed only at the end of a statement. Each refusal says how to rewrite the SQL: a `;` inside a
+  string, such as `STRING_AGG(a, '; ')`, becomes `CHR(59)`; `ESCAPE '\'` becomes `ESCAPE '!'`; three
+  quotes in a row become `CHR(39)`. Nested block comments, Oracle `q'…'` strings and `U&` names and
+  strings are refused too.
+
 ### Added
 
 - **A build checks every join on the data, and profiles what the columns hold (#448).** A join was
