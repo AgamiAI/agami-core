@@ -85,10 +85,17 @@ def _ops(d: dict, item: dict) -> tuple[list[dict] | None, str | None]:
     op = item.get("op") or {}
     if choice in ("dont_know", "both"):
         return [], None
+    unit = kind == "ambiguity" and item.get("pattern") == "unit"
     if choice == "reading":
-        if d.get("label") not in [o.get("label") for o in item.get("options") or []]:
+        picked = [o for o in item.get("options") or [] if o.get("label") == d.get("label")]
+        if not picked:
             return None, f"{d.get('label')!r} is not one of its readings"
+        if unit:
+            # a unit is recorded as facts, as its card answer is (ACE-182): no ambiguity is declared
+            return list(picked[0].get("ops") or []), None
         return [{**op, "default": d["label"]}], None
+    if choice == "ask" and unit:
+        return None, "a unit is a fact: pick the one people report in"
     if choice == "ask":
         return [{**op, "behaviour": "ask"}], None
     if choice == "table":

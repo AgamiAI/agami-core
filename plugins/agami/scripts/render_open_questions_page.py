@@ -55,6 +55,16 @@ def _title(q: dict) -> str:
 def _row(q: dict) -> dict | None:
     kind = q.get("kind")
     base = {"id": q.get("id"), "title": _title(q), "evidence": q.get("evidence") or ""}
+    if kind == "ambiguity" and q.get("pattern") == "unit":
+        # A unit is a fact with one answer (ACE-182): its units, and no way of behaving.
+        units = [
+            {
+                "value": f"reading:{o['label']}",
+                "label": f"{o['label']} ({o.get('shown', '')}): the one people report in",
+            }
+            for o in q.get("options") or []
+        ]
+        return {**base, "kind": "question", "choices": [*units, DONT_KNOW]}
     if kind == "ambiguity":
         options = q.get("options") or []
         other = "the others" if len(options) > 2 else "the other"

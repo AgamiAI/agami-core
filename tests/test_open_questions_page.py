@@ -756,6 +756,36 @@ def test_each_choice_becomes_the_op_its_card_answer_would(tmp_path, capsys):
     }
 
 
+def _unit_out() -> dict:
+    """The sample with its first question a unit: a fact whose answer is ops, never an ambiguity."""
+    out = _sample_out()
+    q = out["questions"][0]
+    stamp = {"op": "edit", "kind": "table", "area": "main", "name": "orders", "field": "caveats"}
+    q.update(id="question:orders_unit", pattern="unit", op=None)
+    for o in q["options"]:
+        o["ops"] = [{**stamp, "value": [f"Amounts are reported in {o['label']}."]}]
+    return out
+
+
+def test_a_unit_on_the_page_is_a_fact_recorded_as_its_card_would(tmp_path, capsys):
+    data = json.loads(_block(ROQ.render(_unit_out(), profile="demo", signoff={})))
+    assert "ask" not in [c["value"] for c in data["rows"][0]["choices"]]
+    label = _unit_out()["questions"][0]["options"][1]["label"]
+    code, out, ops = _run(
+        tmp_path, capsys, [{"id": "question:orders_unit", "choice": "reading", "label": label}],
+        _unit_out(),
+    )
+    assert code == 0 and out["refused"] == []
+    assert ops == _unit_out()["questions"][0]["options"][1]["ops"]
+
+
+def test_ask_each_time_is_refused_on_a_unit(tmp_path, capsys):
+    _, out, ops = _run(
+        tmp_path, capsys, [{"id": "question:orders_unit", "choice": "ask"}], _unit_out()
+    )
+    assert ops == [] and out["refused"][0]["id"] == "question:orders_unit"
+
+
 def test_ask_each_time_declares_no_default(tmp_path, capsys):
     _, out, ops = _run(tmp_path, capsys, [{"id": "question:orders_date", "choice": "ask"}])
     assert ops == [{**_sample_out()["questions"][0]["op"], "behaviour": "ask"}]

@@ -1565,7 +1565,9 @@ def open_questions(
 
     candidates.sort(key=lambda c: -c["spread"])
     for c in candidates:
-        c["id"] = f"question:{c['op']['name']}"
+        # a unit declares no ambiguity, so it has no op name; one per table, named as one would be
+        name = c["op"]["name"] if c["op"] else _name(c["table"], c["pattern"])
+        c["id"] = f"question:{name}"
     for la in look_alikes:
         la["id"] = "same:" + "|".join(sorted(t["table"] for t in la["tables"]))
     coded, unknown = _unread_columns(tables, nouns, page=page, confirmed=confirmed)
