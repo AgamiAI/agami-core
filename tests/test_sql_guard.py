@@ -890,6 +890,38 @@ def test_rejects_oracle_alternative_quoting(sql: str) -> None:
     assert _lexer_remediation(sql) == _REMEDIATION["q_quote"]
 
 
+REJECT_UNICODE_ESCAPE = [
+    # Postgres decodes `U&"…"` before it resolves the name, so the escaped call runs while this
+    # scan sees `pg_sl\0065ep` and no denied function.
+    r'SELECT U&"pg_sl\0065ep"(3)',
+    r'SELECT u&"current_us\0065r"() AS who',
+    "SELECT U&\"d!0062link_exec\" UESCAPE '!' (1) FROM t",
+    # The string form decodes too, so its content cannot be read the same way either.
+    r"SELECT a FROM t WHERE b = U&'d\0061ta'",
+    r"SELECT a FROM t WHERE b =u&'x'",
+]
+
+
+@pytest.mark.parametrize("sql", REJECT_UNICODE_ESCAPE)
+def test_rejects_unicode_escaped_names_and_strings(sql: str) -> None:
+    refusal = check_read_only(sql)
+    assert refusal is not None, f"U& form NOT caught: {sql!r}"
+    assert _lexer_remediation(sql) == _REMEDIATION["unicode_escape"]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # `&` after a longer word is the bitwise-and operator, not a U& prefix.
+        "SELECT menu&'1' AS m FROM t",
+        'SELECT flags & 4, "u" FROM t',
+        "SELECT a FROM t WHERE b = 'U&x'",
+    ],
+)
+def test_and_operator_and_lookalikes_still_pass(sql: str) -> None:
+    assert check_read_only(sql) is None, f"over-refused: {sql!r}"
+
+
 REJECT_NESTED_COMMENT = [
     # Postgres nests block comments, so its comment runs past the first `*/` and the `'` this
     # scan opened a literal at is inside it: the DELETE runs on a stock Postgres.

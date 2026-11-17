@@ -12,6 +12,18 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Security
+
+- **The read-only check no longer misreads where a string, name or comment ends.** It treated
+  backslashes, nested block comments, `$` inside a name and `U&`-escaped names differently from
+  the databases it guards, so a statement could carry text the check read as a literal or comment
+  but the database ran. It now refuses the forms known to read differently between engines, a `;`
+  anywhere but at the very end, and `U&`-prefixed names and strings, and the build's catalog
+  allow-list refuses any statement with a backslash. A small amount of valid SQL is now refused,
+  each with a rewrite: a `;` inside a string, such as `STRING_AGG(a, '; ')` (use `CHR(59)`); a
+  backslash right before a quote, such as `ESCAPE '\'` (use `ESCAPE '!'`); three quotes in a row
+  (use `CHR(39)`); nested block comments; Oracle `q'…'` strings; `U&` names and strings.
+
 ### Added
 
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked

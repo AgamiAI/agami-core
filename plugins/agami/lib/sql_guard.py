@@ -69,6 +69,10 @@ _REMEDIATION: dict[str, str] = {
         "or ends with a doubled quote. Compare with CHR(39) or the like instead."
     ),
     "q_quote": "Rewrite the q'…' alternative-quoted string as an ordinary '…' string.",
+    "unicode_escape": (
+        "Write the name or string plainly, without the U& prefix and its escapes; use CHR(n) for a "
+        "character that cannot be typed."
+    ),
     "multi_statement": (
         "Send exactly one statement, with a `;` only at its end — not inside a string, name or "
         "comment either. Write a semicolon in a string as CHR(59)."
@@ -193,6 +197,24 @@ def _scan_quoted(sql: str, i: int) -> tuple[int, bool, str]:
         buf.append(c)
         j += 1
     return n, False, "".join(buf)
+
+
+def _unicode_escape_prefix(sql: str, i: int) -> bool:
+    """Whether the quote at `sql[i]` is prefixed by `U&` (Postgres unicode-escape form).
+
+    Postgres decodes `U&"pg_sl\\0065ep"` to `pg_sleep` before it resolves the name, and `U&'…'`
+    before it reads the string, so this scan would match deny patterns against escaped text the
+    engine never sees. The prefix must be a whole word: `menu&'1'` is a bitwise and.
+    """
+    if i < 2 or sql[i - 1] != "&" or sql[i - 2] not in "uU":
+        return False
+    return i == 2 or not (sql[i - 3].isalnum() or sql[i - 3] in "_$")
+
+
+_UNICODE_ESCAPE_DETAIL = (
+    "a U&-prefixed name or string is decoded by the engine before it is read, so what it names "
+    "cannot be checked here"
+)
 
 
 def _opens_q_quote(sql: str, i: int) -> bool:
@@ -385,6 +407,8 @@ def _neutralize(sql: str) -> _Neutralized:
                 "carrying one outside a string literal cannot be read the same way on all of them",
                 _REMEDIATION["hash_ambiguous"],
             )
+        elif sql[i] in "'\"`" and _unicode_escape_prefix(sql, i):
+            raise _GuardReject(_UNICODE_ESCAPE_DETAIL, _REMEDIATION["unicode_escape"])
         elif sql[i] == "'":  # single-quoted string literal
             if _opens_q_quote(sql, i):
                 raise _GuardReject(
