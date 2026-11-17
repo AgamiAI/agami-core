@@ -761,11 +761,11 @@ def test_a_browser_sign_in_is_detected_without_reading_a_secret(tmp_path, monkey
     """A build holds up to `WORKERS` connections; a browser sign-in would open that many windows."""
     from semantic_model import cli
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
-    assert not cli._signs_in_with_a_browser("demo")   # no credentials file
+    assert not cli._may_prompt_to_sign_in("demo")   # no credentials file
     (tmp_path / "local").mkdir()
     (tmp_path / "local" / "credentials").write_text(
         "[demo]\ntype = snowflake\nauthenticator = externalbrowser\n[acme]\ntype = postgres\npassword = %x\n")
-    assert cli._signs_in_with_a_browser("demo") and not cli._signs_in_with_a_browser("acme")
+    assert cli._may_prompt_to_sign_in("demo") and not cli._may_prompt_to_sign_in("acme")
 
 
 # --- review of PR #650 ----------------------------------------------------------------------------

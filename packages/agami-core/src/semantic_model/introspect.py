@@ -148,7 +148,10 @@ _GROUPED_FINDINGS = {"empty": "empty on every row read", "mostly_blank": "blank 
 # A step that writes no line for this long gets a heartbeat line saying what it is waiting on, so a
 # slow statement and a hung build stop looking the same (#677: one step ran 30+ minutes silently).
 HEARTBEAT_S = 60.0
-_LOG_LOCK = threading.Lock()   # workers write lines too; one line at a time, never interleaved
+# Workers write lines too; one line at a time, never interleaved. Re-entrant so the heartbeat can
+# hold it across its last check and its write.
+_LOG_LOCK = threading.RLock()
+_FINISHED: set[Path] = set()   # logs whose `done:` line is written: no heartbeat follows it
 _LAST_LINE: dict[Path, float] = {}   # log -> monotonic time of its last line of real progress
 _LAST_ANY: dict[Path, float] = {}    # log -> monotonic time of its last line, heartbeats included
 _WAITING: dict[Path, dict[int, str]] = {}   # log -> what each in-flight step is waiting on
@@ -167,6 +170,8 @@ def _write_line(path: Path, msg: str, *, beat: bool = False) -> None:
         _LAST_ANY[path] = now
         if not beat:
             _LAST_LINE[path] = now
+        if msg.startswith("done:"):
+            _FINISHED.add(path)
 
 
 def _progress(path: Optional[Path], msg: str) -> None:
@@ -233,6 +238,7 @@ def _heartbeat(path: Optional[Path]) -> Iterator[None]:
     stop = threading.Event()
     with _LOG_LOCK:
         _LAST_LINE[path] = _LAST_ANY[path] = time.monotonic()
+        _FINISHED.discard(path)
 
     def beat() -> None:
         while not stop.wait(min(5.0, HEARTBEAT_S / 4)):
@@ -244,22 +250,29 @@ def _heartbeat(path: Optional[Path]) -> Iterator[None]:
             if not due or stop.is_set():
                 continue
             what = "; ".join(doing[:3]) + (f"; and {len(doing) - 3} more" if len(doing) > 3 else "")
-            try:
-                _write_line(path, f"waiting on the database for {_quiet_for(quiet)}: "
-                                  f"{what or 'the step on the line before'}", beat=True)
-            except Exception:
-                pass
+            with _LOG_LOCK:
+                # Checked again under the lock the last line takes, so no beat lands after `done:`
+                # or after the build has returned.
+                if stop.is_set() or path in _FINISHED:
+                    return
+                try:
+                    _write_line(path, f"waiting on the database for {_quiet_for(quiet)}: "
+                                      f"{what or 'the step on the line before'}", beat=True)
+                except Exception:
+                    pass
 
     worker = threading.Thread(target=beat, name="introspect-heartbeat", daemon=True)
     worker.start()
     try:
         yield
     finally:
-        stop.set()
+        with _LOG_LOCK:   # a beat mid-write finishes first; none starts after this
+            stop.set()
         worker.join(timeout=5.0)
         with _LOG_LOCK:
             for d in (_LAST_LINE, _LAST_ANY, _WAITING):
                 d.pop(path, None)
+            _FINISHED.discard(path)
 
 
 @dataclass
@@ -1441,27 +1454,40 @@ def _read_tables(
     Each table is built against a report of its own, and those are folded into `report` in `pairs`
     order once all are read, so the model and the report come out the same whatever order the tables
     finish in. The two run-wide budgets are shared and locked: the counts' time budget, and the
-    DISTINCT reads, where only when that cap runs out can which columns got a value list depend on
-    which table got there first. PF.WORKERS is 1 for a browser sign-in, which reads one at a time."""
+    DISTINCT reads, which tables claim in `pairs` order (`_TableReads`). PF.WORKERS is 1 for a sign-in
+    that may prompt, which reads one at a time. One table failing, or Ctrl-C, cancels the tables still
+    queued; those already running finish their statements."""
     step = max(1, len(pairs) // 10)   # throttle the log to ~10 lines, not one per table
+    turn = threading.Condition()
+    next_up = [0]
 
-    def one(pair: tuple) -> tuple[Table, IntrospectReport, set, dict]:
+    def one(order: int, pair: tuple) -> tuple[Table, IntrospectReport, set, dict]:
         schema, table = pair
         own = IntrospectReport(profile=report.profile, db_type=report.db_type, out_dir=report.out_dir,
                                dry_run=report.dry_run)
         own_unread: set = set()
         own_samples: dict = {}
-        with _waiting_on(pp, f"reading columns and keys of {table}"):
-            t = _build_table(dialect, runner, schema, table, conn_name, own, budget, reads,
-                             own_unread, own_samples)
+        my_reads = _TableReads(reads, order, turn, next_up)
+        try:
+            with _waiting_on(pp, f"reading columns and keys of {table}"):
+                t = _build_table(dialect, runner, schema, table, conn_name, own, budget, my_reads,
+                                 own_unread, own_samples)
+        finally:
+            my_reads.release()
         return t, own, own_unread, own_samples
 
-    with ThreadPoolExecutor(max_workers=max(1, PF.WORKERS)) as pool:
-        futures = [pool.submit(one, p) for p in pairs]
-        for i, _ in enumerate(as_completed(futures), 1):
+    pool = ThreadPoolExecutor(max_workers=max(1, PF.WORKERS))
+    try:
+        futures = [pool.submit(one, k, p) for k, p in enumerate(pairs)]
+        for i, f in enumerate(as_completed(futures), 1):
+            f.result()   # a table that failed stops the build now, not after every other table
             if i % step == 0 or i == len(pairs):
                 _progress(pp, f"columns+grain {i}/{len(pairs)}")
         results = [f.result() for f in futures]
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
     built: list[Table] = []
     for t, own, own_unread, own_samples in results:
         _fold_report(report, own)
@@ -1493,7 +1519,7 @@ def _fold_report(into: IntrospectReport, part: IntrospectReport) -> None:
 def _build_table(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
     conn_name: str, report: IntrospectReport, budget: Optional[_CountBudget] = None,
-    reads: Optional[_ReadBudget] = None, keys_unread: Optional[set] = None,
+    reads: "Optional[_ReadBudget | _TableReads]" = None, keys_unread: Optional[set] = None,
     samples: Optional[dict] = None,
 ) -> Table:
     # columns: catalog first, probe fallback
@@ -1668,12 +1694,47 @@ class _ReadBudget:
 
     def take(self) -> bool:
         """One DISTINCT read, if any are left; counts a skipped column when none are."""
+        return self.claim(1) == 1
+
+    def claim(self, n: int) -> int:
+        """Up to `n` reads, as many as are left; the rest are counted as skipped columns."""
         with self.lock:
-            if self.left <= 0:
-                self.skipped += 1
-                return False
-            self.left -= 1
-            return True
+            got = max(0, min(n, self.left))
+            self.left -= got
+            self.skipped += n - got
+            return got
+
+
+class _TableReads:
+    """One table's turn at the run's DISTINCT reads. Tables read side by side would otherwise race for
+    the last reads when the cap runs out, and which columns got a value list would depend on which
+    table got there first; here table k claims only after tables 0..k-1 have, as one at a time would."""
+
+    def __init__(self, shared: _ReadBudget, order: int, turn: threading.Condition, next_up: list[int]) -> None:
+        self.shared, self.order, self.turn, self.next_up = shared, order, turn, next_up
+        self.done = False
+
+    def claim(self, n: int) -> int:
+        if self.done:
+            return self.shared.claim(n)
+        with self.turn:
+            self.turn.wait_for(lambda: self.next_up[0] >= self.order)
+        got = self.shared.claim(n)
+        self.release()
+        return got
+
+    def take(self) -> bool:
+        return self.claim(1) == 1
+
+    def release(self) -> None:
+        """Pass the turn on, claimed or not: a table that never reached its value lists, or failed,
+        must not hold up the tables after it."""
+        if self.done:
+            return
+        self.done = True
+        with self.turn:
+            self.next_up[0] = max(self.next_up[0], self.order + 1)
+            self.turn.notify_all()
 
 
 def _estimate_rows(
@@ -2921,7 +2982,7 @@ def _sample_covers_values(sample: list, est_rows: Optional[int]) -> bool:
 
 def _enrich_from_sample(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
-    *, est_rows: Optional[int] = None, reads: Optional[_ReadBudget] = None,
+    *, est_rows: Optional[int] = None, reads: "Optional[_ReadBudget | _TableReads]" = None,
     skip: frozenset[str] | set[str] = frozenset(), nocase: frozenset[str] | set[str] = frozenset(),
     report: Optional[IntrospectReport] = None, sample: Optional[list] = None,
 ) -> list:
@@ -2961,9 +3022,10 @@ def _enrich_from_sample(
     choice_cands = [c for c in choice_cands if not c.date_format and not _personal_column(c)]
     if not _sample_covers_values(sample, est_rows):
         choice_cands = []  # a big table: DISTINCT would scan it, and a partial list would mislead
+    if reads is not None:
+        # One claim for the table, in column order: when the cap runs out, the first columns keep theirs.
+        choice_cands = choice_cands[:reads.claim(len(choice_cands))]
     for c in choice_cands:
-        if reads is not None and not reads.take():
-            continue
         rows = _try(runner, dialect.distinct_sql(schema, table, c.name, ENUM_MAX_DISTINCT + 1))
         if rows is None or len(rows) > ENUM_MAX_DISTINCT:
             continue  # more values than a list holds: none, rather than an incomplete one

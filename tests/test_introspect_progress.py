@@ -392,3 +392,112 @@ def test_the_batch_flag_takes_n_of_total_only():
     for bad in ("0/5", "6/5", "three", "3-5"):
         with pytest.raises(SystemExit):
             cli._batch_arg(bad)
+
+
+# --- review: stopping, sign-in, a fixed cap order, a heartbeat that ends with the build -------------
+
+def test_one_table_failing_stops_the_tables_still_queued(shop_db, monkeypatch):
+    monkeypatch.setattr(PF, "WORKERS", 2)
+    calls: list[str] = []
+    real = I._build_table
+
+    def build(dialect, runner, schema, table, *a, **k):
+        calls.append(table)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        time.sleep(0.2)
+        return real(dialect, runner, schema, table, *a, **k)
+
+    monkeypatch.setattr(I, "_build_table", build)
+    dialect = D.get_dialect("sqlite")
+    runner = _runner(shop_db)
+    pairs = I._discover_tables(dialect, runner, None, I.IntrospectReport("shop", "sqlite", "o", True))
+    with pytest.raises(RuntimeError, match="boom"):
+        I._read_tables(dialect, runner, pairs, "c", I.IntrospectReport("shop", "sqlite", "o", True),
+                       I._CountBudget(600.0), I._ReadBudget(10), set(), {})
+    time.sleep(0.5)
+    # The failing table, the one in flight beside it, and at most the one its worker picked up before
+    # the build heard of the failure; never the rest of the queue.
+    assert len(calls) <= PF.WORKERS + 1 < len(pairs), calls
+
+
+@pytest.mark.parametrize("section, prompts", [
+    ("type = snowflake\nauthenticator = externalbrowser\n", True),
+    ("type = snowflake\nauthenticator = username_password_mfa\n", True),
+    ("type = snowflake\nauthenticator = https://acme.okta.com\n", True),
+    ("type = snowflake\nauthenticator = something_new\n", True),
+    ("type = snowflake\nauthenticator = snowflake\npassword = %x\n", False),
+    ("type = snowflake\nauthenticator = oauth\n", False),
+    ("type = snowflake\nauthenticator = SNOWFLAKE_JWT\n", False),
+    ("type = snowflake\npassword = %x\n", False),
+    ("type = postgres\nuser = readonly\npassword = %x\n", False),
+])
+def test_only_a_sign_in_that_cannot_prompt_reads_in_parallel(tmp_path, monkeypatch, section, prompts):
+    from semantic_model import cli
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    (tmp_path / "local").mkdir()
+    (tmp_path / "local" / "credentials").write_text("[demo]\n" + section, encoding="utf-8")
+    assert cli._may_prompt_to_sign_in("demo") is prompts
+
+
+def test_an_unreadable_credentials_file_reads_one_at_a_time(tmp_path, monkeypatch):
+    from semantic_model import cli
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    (tmp_path / "local").mkdir()
+    (tmp_path / "local" / "credentials").write_text("not an ini file\n", encoding="utf-8")
+    assert cli._may_prompt_to_sign_in("demo") is True
+
+
+def test_which_columns_lose_a_value_list_does_not_depend_on_timing(shop_db, monkeypatch):
+    """With the read cap run out, the columns that got a list are the same as one at a time."""
+    def listed(workers: int, jitter: bool) -> list[str]:
+        monkeypatch.setattr(PF, "WORKERS", workers)
+        dialect = D.get_dialect("sqlite")
+        base = _runner(shop_db)
+        n = [0]
+
+        def runner(sql: str) -> list[dict]:
+            n[0] += 1
+            if jitter and "orders_1" in sql:
+                time.sleep(0.05)   # the first orders table is the slowest to reach its value lists
+            return base(sql)
+
+        pairs = I._discover_tables(dialect, runner, None, I.IntrospectReport("shop", "sqlite", "o", True))
+        tables = I._read_tables(dialect, runner, pairs, "c", I.IntrospectReport("shop", "sqlite", "o", True),
+                                I._CountBudget(600.0), I._ReadBudget(5), set(), {})
+        return [f"{t.name}.{c.name}" for t in tables for c in t.columns if c.choice_field]
+
+    expected = listed(1, jitter=False)
+    assert expected
+    for _ in range(3):
+        assert listed(4, jitter=True) == expected
+
+
+def test_a_failed_build_leaves_no_heartbeat_behind(tmp_path, monkeypatch):
+    monkeypatch.setattr(I, "HEARTBEAT_S", 0.05)
+    pp = tmp_path / "progress.log"
+
+    def runner(sql: str) -> list[dict]:
+        time.sleep(0.3)
+        return []
+
+    with pytest.raises(RuntimeError):
+        I.introspect("shop", "sqlite", runner=runner, artifacts_dir=tmp_path, dry_run=True, progress_path=pp)
+    assert not any(t.name == "introspect-heartbeat" and t.is_alive() for t in threading.enumerate())
+    size = pp.stat().st_size
+    time.sleep(0.3)
+    assert pp.stat().st_size == size
+
+
+def test_no_heartbeat_lands_after_done(tmp_path, shop_db, monkeypatch):
+    monkeypatch.setattr(I, "HEARTBEAT_S", 0.05)
+    slow = I._regroup_columns_with_references
+
+    def regroup(*a, **k):   # work that runs after the `done:` line
+        time.sleep(0.6)
+        return slow(*a, **k)
+
+    monkeypatch.setattr(I, "_regroup_columns_with_references", regroup)
+    pp = tmp_path / "progress.log"
+    I.introspect("shop", "sqlite", runner=_runner(shop_db), artifacts_dir=tmp_path, dry_run=True, progress_path=pp)
+    assert STAMP.sub("", pp.read_text().splitlines()[-1]).startswith("done:")

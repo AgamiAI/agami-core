@@ -1681,18 +1681,29 @@ def _normalize_table_list(raw: Optional[list[str]]) -> Optional[list[str]]:
     return out or None
 
 
-def _signs_in_with_a_browser(profile: str) -> bool:
-    """The profile signs in through a browser window (Snowflake's `externalbrowser`). Reads only the
-    `authenticator` setting, never a secret; False when the credentials file can't be read."""
+# Snowflake authenticators that sign in without a person: a password, a key pair, a token. Any other
+# value (`externalbrowser`, `username_password_mfa`, an Okta `https://…` URL, one added later) may
+# open a window or ask for a code on every connection, and each statement is its own connection.
+_NON_PROMPTING_AUTHENTICATORS = frozenset({
+    "snowflake", "oauth", "snowflake_jwt", "programmatic_access_token", "oauth_client_credentials",
+})
+
+
+def _may_prompt_to_sign_in(profile: str) -> bool:
+    """Whether a connection for `profile` may ask a person to sign in, so the build opens one at a
+    time. Reads only the `authenticator` setting, never a secret. No setting is a password or key sign-in
+    (Postgres, Redshift, MySQL and the like, or Snowflake's default); a credentials file that can't
+    be read is treated as one that may prompt."""
     import configparser
 
     from agami_paths import credentials_path
     cp = configparser.ConfigParser(interpolation=None)
     try:
         cp.read(credentials_path(), encoding="utf-8")
-        return cp.get(profile, "authenticator", fallback="").strip().lower() == "externalbrowser"
+        auth = cp.get(profile, "authenticator", fallback="").strip().lower()
     except (configparser.Error, OSError):
-        return False
+        return True
+    return bool(auth) and auth not in _NON_PROMPTING_AUTHENTICATORS
 
 
 def cmd_introspect(args) -> int:
@@ -1709,9 +1720,9 @@ def cmd_introspect(args) -> int:
         tables = (tables or []) + _normalize_table_list(from_file)
 
     runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
-    # Each statement is its own connection: several at once would open as many sign-in windows.
+    # Each statement is its own connection: several at once would open as many sign-in prompts.
     from . import profile as PF
-    PF.WORKERS = 1 if _signs_in_with_a_browser(args.profile) else PF.WORKERS
+    PF.WORKERS = 1 if _may_prompt_to_sign_in(args.profile) else PF.WORKERS
     progress = args.progress or str(
         Path(args.artifacts).expanduser() / args.profile / ".introspect" / "progress.log")
     org, report = INTRO.introspect(

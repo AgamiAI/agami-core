@@ -544,17 +544,19 @@ after it. Quote the counts the progress log printed; never estimate, round up or
 `reintrospect`, say it reads every table again.
 
 **Open the progress page when the build will take more than a few minutes** — 15 or more tables on a
-database reached over the network, or any batched build (1.7 option 1). Start it in the background
+database reached over the network, or any batched build (1.7 option 1). Builds read up to 4 tables at
+once, but only one at a time when the profile's sign-in may prompt (any Snowflake `authenticator`
+other than a password, key pair or token). Start it in the background
 (`run_in_background`) before the first introspect call, wait for its one line (the Monitor tool, never
-a foreground sleep), then open the URL and post it:
+a foreground sleep); its `url` is `<progress_url>`:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" progress_page.py "<artifacts_dir>/<profile>/.introspect/progress.log" --minutes 240
 # → {"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 14400}
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/open_in_browser" "<url>"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/open_in_browser" "<progress_url>"
 ```
 
-*"[Build progress](<url>) shows each stage, its count and how long it has run."* The page reads the
+*"[Build progress](<progress_url>) shows each stage, its count and how long it has run."* The page reads the
 log every few seconds: batch n of N, tables read of total, the stages still to come by name, the
 current stage's count, the time elapsed, and *"Waiting on the database for 12 min: checking joins of
 orders"* when the log has gone quiet. It never estimates the time left. **Keep posting one line in
