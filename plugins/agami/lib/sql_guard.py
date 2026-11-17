@@ -551,6 +551,59 @@ _DENY_KEYWORD_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A column NAMED like a denied keyword (#492: ServiceNow's `incident.notify`; `lock`, `set`, `into`
+# elsewhere) is an identifier, and refusing it told the caller a read was a write. A deny match is
+# let through only where no engine could read it as the keyword, and everywhere else it refuses:
+#   - inside a quoted identifier: a double-quoted span from `_neutralize`, or backticks (which the
+#     neutralizer does not consume, so they are still in the text). Quoting makes a word a name.
+#   - straight after `name.` with no space: a qualified column. The qualifier must START with a
+#     letter or `_`, so `1.` and `1e5.` (numeric literals, after which `INTO` is the keyword) do not
+#     count.
+#   - alone as a select-list item: after `SELECT` / `DISTINCT` / `,` and before `,` / an unquoted
+#     `FROM`. **Never `INTO`:** Postgres and Redshift accept an empty select list, so
+#     `SELECT INTO "from" FROM t` creates a table named `from`. A column named `into` is written
+#     `t.into` or quoted instead. No other denied keyword has a statement form in that position.
+# `WHERE notify = 1` and other positions still refuse — the narrow rule is the conservative one.
+_QUALIFIER_BEFORE_RE = re.compile(r"(?<![\w$])[A-Za-z_][\w$]*\.$")
+_SELECT_ITEM_BEFORE_RE = re.compile(r"(?:\bSELECT|\bDISTINCT|,)\s*$", re.IGNORECASE)
+_SELECT_ITEM_AFTER_RE = re.compile(r"\s*(?:,|FROM\b)", re.IGNORECASE)
+
+
+def _keyword_is_identifier(text: str, quoted: tuple[tuple[int, int], ...], start: int, end: int) -> bool:
+    """Whether the deny match at `text[start:end]` stands where only an identifier can."""
+    if any(q_start <= start and end <= q_end for q_start, q_end in quoted):
+        return True
+    before = text[:start]
+    # Inside ONE backtick span: the keyword is its whole content, opened by an odd backtick. In
+    # `` `a`INTO`b` `` the backticks either side close one name and open the next.
+    if (text[start - 1 : start] == "`" and text[end : end + 1] == "`"
+            and before.count("`") % 2 == 1):
+        return True
+    if _QUALIFIER_BEFORE_RE.search(before):
+        return True
+    if text[start:end].upper() == "INTO" or not _SELECT_ITEM_BEFORE_RE.search(before):
+        return False
+    after = _SELECT_ITEM_AFTER_RE.match(text, end)
+    # The FROM must be the clause, not a quoted name `"from"` that `_neutralize` unwrapped.
+    return bool(after and not any(q_start < after.end() <= q_end for q_start, q_end in quoted))
+
+
+def _denied_keyword(sql: str, stripped: str) -> re.Match[str] | None:
+    """The first deny-list keyword in `stripped` that is not an identifier, else None.
+
+    Re-runs `_neutralize` for the quoted spans rather than threading them through the caller, so
+    the change stays inside the keyword deny. `stripped` is the neutralized text with at most one
+    trailing `;` removed, so the spans (measured from its start) still line up.
+    """
+    quoted: tuple[tuple[int, int], ...] | None = None  # scanned only when a keyword is present
+    for match in _DENY_KEYWORD_RE.finditer(stripped):
+        if quoted is None:
+            quoted = _neutralize(sql).quoted
+        if not _keyword_is_identifier(stripped, quoted, match.start(), match.end()):
+            return match
+    return None
+
+
 # Row-level lock clauses inside an otherwise-valid SELECT. `FOR UPDATE`,
 # `FOR SHARE`, `FOR NO KEY UPDATE`, `FOR KEY SHARE` — none belong in analytics.
 _ROW_LOCK_RE = re.compile(r"\bFOR\s+(UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)\b", re.IGNORECASE)
@@ -785,7 +838,7 @@ def check_read_only(sql: str | None) -> Refusal | None:
             remediation=_REMEDIATION["not_a_select"],
         )
 
-    deny = _DENY_KEYWORD_RE.search(stripped)
+    deny = _denied_keyword(sql, stripped)
     if deny:
         return refuse(
             RULE_READ_ONLY,

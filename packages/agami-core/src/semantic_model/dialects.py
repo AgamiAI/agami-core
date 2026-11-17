@@ -396,6 +396,11 @@ class Dialect:
             f"{rows} AS estimated_rows FROM {source} WHERE {schema_col} IN ({inlist})"
         )
 
+    def sql_row_estimates_bulk_fallback(self, schemas: list[str]) -> Optional[str]:
+        """A second estimate read, for the tables the first one returned no figure for. None where
+        the first read is the only one."""
+        return None
+
     # --- declared value lists (#517) ---
 
     def sql_enum_values(self, schema: str, table: str) -> Optional[str]:
@@ -667,6 +672,12 @@ class Redshift(PostgreSQL):
     def sql_row_estimates_bulk(self, schemas: list[str]) -> Optional[str]:
         return self._row_estimates_from(
             "svv_table_info", "tbl_rows", '"schema"', '"table"', schemas)
+
+    # `svv_table_info` shows a role that is not a superuser only the tables it owns, so a read-only
+    # role got no rows and the table picker showed no sizes at all (#678). `pg_class.reltuples` is
+    # readable by any role and ANALYZE keeps it, so it fills in what svv_table_info hid.
+    def sql_row_estimates_bulk_fallback(self, schemas: list[str]) -> Optional[str]:
+        return PostgreSQL.sql_row_estimates_bulk(self, schemas)
 
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         return (

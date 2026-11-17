@@ -1289,8 +1289,16 @@ def discover_inventory(
 def _add_row_estimates(dialect: D.Dialect, runner: Runner, schemas: list[str],
                        tables: list[dict]) -> None:
     """Set `rows` on each table the catalog keeps a positive estimate for. A refused read, or a 0
-    / -1 (an unanalysed table or a view on Postgres), leaves the size unknown rather than empty."""
-    q = dialect.sql_row_estimates_bulk(schemas)
+    / -1 (an unanalysed table or a view on Postgres), leaves the size unknown rather than empty.
+    Where the dialect has a second estimate read, it runs once, only when the first left some table
+    unsized, and only fills those."""
+    _apply_row_estimates(runner, dialect.sql_row_estimates_bulk(schemas), tables)
+    if any("rows" not in t for t in tables):
+        _apply_row_estimates(runner, dialect.sql_row_estimates_bulk_fallback(schemas),
+                             [t for t in tables if "rows" not in t])
+
+
+def _apply_row_estimates(runner: Runner, q: Optional[str], tables: list[dict]) -> None:
     rows = _try(runner, q) if q else None
     by_tt = {(r.get("table_schema"), r.get("table_name")): r.get("estimated_rows") for r in rows or []}
     for t in tables:

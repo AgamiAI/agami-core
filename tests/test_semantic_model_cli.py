@@ -1477,3 +1477,33 @@ def test_add_refuses_a_cross_cutting_item_that_breaks_the_model(tmp_path):
     assert not res.validated and res.errors and not res.applied
     assert not (tmp_path / "cross_subject_area_metrics.yaml").exists()
     assert (tmp_path / "datasource.yaml").read_text() == before
+
+
+def test_describe_file_and_curate_report_the_same_count_keys(tmp_path):
+    """#678: `describe-file` said `described`, `curate` said `applied`, so a reader checking one
+    key on the other's output read a successful write as a no-op. Both now carry `applied` (the
+    list) and `applied_count`; `described` stays for existing readers."""
+    _model(tmp_path)
+    tsv = tmp_path / "desc.tsv"
+    tsv.write_text("orders.total\tTotal order value\n")
+    rc, out = _run(["describe-file", str(tmp_path), "--file", str(tsv)])
+    d = json.loads(out)
+    assert rc == 0 and d["described"] == 1 and d["applied_count"] == 1, d
+    assert len(d["applied"]) == 1 and d["validated"] is True, d
+
+    ops = tmp_path / "ops.json"
+    ops.write_text(json.dumps([{"op": "edit", "kind": "table", "area": "s", "name": "orders",
+                                "column": "total", "field": "description",
+                                "value": "Order total"}]))
+    rc, out = _run(["curate", str(tmp_path), "--ops-file", str(ops)])
+    c = json.loads(out)
+    assert rc == 0 and c["applied_count"] == len(c["applied"]) == 1, c
+
+
+def test_describe_file_with_no_match_reports_zero_under_both_keys(tmp_path):
+    _model(tmp_path)
+    tsv = tmp_path / "desc.tsv"
+    tsv.write_text("nosuch.col\tNothing\n")
+    rc, out = _run(["describe-file", str(tmp_path), "--file", str(tsv)])
+    d = json.loads(out)
+    assert rc == 0 and d["described"] == 0 and d["applied_count"] == 0 and d["applied"] == [], d

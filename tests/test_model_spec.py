@@ -1183,8 +1183,11 @@ def test_joins_whose_conditions_differ_only_in_a_literal_case_are_not_repeats(tm
     spec = _spec()
     on = "sales_f.customer_key = customer_d.customer_key AND customer_d.segment = '{}'"
     base = {"from_table": "sales_f", "to_table": "customer_d"}
-    spec["joins"] += [{**base, "on": on.format("A")}, {**base, "on": on.format("a")},
-                      {**base, "on": on.format("A").upper()}]
+    spec["joins"] += [
+        {**base, "on": on.format("A")},
+        {**base, "on": on.format("a")},
+        {**base, "on": on.format("A").upper()},
+    ]
     errors = model_spec.apply_spec(tmp_path, spec, dry_run=True).errors
     n = len(spec["joins"])
     assert not any(f"join {n - 1} repeats" in e for e in errors), errors
@@ -1196,7 +1199,9 @@ def test_joins_whose_dollar_quoted_literals_differ_only_in_case_are_not_repeats(
     _introspected(tmp_path)
     spec = _spec()
     on = "sales_f.customer_key = customer_d.customer_key AND customer_d.segment = $${}$$"
-    spec["joins"] += [{"from_table": "sales_f", "to_table": "customer_d", "on": on.format(v)} for v in "Aa"]
+    spec["joins"] += [
+        {"from_table": "sales_f", "to_table": "customer_d", "on": on.format(v)} for v in "Aa"
+    ]
     errors = model_spec.apply_spec(tmp_path, spec, dry_run=True).errors
     assert not any(f"join {len(spec['joins'])} repeats" in e for e in errors), errors
 
@@ -1210,3 +1215,39 @@ def test_a_join_missing_a_table_is_skipped_not_a_crash(tmp_path):
         tmp_path, intra={"orders": [{"from_column": "customer_key", "to_table": "customer_d"}]}
     )
     assert not res.applied and res.skipped and "?" in str(res.skipped[0])
+
+
+def _date_join_cardinality(tmp_path, *, from_grain: bool, stated=None) -> str:
+    """The cardinality the spec's sales_f.sale_date_key → date_d.date_key join lands with, when
+    date_d's grain is date_key and (with `from_grain`) sales_f's is sale_date_key: the shape of a
+    record → its parent-class record (`sys_id → sys_id`), each end its own table's key."""
+    _introspected(tmp_path)
+    spec = _spec()
+    spec["tables"][0]["grain"] = "sale_date_key" if from_grain else None
+    spec["tables"][2]["grain"] = "date_key"
+    (j,) = [j for j in spec["joins"] if j.get("to_table") == "date_d"]
+    if stated:
+        j["cardinality"] = stated
+    res = model_spec.apply_spec(tmp_path, spec, signer="you@example.com")
+    assert res.applied and not res.errors, res.errors
+    rels = [
+        r
+        for sa in loader.load_datasource(tmp_path, include_rejected=True).subject_areas
+        for r in sa.relationships
+        if r.to_table == "date_d"
+    ]
+    return rels[0].relationship
+
+
+def test_a_join_between_two_tables_own_keys_is_one_to_one(tmp_path):
+    """#678: a join with no stated cardinality defaulted to many_to_one even when both ends are
+    each table's own key; the keys now decide it, as they do for every engine-built join."""
+    assert _date_join_cardinality(tmp_path, from_grain=True) == "one_to_one"
+
+
+def test_a_join_to_a_key_from_a_non_key_stays_many_to_one(tmp_path):
+    assert _date_join_cardinality(tmp_path, from_grain=False) == "many_to_one"
+
+
+def test_a_stated_cardinality_is_kept(tmp_path):
+    assert _date_join_cardinality(tmp_path, from_grain=True, stated="many_to_one") == "many_to_one"

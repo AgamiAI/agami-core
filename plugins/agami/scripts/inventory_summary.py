@@ -459,13 +459,17 @@ def numbered(inventory: dict, limit: int = MAX_LISTED) -> dict:
     for r in rows:
         counts[r["schema"]] = counts.get(r["schema"], 0) + 1
     listed = rows[:limit]
+    # Once any table has an estimate, one without (a view has none) says so; with none at all, the
+    # sizes were not read, and "size unknown" on every line would only be noise (#678).
+    sized = any(r["rows"] is not None for r in rows)
     width = len(str(len(listed)))
     lines, schema = [], None
     for r in listed:
         if r["schema"] != schema:
             schema = r["schema"]
             lines.append(f"{schema or '(no schema)'}: {_plural(counts[schema], 'table')}")
-        size = f", about {_plural(r['rows'], 'row')}" if r["rows"] is not None else ""
+        size = (f", about {_plural(r['rows'], 'row')}" if r["rows"] is not None
+                else ", size unknown" if sized else "")
         flag = ""
         if r["why"]:
             flag = f"  [likely copy of {r['copy_of']}]" if r["copy_of"] else f"  [{r['why']}]"

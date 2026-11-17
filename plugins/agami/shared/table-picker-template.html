@@ -173,7 +173,7 @@
       td.appendChild(label);
       tr.appendChild(td);
       var r = el('td', 'num' + (t.rows === null ? ' unknown' : ''),
-                 t.rows === null ? '—' : Number(t.rows).toLocaleString('en-US'));
+                 t.rows === null ? 'unknown' : Number(t.rows).toLocaleString('en-US'));
       if (t.rows === null) r.title = 'Not known: the database keeps no estimate for this table';
       tr.appendChild(r);
       tr.appendChild(el('td', 'num', String(t.columns)));

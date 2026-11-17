@@ -1301,14 +1301,18 @@ def cmd_describe_file(args) -> int:
               "case_corrected": m["case_corrected"],
               "schema_prefix_stripped": m["schema_prefix_stripped"]}
     if not m["ops"]:
-        _print_json({"described": 0, "reason": "no row matched a column of the model", **report,
+        _print_json({"described": 0, "applied": [], "applied_count": 0,
+                     "reason": "no row matched a column of the model", **report,
                      "skipped": [], "errors": []})
         return 0
     res = curate.apply(root, m["ops"])
     # `skipped` carries why an edit didn't land — e.g. a person's or a dictionary's description kept
     # over a generated one — so the skill can say so instead of counting it as described.
-    _print_json({"described": len(res.applied), **report, "skipped": res.skipped,
-                 **_provenance_note(res), "errors": res.errors})
+    # `applied` / `applied_count` / `validated` are `sm curate`'s own keys (#678): a reader that
+    # checked `applied` here found nothing and took a successful write for a no-op.
+    _print_json({"described": len(res.applied), "applied": res.applied,
+                 "applied_count": len(res.applied), "validated": res.validated, **report,
+                 "skipped": res.skipped, **_provenance_note(res), "errors": res.errors})
     return 0 if res.validated else 1
 
 
@@ -1845,6 +1849,10 @@ def cmd_enrich_metadata(args) -> int:
                                     "field": "description", "value": d, "source": "metadata"})
                         inherited += 1
 
+    # sys_choice keys a list by the platform's value; the column's own data values key it instead (#678)
+    ops = MS.key_choices_on_held_values(ops, {
+        (t.name.lower(), c.name.lower()): [str(v) for v in c.choice_field]
+        for sa in org.subject_areas for t in sa.tables_defined for c in t.columns if c.choice_field})
     # 1) descriptions + choice_field — one validated curate batch
     cols_applied = 0
     errors: list[str] = []
