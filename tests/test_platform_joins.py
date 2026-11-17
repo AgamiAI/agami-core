@@ -54,6 +54,7 @@ DICTIONARY = [  # (class, field, type, reference)
     ("task", "requested_by", "reference", "sys_user"), ("task", "opened_by", "reference", "sys_user"),
     ("incident", "severity", "integer", ""), ("incident", "state", "string", ""),
     ("incident", "business_service", "reference", "cmdb_ci_service"),
+    ("incident", "caller_id", "reference", "sys_user"),
     ("sys_user", "user_name", "string", ""), ("sys_user", "title", "string", ""),
     ("sys_user", "manager", "reference", "sys_user"), ("sys_user", "active", "boolean", ""),
     ("sys_user_group", "name", "string", ""), ("sys_user_group", "description", "string", ""),
@@ -74,9 +75,11 @@ CHOICES = [("incident", "state", "new", "New"), ("incident", "state", "closed", 
            ("incident", "severity", "1", "High"), ("incident", "severity", "2", "Low")]
 
 
-def _warehouse(db: Path, spelling: str = "plain") -> None:
+def _warehouse(db: Path, spelling: str = "plain", keyless: bool = False) -> None:
     """`spelling="value"` writes the metadata the way some exports write every reference field: a
-    `<field>_value` / `<field>_link` pair, with a reference's target held as the class's record id."""
+    `<field>_value` / `<field>_link` pair, with a reference's target held as the class's record id.
+    `keyless` writes the incident view the way a flattening export does, each record repeated (so it
+    has no key), with a bare `assigned_to` beside its `_sys_id` twin, and no class table at all."""
     con = sqlite3.connect(db)
     ex = con.execute
     ex("CREATE TABLE person_v(sys_id TEXT PRIMARY KEY, user_name TEXT, title TEXT, manager_sys_id TEXT, "
@@ -100,13 +103,23 @@ def _warehouse(db: Path, spelling: str = "plain") -> None:
         ex("INSERT INTO acme_task_v VALUES (?,?,?,?,?,?,?,?,?)",
            (t, f"TASK{i}", "Do it", U[i % 20], G[i % 5], T[i - 1] if i and i % 3 == 0 else None, C[i % 12],
             U[(i + 3) % 20], U[i % 20] if i < 18 else JUNK[i]))          # requested_by: 60% match
-    ex("CREATE TABLE acme_incident_v(sys_id TEXT PRIMARY KEY, number TEXT, assigned_to_sys_id TEXT, "
-       "assignment_group_sys_id TEXT, opened_by_sys_id TEXT, business_service_sys_id TEXT, "
-       "affected_item_sys_id TEXT, severity TEXT, state TEXT)")
-    for i, t in enumerate(T[20:]):
-        ex("INSERT INTO acme_incident_v VALUES (?,?,?,?,?,?,?,?,?)",
-           (t, f"INC{i}", U[i], G[i % 5], U[i] if i < 8 else JUNK[i],    # opened_by: 80% match
-            C[8 + i % 4], C[8 + i % 4], "1" if i % 2 else "2", "NEW" if i % 2 else "Closed"))
+    if keyless:
+        ex("CREATE TABLE acme_incident_v(sys_id TEXT, number TEXT, assigned_to TEXT, assigned_to_sys_id TEXT, "
+           "assignment_group_sys_id TEXT, caller_id_sys_id TEXT, owned_by_sys_id TEXT, "
+           "business_service_sys_id TEXT, severity TEXT, state TEXT)")
+        for i, t in enumerate(T[20:]):
+            for _ in range(3):   # one row per (record, something it was flattened against)
+                ex("INSERT INTO acme_incident_v VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   (t, f"INC{i}", U[i], U[i], G[i % 5], U[(i + 7) % 20], U[(i + 2) % 20], C[8 + i % 4],
+                    "1" if i % 2 else "2", "NEW" if i % 2 else "Closed"))
+    else:
+        ex("CREATE TABLE acme_incident_v(sys_id TEXT PRIMARY KEY, number TEXT, assigned_to_sys_id TEXT, "
+           "assignment_group_sys_id TEXT, opened_by_sys_id TEXT, business_service_sys_id TEXT, "
+           "affected_item_sys_id TEXT, severity TEXT, state TEXT)")
+        for i, t in enumerate(T[20:]):
+            ex("INSERT INTO acme_incident_v VALUES (?,?,?,?,?,?,?,?,?)",
+               (t, f"INC{i}", U[i], G[i % 5], U[i] if i < 8 else JUNK[i],    # opened_by: 80% match
+                C[8 + i % 4], C[8 + i % 4], "1" if i % 2 else "2", "NEW" if i % 2 else "Closed"))
     # a decoy: its own ids coincide with people's, but it is not a class of person
     ex("CREATE TABLE audit_v(sys_id TEXT PRIMARY KEY, note TEXT)")
     for u in U:
@@ -137,8 +150,9 @@ def _warehouse(db: Path, spelling: str = "plain") -> None:
         for cls, field, typ, ref in DICTIONARY:
             ex("INSERT INTO sys_dictionary_raw VALUES (?,?,?,?,?,?)",
                (cls, field, field.replace("_", " ").title(), f"The {field.replace('_', ' ')}.", typ, ref))
-        ex("CREATE TABLE sys_db_object_raw(name TEXT, sys_id TEXT, super_class TEXT)")
-        con.executemany("INSERT INTO sys_db_object_raw VALUES (?,?,?)", CLASSES)
+        if not keyless:
+            ex("CREATE TABLE sys_db_object_raw(name TEXT, sys_id TEXT, super_class TEXT)")
+            con.executemany("INSERT INTO sys_db_object_raw VALUES (?,?,?)", CLASSES)
     ex("CREATE TABLE sys_choice_raw(name TEXT, element TEXT, value TEXT, label TEXT)")
     con.executemany("INSERT INTO sys_choice_raw VALUES (?,?,?,?)", CHOICES)
     con.commit()
@@ -153,9 +167,9 @@ def _sm(art: Path, *args: str) -> subprocess.CompletedProcess:
     )
 
 
-def _platform(tmp: Path, spelling: str = "plain") -> dict:
+def _platform(tmp: Path, spelling: str = "plain", keyless: bool = False) -> dict:
     db = tmp / "wh.db"
-    _warehouse(db, spelling)
+    _warehouse(db, spelling, keyless)
     art = tmp / "art"
     (art / "local").mkdir(parents=True)
     creds = art / "local" / "credentials"
@@ -164,11 +178,7 @@ def _platform(tmp: Path, spelling: str = "plain") -> dict:
     return {"db": db, "art": art, "root": art / "wh"}
 
 
-@pytest.fixture(scope="module", params=["plain", "value"])
-def built(request, tmp_path_factory) -> dict:
-    """Introspect the views alone, then enrich from the platform's metadata: once per spelling of the
-    metadata, and every claim below holds for both."""
-    wh = _platform(tmp_path_factory.mktemp("platform"), request.param)
+def _build(wh: dict) -> dict:
     intro = _sm(wh["art"], "introspect", "--profile", "wh", "--db-type", "sqlite",
                 "--artifacts", str(wh["art"]), "--tables", *VIEWS)
     assert intro.returncode == 0, intro.stdout + intro.stderr
@@ -181,6 +191,19 @@ def built(request, tmp_path_factory) -> dict:
                      for sa in org.subject_areas for r in sa.relationships},
             "review": {c["id"]: c for c in doc["candidates"] if "review_reason" in c},
             "candidates": {c["id"] for c in doc["candidates"]}}
+
+
+@pytest.fixture(scope="module", params=["plain", "value"])
+def built(request, tmp_path_factory) -> dict:
+    """Introspect the views alone, then enrich from the platform's metadata: once per spelling of the
+    metadata, and every claim below holds for both."""
+    return _build(_platform(tmp_path_factory.mktemp("platform"), request.param))
+
+
+@pytest.fixture(scope="module")
+def keyless(tmp_path_factory) -> dict:
+    """The same platform with a repeating incident view and no class table."""
+    return _build(_platform(tmp_path_factory.mktemp("keyless"), keyless=True))
 
 
 PLANTED = {
@@ -275,6 +298,72 @@ def test_renamed_columns_get_the_dictionary_description_and_labels_ignoring_case
     assert cols["severity"].choice_field == {"1": "High", "2": "Low"}
 
 
+# --- a repeating view, and no class table -------------------------------------------------------
+
+KEYLESS_APPROVED = {
+    ("acme_task_v", "assigned_to_sys_id", "person_v"), ("acme_task_v", "assignment_group_sys_id", "team_v"),
+    ("acme_task_v", "cmdb_ci_sys_id", "config_item_v"), ("acme_task_v", "parent_sys_id", "acme_task_v"),
+    # declared on task: the incident inherits them through the preset's standard hierarchy
+    ("acme_incident_v", "assigned_to_sys_id", "person_v"), ("acme_incident_v", "assignment_group_sys_id", "team_v"),
+    ("acme_incident_v", "caller_id_sys_id", "person_v"),
+    ("acme_incident_v", "business_service_sys_id", "acme_cmdb_ci_service_v"),
+    ("person_v", "manager_sys_id", "person_v"), ("team_v", "manager_sys_id", "person_v"),
+    ("team_v", "parent_sys_id", "team_v"), ("config_item_v", "owned_by_sys_id", "person_v"),
+}
+KEYLESS_INFERRED = {
+    ("acme_incident_v", "sys_id", "acme_task_v"), ("acme_cmdb_ci_service_v", "sys_id", "config_item_v"),
+    ("person_v", "team_sys_id", "team_v"),
+    # a field the dictionary declares only on another class: by name, a third link to the same table
+    ("acme_incident_v", "owned_by_sys_id", "person_v"),
+}
+
+
+def test_a_repeating_view_still_has_its_references_found_without_a_class_table(keyless):
+    tables = {t.name: t for sa in keyless["org"].subject_areas for t in sa.tables_defined}
+    assert tables["acme_incident_v"].grain == []                        # the precondition: its rows repeat
+    assert keyless["out"]["class_hierarchy"] == "preset (no class table found)"
+    assert keyless["out"]["tables_mapped_to_platform"]["acme_incident_v"] == "incident"
+    assert set(keyless["rels"]) == KEYLESS_APPROVED | KEYLESS_INFERRED
+    for k, r in keyless["rels"].items():
+        approved = (r.confidence, r.review_state) == ("confirmed", "approved")
+        assert approved == (k in KEYLESS_APPROVED), k
+        if k[0] == "acme_incident_v":
+            assert r.relationship == "many_to_one", k
+
+
+def test_a_repeating_view_is_never_a_join_target(keyless):
+    # a join into it would multiply every row that reaches it: it is a source only
+    assert not [k for k in keyless["rels"] if k[2] == "acme_incident_v"]
+    assert not [i for i in keyless["candidates"] if "->acme_incident_v." in i]
+
+
+def test_a_bare_column_beside_its_sys_id_twin_is_not_checked(keyless):
+    # it holds the same ids here; checking it would spend a check and write a duplicate join
+    assert not [k for k in keyless["rels"] if k[1] == "assigned_to"]
+    # (introspection's own scan may still list it; this pass neither checks nor offers it)
+    assert not [i for i in keyless["review"] if i.startswith("acme_incident_v.assigned_to->")]
+
+
+def test_a_dictionary_field_name_match_is_not_sent_to_review_for_sharing_two_tables(keyless):
+    assert set(keyless["review"]) == {"acme_task_v.approver_sys_id->person_v.sys_id",
+                                      "acme_task_v.approver_sys_id->audit_v.sys_id"}
+
+
+def test_the_check_budget_goes_to_name_matched_pairs_first_round_robin_across_tables():
+    from types import SimpleNamespace as NS
+
+    from semantic_model import platform_joins as PJ
+
+    a, b, u = NS(name="a_v", schema_name=None), NS(name="b_v", schema_name=None), NS(name="u_v", schema_name=None)
+
+    def pair(t, col, strong, declared=False):
+        return PJ._Pair(t, NS(name=col), u, "x", declared, strong=strong)
+
+    pairs = [pair(a, "a1", True, True), pair(a, "a2", True), pair(a, "a3", True), pair(a, "w1", False),
+             pair(b, "w2", False), pair(b, "b1", True, True)]
+    assert [p.c.name for p in PJ._check_order(pairs)] == ["a1", "b1", "a2", "a3", "w1", "w2"]
+
+
 # --- the pure pieces -----------------------------------------------------------------------------
 
 
@@ -339,6 +428,15 @@ def test_a_reference_held_as_a_record_id_reads_as_that_record_s_name():
     assert M.resolve_record_ids(rows, "reference", {}) is rows
     assert M.record_names([{"name": "reference", "sys_id": "t1"}], M.PRESETS["servicenow"]["field_type"]) == {
         "t1": "reference"}
+
+
+def test_the_preset_hierarchy_stands_in_for_a_missing_class_table():
+    parents = M.preset_class_parents("servicenow", ["incident", "cmdb_ci_ups", "cmdb_ci", "x_custom"])
+    assert M.ancestors("incident", parents) == ["task"]
+    assert M.ancestors("cmdb_ci_ups", parents) == ["cmdb_ci"]                   # by the family prefix
+    assert M.ancestors("cmdb_ci_win_server", parents)[-1] == "cmdb_ci"
+    assert "cmdb_ci" not in parents and "x_custom" not in parents
+    assert M.preset_class_parents("nope", ["incident"]) == {}
 
 
 def test_class_parents_resolve_ids_and_stop_on_a_loop():

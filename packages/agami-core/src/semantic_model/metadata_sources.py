@@ -62,6 +62,19 @@ PRESETS: dict[str, dict] = {
             "source": "sys_db_object",
             "table_col": "name", "id_col": "sys_id", "parent_col": "super_class",
         },
+        # The platform's standard, published class hierarchy (child -> parent), read ONLY when no
+        # class table is found: an export without one would otherwise leave an incident blind to
+        # the references task declares. A class table, when present, is the whole truth instead.
+        # `class_parent_prefixes` covers a family the list does not name (`cmdb_ci_*` -> `cmdb_ci`).
+        "class_parents": {
+            "incident": "task", "problem": "task", "change_request": "task", "change_task": "task",
+            "sc_request": "task", "sc_req_item": "task", "sc_task": "task", "incident_task": "task",
+            "problem_task": "task",
+            "cmdb_ci_hardware": "cmdb_ci", "cmdb_ci_computer": "cmdb_ci_hardware",
+            "cmdb_ci_server": "cmdb_ci_computer", "cmdb_ci_win_server": "cmdb_ci_server",
+            "cmdb_ci_linux_server": "cmdb_ci_server", "cmdb_ci_service": "cmdb_ci", "cmdb_ci_appl": "cmdb_ci",
+        },
+        "class_parent_prefixes": {"cmdb_ci_": "cmdb_ci"},
         # Every record's id column, and how an export names a link column holding one (ACE-181).
         "key": "sys_id",
         "link_suffix": "_sys_id",
@@ -345,6 +358,20 @@ def class_parents(rows: Iterable[dict], *, table_col: str, id_col: str, parent_c
         parent = by_id.get(_norm(r.get(parent_col)))
         if parent and _norm(r.get(table_col)):
             out[_norm(r.get(table_col)).lower()] = parent
+    return out
+
+
+def preset_class_parents(preset: Optional[str], classes: Iterable[str]) -> dict[str, str]:
+    """`class -> parent class` from the preset's standard hierarchy, for when the warehouse has no
+    class table: the named classes, and each of `classes` a family prefix covers."""
+    spec = PRESETS.get(preset or "", {})
+    out = {c.lower(): p.lower() for c, p in spec.get("class_parents", {}).items()}
+    for c in (c.lower() for c in classes):
+        if c not in out:
+            parent = next((p for pre, p in spec.get("class_parent_prefixes", {}).items()
+                           if c.startswith(pre.lower()) and c != p.lower()), None)
+            if parent:
+                out[c] = parent.lower()
     return out
 
 
