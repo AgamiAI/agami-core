@@ -1829,12 +1829,22 @@ def cmd_enrich_metadata(args) -> int:
     parents: dict[str, str] = {}
     choice_rows: list[dict] = []
     choice_cfg: dict = {}
-    for role, (cfg, (sch, src)) in sources.items():
+    fetched_rows: dict[str, list[dict]] = {}
+    for role, (cfg, (sch, src), cols) in sources.items():
         fq = dialect.qualified(sch, src) if sch else dialect.quote_ident(src)
-        col_names = [v for k, v in cfg.items() if k.endswith("_col")]
-        sel = ", ".join(dialect.quote_ident(c) for c in col_names)
-        rows = runner(f"SELECT {sel} FROM {fq}") or []
-        fetched[role] = len(rows)
+        # Each column is read under the role's own name, whatever the export spells it, so
+        # everything after this reads the same keys (`"reference_value" AS "reference"`).
+        sel = ", ".join(dialect.quote_ident(a) if a == c else f"{dialect.quote_ident(a)} AS {dialect.quote_ident(c)}"
+                        for c, a in cols.items())
+        fetched_rows[role] = runner(f"SELECT {sel} FROM {fq}") or []
+        fetched[role] = len(fetched_rows[role])
+    for role, (cfg, _at, _cols) in sources.items():
+        rows = fetched_rows[role]
+        # A column holding the referenced record's id, not its name, reads through that record.
+        for col_key, by_role in cfg.get("resolve_ids", {}).items():
+            if by_role in sources and col_key in cfg:
+                rows = MS.resolve_record_ids(rows, cfg[col_key],
+                                             MS.record_names(fetched_rows[by_role], sources[by_role][0]))
         if role == "choice":
             choice_rows, choice_cfg = rows, cfg
             ops += MS.choice_field_ops(rows, table_col=cfg["table_col"], column_col=cfg["column_col"],
@@ -1951,8 +1961,10 @@ def _applied_column(applied: str) -> tuple[str, str]:
 
 
 def _metadata_sources(org, runner, dialect, preset: Optional[str]) -> tuple[Optional[str], dict]:
-    """The preset and `{role: (config, (schema, table))}` for each of its sources found: a modelled
-    table first, else the catalog, in any schema and under a renamed layer's name (ACE-181).
+    """The preset and `{role: (config, (schema, table), columns)}` for each of its sources found: a
+    modelled table first, else the catalog, in any schema and under a renamed layer's name (ACE-181).
+    `columns` maps each column the role reads to the table's spelling of it (`reference` may be
+    `reference_value` in an export that writes a reference as a value + link pair).
 
     The catalog is read only for a platform whose shape the model shows (its record-id column, or
     a column named the way an export names a link), or one named with --preset: a database with no
@@ -1966,18 +1978,23 @@ def _metadata_sources(org, runner, dialect, preset: Optional[str]) -> tuple[Opti
         key, suffix = spec.get("key", "").lower(), spec.get("link_suffix", "").lower()
         return bool(key and key in columns) or bool(suffix and any(c.endswith(suffix) for c in columns))
 
-    def fits(cfg: dict):
-        wanted = {v.lower() for k, v in cfg.items() if k.endswith("_col")}
+    model_cols = {t.name.lower(): [c.name for c in t.columns] for sa in org.subject_areas for t in sa.tables_defined}
+    resolved: dict[tuple, Optional[dict[str, str]]] = {}
 
+    def fits(cfg: dict, suffixes: list[str]):
         def check(schema: Optional[str], table: str) -> bool:
             rows = INTRO._try(runner, dialect.sql_columns(schema, table)) or []
-            return wanted <= {str(r.get("column_name", "")).lower() for r in rows}
+            have = [str(r.get("column_name", "")) for r in rows]
+            resolved[(schema, table)] = MS.resolve_columns(cfg, have, suffixes)
+            return resolved[(schema, table)] is not None
         return check
 
-    def where(cfg: dict, look: bool):
+    def where(cfg: dict, look: bool, suffixes: list[str]):
         nonlocal catalog
         if cfg["source"].lower() in modelled:
-            return modelled[cfg["source"].lower()]
+            at = modelled[cfg["source"].lower()]
+            same = {v: v for k, v in cfg.items() if k.endswith("_col")}
+            return at, MS.resolve_columns(cfg, model_cols[cfg["source"].lower()], suffixes) or same
         if not look:
             return None
         if catalog is None:
@@ -1986,15 +2003,17 @@ def _metadata_sources(org, runner, dialect, preset: Optional[str]) -> tuple[Opti
                 s = r.get("schema_name")
                 catalog += [(t.get("schema_name") or s, t["table_name"])
                             for t in INTRO._try(runner, dialect.sql_tables(s)) or [] if t.get("table_name")]
-        return MS.locate(cfg["source"], catalog, schemas, fits(cfg))
+        at = MS.locate(cfg["source"], catalog, schemas, fits(cfg, suffixes))
+        return (at, resolved[at]) if at else None
 
     for name in [preset] if preset else list(MS.PRESETS):
         spec = MS.PRESETS.get(name, {})
         look = bool(preset) or shaped(spec)
+        suffixes = spec.get("column_suffixes") or [""]
         found = {}
         for role, cfg in spec.items():
-            if isinstance(cfg, dict) and cfg.get("source") and (at := where(cfg, look)):
-                found[role] = (cfg, at)
+            if isinstance(cfg, dict) and cfg.get("source") and (hit := where(cfg, look, suffixes)):
+                found[role] = (cfg, *hit)
         if found or preset:
             return name, found
     return None, {}
