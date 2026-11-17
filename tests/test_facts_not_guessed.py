@@ -109,7 +109,7 @@ def test_a_large_view_repeating_each_key_is_caught_with_its_factor(tmp_path, db,
     (caveat,) = [c for c in view.caveats if "ticket_id" in c]
     assert "5 times" in caveat and "COUNT(DISTINCT ticket_id)" in caveat
     # bounded: a recent window on its date, never a full scan of the large view
-    (probe,) = [s for s in seen if "COUNT(DISTINCT" in s and "tickets_v" in s]
+    (probe,) = [s for s in seen if "AS distinct_count" in s and "tickets_v" in s]
     assert '"opened_at" >=' in probe
     assert any("tickets_v" in n and "5 times" in n for n in rep.notes)
     # the base table holds each ticket once: no caveat, and its key is its grain
@@ -127,7 +127,7 @@ def test_a_large_view_with_no_date_is_checked_on_a_bounded_sample(tmp_path, db, 
         "demo", "sqlite", runner=_runner(db, seen), artifacts_dir=tmp_path, dry_run=True
     )
     assert B.repeated_key(_table(org, "v_ticket")) == ("ticket_id", 5)
-    (probe,) = [s for s in seen if "COUNT(DISTINCT" in s and "v_ticket" in s]
+    (probe,) = [s for s in seen if "AS distinct_count" in s and "v_ticket" in s]
     assert "LIMIT" in probe
 
 
