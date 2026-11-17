@@ -279,6 +279,10 @@ class _Neutralized(NamedTuple):
 
     text: str
     quoted: tuple[tuple[int, int], ...]
+    # The same spans for backtick-quoted names, kept apart so the niladic matcher never reads
+    # them. Only the keyword deny's identifier test does (#492): wherever a backtick quotes at all,
+    # what it quotes is a name, and where it doesn't the engine refuses the statement itself.
+    backticked: tuple[tuple[int, int], ...] = ()
 
 
 def _neutralize(sql: str) -> _Neutralized:
@@ -335,6 +339,7 @@ def _neutralize(sql: str) -> _Neutralized:
 
     out: list[str] = []
     spans: list[tuple[int, int]] = []
+    tick_spans: list[tuple[int, int]] = []
     width = 0  # running len("".join(out)), so a span can be recorded as it is emitted
 
     def emit(chunk: str) -> None:
@@ -480,6 +485,8 @@ def _neutralize(sql: str) -> _Neutralized:
             # identifier on every engine, and an unrecorded span can only over-refuse.
             if closed and sql[i] == '"':
                 spans.append((start, width))
+            elif closed:
+                tick_spans.append((start, width))
             nxt = sql[j] if j < n else ""
             if nxt.isalnum() or nxt == "_":
                 emit(" ")
@@ -517,10 +524,10 @@ def _neutralize(sql: str) -> _Neutralized:
     # than clamping it. Dropping is the safe direction: a missing span means the niladic
     # matcher does not skip that token, so the gate over-refuses. Clamping a span that ran
     # off either end would instead widen the skipped region and could hide a live keyword.
-    kept = tuple(
-        (s - lead, e - lead) for s, e in spans if 0 <= s - lead < e - lead <= limit
-    )
-    return _Neutralized(text, kept)
+    def kept(found: list[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+        return tuple((s - lead, e - lead) for s, e in found if 0 <= s - lead < e - lead <= limit)
+
+    return _Neutralized(text, kept(spans), kept(tick_spans))
 
 
 # Allowed opening keyword. `WITH` covers CTEs whose final clause is a SELECT.
@@ -554,8 +561,9 @@ _DENY_KEYWORD_RE = re.compile(
 # A column NAMED like a denied keyword (#492: ServiceNow's `incident.notify`; `lock`, `set`, `into`
 # elsewhere) is an identifier, and refusing it told the caller a read was a write. A deny match is
 # let through only where no engine could read it as the keyword, and everywhere else it refuses:
-#   - inside a quoted identifier: a double-quoted span from `_neutralize`, or backticks (which the
-#     neutralizer does not consume, so they are still in the text). Quoting makes a word a name.
+#   - inside a quoted identifier: a double-quoted or backtick-quoted span from `_neutralize`, which
+#     drops both delimiters from the text and reports where their content landed. Quoting makes a
+#     word a name.
 #   - straight after `name.` with no space: a qualified column. The qualifier must START with a
 #     letter or `_`, so `1.` and `1e5.` (numeric literals, after which `INTO` is the keyword) do not
 #     count.
@@ -574,11 +582,6 @@ def _keyword_is_identifier(text: str, quoted: tuple[tuple[int, int], ...], start
     if any(q_start <= start and end <= q_end for q_start, q_end in quoted):
         return True
     before = text[:start]
-    # Inside ONE backtick span: the keyword is its whole content, opened by an odd backtick. In
-    # `` `a`INTO`b` `` the backticks either side close one name and open the next.
-    if (text[start - 1 : start] == "`" and text[end : end + 1] == "`"
-            and before.count("`") % 2 == 1):
-        return True
     if _QUALIFIER_BEFORE_RE.search(before):
         return True
     if text[start:end].upper() == "INTO" or not _SELECT_ITEM_BEFORE_RE.search(before):
@@ -598,7 +601,9 @@ def _denied_keyword(sql: str, stripped: str) -> re.Match[str] | None:
     quoted: tuple[tuple[int, int], ...] | None = None  # scanned only when a keyword is present
     for match in _DENY_KEYWORD_RE.finditer(stripped):
         if quoted is None:
-            quoted = _neutralize(sql).quoted
+            neutral = _neutralize(sql)
+            # In `` `a`INTO`b` `` the spans are `a` and `b`, so the INTO between them still refuses.
+            quoted = neutral.quoted + neutral.backticked
         if not _keyword_is_identifier(stripped, quoted, match.start(), match.end()):
             return match
     return None

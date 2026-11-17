@@ -9,6 +9,7 @@ scan, the tables it left untested are named. Synthetic, generic names only.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -77,9 +78,9 @@ class _Counter:
         self.batch: list[tuple] = []
         run_checks, overlap, distinct = I.PF.run_checks, I._overlap_count, I._distinct_rows
 
-        def checks(dialect, runner, cs):
+        def checks(dialect, runner, cs, **kw):
             self.batch += [("check", c.ft.name, tuple(c.fc), c.tt.name, tuple(c.tc)) for c in cs]
-            return run_checks(dialect, runner, cs)
+            return run_checks(dialect, runner, cs, **kw)
 
         def overlap_count(dialect, runner, ft, fc, tt, tc):
             self.batch.append(("overlap", ft.name, (fc,), tt.name, (tc,)))
@@ -204,11 +205,12 @@ def test_the_report_and_the_progress_give_candidates_found_beside_joins_written(
     n = len(last.join_candidates)
     assert n == BATCHES
     assert f"relationships: {last.relationship_count}   join candidates found: {n}" in last.render()
-    done = [
-        ln
+    # each line starts with its UTC stamp (#677); the message after it is unchanged
+    msgs = [
+        re.sub(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ ", "", ln)
         for ln in (tmp_path / f"progress{BATCHES}.log").read_text().splitlines()
-        if ln.startswith("done:")
     ]
+    done = [m for m in msgs if m.startswith("done:")]
     assert done == [
         f"done: {last.table_count} tables, {last.relationship_count} joins written, "
         f"{n} join candidates found"

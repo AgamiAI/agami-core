@@ -344,7 +344,7 @@ def test_enrich_metadata_keys_labels_on_the_values_the_data_holds(tmp_path, monk
     path.write_text(yaml.safe_dump(doc))
     from semantic_model import introspect as INTRO
 
-    monkeypatch.setattr(INTRO, "make_execute_sql_runner", lambda profile, python=None: (
+    monkeypatch.setattr(INTRO, "make_execute_sql_runner", lambda profile, python=None, **kw: (
         lambda sql: _CONTACT if "sys_choice" in sql.lower() else []))
     from semantic_model import cli
 
