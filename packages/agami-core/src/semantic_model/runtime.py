@@ -4417,6 +4417,35 @@ def _join_links(join_sites: list, declared_pairs: list) -> "tuple[dict, dict, fr
     return links, far_by_pair, frozenset(groups)
 
 
+def _link_columns(rel: Relationship, between: list, dialect: "str | None") -> "list[str] | None":
+    """The column(s) a declared relationship goes through, when it is one of several between the
+    same two tables: those of the side on which its columns differ from every other link's (the
+    from side first). None when it is the only link, or when no side tells it apart."""
+    if len(between) < 2:
+        return None
+    first = _tkey(_bare(rel.from_table))
+
+    def oriented(r: Relationship) -> "list | None":
+        # Each pair as (column on rel's from table, column on its to table), whichever way `r`
+        # was declared.
+        pairs = join_column_pairs(r, dialect)
+        if pairs is None or _tkey(_bare(r.from_table)) == first:
+            return pairs
+        return [(b, a) for a, b in pairs]
+
+    pairs = oriented(rel)
+    if not pairs:
+        return None
+    others = [oriented(r) for r in between if r is not rel]
+    if any(o is None for o in others):
+        return None
+    for side in (0, 1):
+        mine = tuple(sorted(p[side].lower() for p in pairs))
+        if all(tuple(sorted(p[side].lower() for p in o)) != mine for o in others):
+            return [_echo_name(p[side]) for p in pairs]
+    return None
+
+
 def _link_label(rel: Relationship) -> str:
     """`via assets.assigned_to_id → users.id`, or the declared `on:` when it is written that way."""
     if rel.from_column is not None and rel.to_column is not None:
@@ -4559,6 +4588,10 @@ def assemble_receipt(
                       if join_sites else [])
     join_items: list[dict[str, Any]] = []
     join_results = [_join_site_status(js, declared_pairs) for js in join_sites]
+    # The relationships declared between each pair of tables, for naming which one a join used.
+    between: dict = {}
+    for rel, _pairs in declared_pairs:
+        between.setdefault(_rel_tables(rel), []).append(rel)
     for js, (status, match) in zip(join_sites, join_results):
         # Everything a DECLARATION contributes, and null on every other status: an item that matched
         # nothing must assert nothing about a relationship it did not match, which is the defect the
@@ -4580,6 +4613,11 @@ def assemble_receipt(
                 "cross_schema": match.cross_schema,
                 "on": match.on,
             }
+        # Which link, when the model declares several between these two tables: the column(s)
+        # the join goes through, and a line saying so. Null when there is one link, or when the
+        # links cannot be told apart by their columns.
+        via = (_link_columns(match, between.get(_rel_tables(match), []), dialect)
+               if match is not None else None)
         left, right = js.endpoints
         join_items.append({
             "predicate": js.predicate,
@@ -4599,6 +4637,10 @@ def assemble_receipt(
             # The keys are the ones the relationship-keyed item already carried, so a consumer
             # reading `review_state` off a join keeps reading it off the same key.
             **signoff,
+            "via": via,
+            "summary": (f"{_echo_name(_bare(match.from_table))} linked to "
+                        f"{_echo_name(_bare(match.to_table))} through {', '.join(via)}"
+                        if via else None),
         })
 
     # ONE ITEM PER OUTPUT COLUMN, not one per metric the statement's TEXT happens to contain.

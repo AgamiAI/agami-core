@@ -345,6 +345,12 @@ below corresponds to one such version.
   when it is not (another table, a missing condition, `COUNT(*)` for `COUNT(DISTINCT …)`), the item
   says so exactly as the plain aggregate would. A plain aggregate is unaffected.
 
+- **A receipt says which link a join went through.** When the model declares several relationships
+  between the same two tables (two different people on one record), a declared join item now carries
+  `via`, the column(s) the join goes through, and `summary`, "<table> linked to <table> through
+  <column>". Both are null when there is one link, or when the links cannot be told apart by
+  their columns.
+
 - **`sm introspect` says why the database couldn't be used.** A credentials profile missing its
   password read every table, got no columns, and ended with "every name yielded zero columns. Check
   the --tables list", pointing at shell quoting. A failure about the connection (missing

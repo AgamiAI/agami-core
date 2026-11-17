@@ -349,6 +349,8 @@ def test_every_item_carries_exactly_one_status_and_the_same_flat_key_set(org):
         "review_state", "cross_schema", "on",
         # ACE-178: the tables the status was decided on, when a WITH step stood for one.
         "resolves_to",
+        # Which of several declared links between the two tables, by its column(s).
+        "via", "summary",
     }
     assert item["status"] in {rt.DECLARED, rt.UNDECLARED, rt.UNDECLARABLE, rt.UNDETERMINED}
 
@@ -1257,6 +1259,7 @@ EXPECTED_UNDECLARED = {
     "predicate": "o.id = c.id", "scope": "main", "status": rt.UNDECLARED,
     "from_to": "orders → customers", "resolves_to": None, "name": None, "cardinality": None, "confidence": None,
     "origin": None, "review_state": None, "cross_schema": None, "on": None,
+    "via": None, "summary": None,
 }
 
 

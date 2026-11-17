@@ -31,6 +31,7 @@ if str(PKG_SRC) not in sys.path:
 from semantic_model import runtime as rt  # noqa: E402
 
 from test_ace178_metrics_traced_through_steps import _org  # noqa: E402
+from test_ace178_receipt_audit_fixes import _audit, _rel  # noqa: E402
 
 
 @pytest.fixture()
@@ -187,3 +188,68 @@ def test_a_plain_aggregate_that_is_not_the_metric_is_still_not_undetermined(org,
 
 def test_a_plain_count_star_on_the_wrong_table_stays_unmatched(org):
     assert _one(org, "SELECT COUNT(*) AS v FROM incidents", "v")["status"] == rt.UNMATCHED
+
+
+# --- 3. which of several links a join went through ----------------------------------------------
+
+
+def _join(org, sql: str) -> dict:
+    (item,) = rt.assemble_receipt(org, sql)["joins"]["items"]
+    return item
+
+
+def test_a_join_through_one_of_several_links_names_its_column(tmp_path):
+    org = _audit(tmp_path)
+    item = _join(org, "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.managed_by_id")
+    assert item["status"] == rt.DECLARED
+    assert item["via"] == ["managed_by_id"]
+    assert item["summary"] == "assets linked to users through managed_by_id"
+
+
+def test_a_join_with_one_declared_link_names_none(tmp_path):
+    org = _audit(tmp_path)
+    item = _join(
+        org,
+        "SELECT SUM(e.amount) AS n FROM expense_lines e "
+        "JOIN award_departments d ON d.award_id = e.award_id",
+    )
+    assert item["status"] == rt.DECLARED
+    assert (item["via"], item["summary"]) == (None, None)
+
+
+def test_a_join_link_written_as_on_names_its_columns(tmp_path):
+    rel = _rel("assets", "owned_by_id", "users", "id")
+    del rel["from_column"], rel["to_column"]
+    rel["on"] = "assets.owned_by_id = users.id"
+    org = _audit(tmp_path, relationships=[_rel("assets", "assigned_to_id", "users", "id"), rel])
+    item = _join(org, "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.owned_by_id")
+    assert item["via"] == ["owned_by_id"]
+    assert "through owned_by_id" in item["summary"]
+
+
+def test_a_link_declared_the_other_way_round_is_still_told_apart(tmp_path):
+    org = _audit(
+        tmp_path,
+        relationships=[
+            _rel("assets", "assigned_to_id", "users", "id"),
+            _rel("users", "id", "assets", "owned_by_id"),
+        ],
+    )
+    item = _join(org, "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.owned_by_id")
+    assert item["via"] == ["owned_by_id"]
+
+
+def test_two_links_on_the_same_columns_name_none(tmp_path):
+    """Nothing tells them apart by their columns, so nothing is claimed."""
+    twin = _rel("assets", "assigned_to_id", "users", "id")
+    twin["relationship"] = "one_to_one"
+    org = _audit(tmp_path, relationships=[_rel("assets", "assigned_to_id", "users", "id"), twin])
+    item = _join(org, "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id")
+    assert (item["via"], item["summary"]) == (None, None)
+
+
+def test_an_undeclared_join_names_no_link(tmp_path):
+    org = _audit(tmp_path)
+    item = _join(org, "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.status")
+    assert item["status"] != rt.DECLARED
+    assert (item["via"], item["summary"]) == (None, None)
