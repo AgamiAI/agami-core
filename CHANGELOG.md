@@ -358,6 +358,10 @@ below corresponds to one such version.
   fact a build writes on the table; without it the item is unchanged. Reconcile reports such a row
   as open with that reason, never as a gap or a count by design.
 
+- **`sm examples --metric` works on its own.** The query skill names `--metric`, but the command
+  refused any call without `--query`. `--metric` alone now lists the examples tagged with that
+  metric (the most tags first); with neither flag the command says to give one.
+
 - **`sm introspect` says why the database couldn't be used.** A credentials profile missing its
   password read every table, got no columns, and ended with "every name yielded zero columns. Check
   the --tables list", pointing at shell quoting. A failure about the connection (missing

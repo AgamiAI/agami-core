@@ -219,6 +219,9 @@ def cmd_set_org(args) -> int:
 
 
 def cmd_examples(args) -> int:
+    if not args.query and not args.metric:
+        print("examples: give --query or --metric (or both)", file=sys.stderr)
+        return 2
     examples = L.list_prompt_examples(args.root, args.area)
     org = None
     if args.metric:
@@ -226,8 +229,14 @@ def cmd_examples(args) -> int:
             org = L.load_datasource(args.root)
         except Exception:  # noqa: BLE001 - an unreadable model only costs the selector resolution
             org = None
-    matches = RT.get_prompt_examples(args.query, examples, top_k=args.top_k, metrics=args.metric,
-                                     org=org, area=args.area)
+    if not args.query:
+        # By metric alone: the examples tagged with any of them, the most tags first. With no
+        # question there is nothing to rank the rest by, so they are left out.
+        wanted = RT.metric_tags([str(m) for m in args.metric], org)
+        examples = [ex for ex in examples
+                    if RT.example_metric_hits(ex, wanted, ex.get("area") or args.area)]
+    matches = RT.get_prompt_examples(args.query or "", examples, top_k=args.top_k,
+                                     metrics=args.metric, org=org, area=args.area)
     _print_json(
         {
             "high_confidence": RT.is_high_confidence(matches),
@@ -2276,11 +2285,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("examples", help="rank prompt examples for a query")
     sp.add_argument("root")
     sp.add_argument("--area", required=True)
-    sp.add_argument("--query", required=True)
+    sp.add_argument("--query", default=None,
+                    help="the question; without it, --metric lists the examples tagged with that metric")
     sp.add_argument("--top-k", type=int, default=5)
     sp.add_argument("--metric", action="append", default=None,
                     help="a metric the question uses, by name or by the selector get_datasource_schema gave "
-                         "(repeatable): examples tagged with it rank first")
+                         "(repeatable): examples tagged with it rank first; alone, only those are listed")
     sp.set_defaults(func=cmd_examples)
 
     sp = sub.add_parser("preflight", help="fan-trap / chasm-trap pre-flight check")

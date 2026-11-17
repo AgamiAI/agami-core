@@ -14,6 +14,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -28,7 +32,7 @@ PKG_SRC = REPO_ROOT / "packages" / "agami-core" / "src"
 if str(PKG_SRC) not in sys.path:
     sys.path.insert(0, str(PKG_SRC))
 
-from semantic_model import build  # noqa: E402
+from semantic_model import build, cli, curate  # noqa: E402
 from semantic_model import loader as L  # noqa: E402
 from semantic_model import runtime as rt  # noqa: E402
 
@@ -311,3 +315,61 @@ def test_a_distinct_count_on_a_repeating_table_still_matches(tmp_path):
     org = _repeating(tmp_path, build.repeat_caveat("number", 4.0))
     item = _one(org, "SELECT COUNT(DISTINCT number) AS v FROM incidents", "v")
     assert (item["status"], item["name"], item["reason"]) == (rt.MATCHED, "incident_count", None)
+
+
+# --- 5. `sm examples --metric` -----------------------------------------------------------------
+
+SAMPLE = REPO_ROOT / "plugins" / "agami" / "samples" / "store" / "model"
+AREA = "agami-example"
+TAGGED = {
+    "question": "Weekly takings",
+    "area": AREA,
+    "sql": "SELECT SUM(total_amount) AS revenue FROM orders",
+    "tables": ["orders"],
+    "metrics": ["revenue"],
+}
+
+
+def _cli(argv: list[str]) -> "tuple[int, dict | None]":
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = cli.main(argv)
+    return rc, (json.loads(buf.getvalue()) if buf.getvalue().strip() else None)
+
+
+@pytest.fixture()
+def sample(tmp_path: Path) -> Path:
+    dst = tmp_path / "art" / "demo"
+    shutil.copytree(SAMPLE, dst)
+    assert curate.add_examples(dst, AREA, [dict(TAGGED)]).applied
+    return dst
+
+
+def test_examples_by_metric_alone_lists_the_tagged_examples(sample):
+    rc, out = _cli(["examples", str(sample), "--area", AREA, "--metric", "revenue"])
+    assert rc == 0
+    questions = [m["example"]["question"] for m in out["matches"]]
+    assert TAGGED["question"] in questions
+    assert all(
+        "revenue"
+        in [t.lower() for t in m["example"].get("metrics") or [m["example"].get("metric") or ""]]
+        for m in out["matches"]
+    )
+
+
+def test_examples_needs_a_query_or_a_metric(sample, capsys):
+    rc, out = _cli(["examples", str(sample), "--area", AREA])
+    assert rc != 0 and out is None
+    assert "--query or --metric" in capsys.readouterr().err
+
+
+def test_the_query_skill_names_a_flag_the_cli_takes():
+    """Every `examples` call a skill writes uses flags the parser accepts."""
+    skills = REPO_ROOT / "plugins" / "agami" / "skills"
+    text = "\n".join(p.read_text() for p in skills.rglob("SKILL.md"))
+    assert "--metric" in text
+    parser_help = io.StringIO()
+    with contextlib.redirect_stdout(parser_help), pytest.raises(SystemExit):
+        cli.main(["examples", "--help"])
+    for flag in ("--metric", "--query", "--area", "--top-k"):
+        assert flag in parser_help.getvalue()
