@@ -1195,13 +1195,13 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/tmp
   --decisions "<artifacts_dir>/local/tmp/agami-page-<ts>.json" --minutes 30
 ```
 
-`--all` runs the same checks, with no cap and no cards, adds the build's own guesses (a code list it filled in alone, an opaque column it described alone, never one a person signed) and reads up to five sample values of each unclear column (never a column flagged personal). What each row offers:
+Run `serve_page.py` with `run_in_background` and wait as rule 6a says. `--all` runs the same checks, with no cap and no cards, adds the build's own guesses (a code list it filled in alone, an opaque column it described alone, never one a person signed) and reads up to five sample values of each unclear column (never a column flagged personal). What each row offers:
 
 - **a question**: the question in business words and the evidence numbers, and a dropdown of its readings (agami answers with the one picked and offers the other), **Ask each time** and **Don't know**; a look-alike pair offers its two tables, **Both are in use** and **Don't know**;
 - **a code list**: each code with the build's guess pre-filled (Yes/No flags, plain numbers and codes that already carry their label are left off), and **The meanings shown are right** / **Fix them** (the labels become editable) / **Don't know**;
 - **an unclear column**: its sample values and the build's guess, and **That's right** (only when there is a guess) / **Fix it** (the words typed) / **Hide this column** / **Don't know**.
 
-Blank is undecided, never a default: a row left blank writes nothing and comes back next time. Run `serve_page.py` with `run_in_background` and wait as rule 6a says; its `Page` card is **I've saved it** / **Back to the cards**, and **Back to the cards** reads the helper's output before stopping it, then goes to the cards. `{"status": "expired"}` → *"The page expired before it was saved; nothing changed."*, then the `Answer how` card again.
+Blank is undecided, never a default: a row left blank writes nothing and comes back next time. The `Page` card is **I've saved it** / **Back to the cards**, and **Back to the cards** reads the helper's output before stopping it, then goes to the cards. `{"status": "expired"}` → *"The page expired before it was saved; nothing changed."*, then the `Answer how` card again.
 
 **What the page saved.** Never read it by hand: check it against the items file the page was rendered from, which writes the batch:
 
