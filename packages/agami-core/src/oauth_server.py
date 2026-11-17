@@ -698,7 +698,7 @@ def _oidc_callback_uri() -> str:
 
 
 def _safe_provider(key: str):
-    """`oidc.provider`, but a misconfigured provider (e.g. an unpinned Microsoft tenant, which raises)
+    """`oidc.provider`, but a misconfigured provider (e.g. a Microsoft `common` tenant, which raises)
     resolves to None so the handler answers a clean 400 instead of an unhandled 500."""
     import oidc
 
@@ -802,6 +802,10 @@ async def admin_oidc_start(request: Request) -> Response:
     p = _safe_provider(request.query_params.get("provider", ""))
     if p is None:
         return _oauth_error("invalid_request", "unknown or unconfigured provider")
+    # The admin login is the most powerful one, so it needs a provider pinned to one organization;
+    # Microsoft on `consumers` admits any personal account.
+    if not p.pinned:
+        return _oauth_error("invalid_request", "admin sign-in needs a tenant-pinned provider")
     nonce = secrets.token_urlsafe(16)
     csrf = secrets.token_urlsafe(16)
     state = _mint_oidc_state({"purpose": "admin_login", "provider": p.key, "nonce": nonce}, csrf)

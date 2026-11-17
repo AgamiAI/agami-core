@@ -406,13 +406,15 @@ def test_provider_option_hidden_when_unconfigured(monkeypatch, tmp_path):
 def test_microsoft_requires_a_pinned_tenant(monkeypatch):
     monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_ID", "ms-client")
     monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_SECRET", "ms-secret")
-    for bad in ("", "common", "organizations", "consumers"):
+    # `consumers` (personal accounts only) is accepted; the any-tenant authorities are not.
+    for bad in ("", "common", "organizations"):
         monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", bad)
         with pytest.raises(ValueError):
             oidc.provider("microsoft")
     monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", MS_TENANT)
     p = oidc.provider("microsoft")
     assert p is not None and p.require_email_verified is False  # tenant pin is the trust
+    assert p.pinned is True
 
 
 def test_microsoft_token_without_email_verified_is_accepted(env, monkeypatch):
@@ -583,3 +585,134 @@ def test_verify_id_token_rejects_blank_sub(env):
     p = oidc.provider("google")
     with pytest.raises(Exception):
         oidc.verify_id_token(p, _id_token(sub="   "), nonce="the-nonce")
+
+
+# --- Microsoft personal accounts (`consumers`) --------------------------------
+
+# Microsoft's personal-accounts tenant, and the fixed issuer its discovery document names.
+MS_PERSONAL_TENANT = "9188040d-6c67-4c5b-b112-36a304b66dad"
+MS_PERSONAL_ISSUER = f"https://login.microsoftonline.com/{MS_PERSONAL_TENANT}/v2.0"
+MS_WORK_TENANT = "11111111-1111-1111-1111-111111111111"  # a fake work/school tenant
+CONSUMERS_META = {
+    "authorization_endpoint": "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize",
+    "token_endpoint": "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+    "jwks_uri": "https://login.microsoftonline.com/consumers/discovery/v2.0/keys",
+    "issuer": MS_PERSONAL_ISSUER,
+}
+
+
+@pytest.fixture
+def consumers(env, monkeypatch):
+    """Microsoft configured for personal accounts only, with its discovery served in-test."""
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_ID", CLIENT_ID)
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_SECRET", "ms-secret")
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", "consumers")
+    monkeypatch.setattr(oidc, "_discover", lambda p: CONSUMERS_META)
+    return env
+
+
+def _personal_token(**overrides) -> str:
+    claims = {
+        "iss": MS_PERSONAL_ISSUER,
+        "tid": MS_PERSONAL_TENANT,
+        "aud": CLIENT_ID,
+        "exp": 9_999_999_999,
+        "sub": "ms-personal-sub",
+        "email": "you@example.com",
+        "nonce": "the-nonce",
+        **overrides,
+    }
+    claims = {k: v for k, v in claims.items() if v is not None}  # None drops a claim
+    return jwt.encode(claims, _PRIV_PEM, algorithm="RS256", headers={"kid": "test"})
+
+
+def test_unpinned_tenants_hide_microsoft(monkeypatch):
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_ID", "ms-client")
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_SECRET", "ms-secret")
+    for tenant in ("common", "organizations"):
+        monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", tenant)
+        assert "microsoft" not in oidc.available_providers()
+
+
+def test_consumers_tenant_is_accepted_and_unpinned(consumers):
+    assert "microsoft" in oidc.available_providers()
+    p = oidc.provider("microsoft")
+    assert p.pinned is False
+    assert p.require_email_verified is True  # the personal tenant proves the address
+    assert "/consumers/v2.0/" in p.discovery_url
+
+
+def test_personal_account_token_verifies(consumers):
+    p = oidc.provider("microsoft")
+    identity = oidc.verify_id_token(p, _personal_token(), nonce="the-nonce")
+    assert identity.email == "you@example.com" and identity.subject == "ms-personal-sub"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"tid": MS_WORK_TENANT},  # a work or school tenant
+        {"tid": None},  # no tid at all
+        {"iss": f"https://login.microsoftonline.com/{MS_WORK_TENANT}/v2.0"},  # another issuer
+        {"email": None},  # no email
+    ],
+)
+def test_consumers_mode_refuses(consumers, bad):
+    p = oidc.provider("microsoft")
+    with pytest.raises(Exception):
+        oidc.verify_id_token(p, _personal_token(**bad), nonce="the-nonce")
+
+
+def test_consumers_mode_ignores_email_verified(consumers):
+    # The tid decides: a claimed email_verified neither admits a work account nor refuses a
+    # personal one.
+    p = oidc.provider("microsoft")
+    with pytest.raises(ValueError):
+        oidc.verify_id_token(
+            p, _personal_token(tid=MS_WORK_TENANT, email_verified=True), nonce="the-nonce"
+        )
+    identity = oidc.verify_id_token(p, _personal_token(email_verified=False), nonce="the-nonce")
+    assert identity.subject == "ms-personal-sub"
+
+
+def test_consumers_callback_refuses_a_work_account_and_creates_no_user(consumers, monkeypatch):
+    monkeypatch.setenv("AGAMI_PUBLIC_SIGNUP", "true")
+    c = _client()
+    r = c.get(
+        "/oauth/oidc/start",
+        params={
+            "provider": "microsoft",
+            "client_id": CLIENT_ID,
+            "redirect_uri": REDIRECT,
+            "code_challenge": CHALLENGE,
+            "state": "client-xyz",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 302
+    q = parse_qs(urlparse(r.headers["location"]).query)
+    state, nonce = q["state"][0], q["nonce"][0]
+    monkeypatch.setattr(
+        oidc,
+        "exchange_code",
+        lambda p, *, code, redirect_uri: _personal_token(
+            nonce=nonce, tid=MS_WORK_TENANT, email="stranger@example.com"
+        ),
+    )
+    cb = c.get(
+        "/oauth/oidc/callback",
+        params={"code": "idp-code", "state": state},
+        follow_redirects=False,
+    )
+    assert cb.status_code == 403
+    s = Store.from_env()
+    assert user_store.get_user_by_email(s, "stranger@example.com") is None
+    s.close()
+
+
+def test_admin_microsoft_login_needs_pinned_tenant(consumers, monkeypatch):
+    _seed_admin(consumers, monkeypatch, provider="microsoft")
+    c = _client()
+    assert "Continue with Microsoft" not in c.get("/admin/login").text
+    r = c.get("/admin/oidc/start", params={"provider": "microsoft"}, follow_redirects=False)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_request"

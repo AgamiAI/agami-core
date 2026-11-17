@@ -23,12 +23,16 @@ import jwt
 # A short timeout: the IdP is a fast hop; we never want a hung login to wedge a worker.
 _TIMEOUT = httpx.Timeout(10.0)
 
-# Discovery URLs are fixed per provider (the HTTPS trust anchor); client creds come from env. Google
-# ships first; Microsoft (with tenant pinning) follows.
+# Discovery URLs are fixed per provider (the HTTPS trust anchor); client creds come from env.
+# Microsoft is either pinned to one company tenant, or set to `consumers` for personal accounts.
 _PROVIDERS = ("google", "microsoft")
-# Microsoft authorities that admit ANY tenant — refused, so a deployer must pin a single tenant (the
-# tenant pin is Microsoft's trust boundary; without it, any Azure AD account would be accepted).
-_UNPINNED_MS_TENANTS = {"common", "organizations", "consumers"}
+# Microsoft authorities that admit work accounts from ANY tenant — refused. On those, any tenant's
+# administrator can put any address on an account, and Microsoft documents no claim that proves it.
+_UNPINNED_MS_TENANTS = {"common", "organizations"}
+# The authority for personal Microsoft accounts only, and the tenant id those accounts carry in `tid`.
+# Microsoft owns that tenant, so its addresses are treated as proven.
+_MS_PERSONAL_AUTHORITY = "consumers"
+_MS_PERSONAL_TENANT = "9188040d-6c67-4c5b-b112-36a304b66dad"
 
 _discovery_cache: dict[str, dict] = {}
 _jwks_clients: dict[str, "jwt.PyJWKClient"] = {}
@@ -40,9 +44,13 @@ class Provider:
     discovery_url: str
     client_id: str
     client_secret: str
-    # Google (a consumer IdP serving any email) must prove email_verified. Microsoft is pinned to one
-    # tenant, so the org controls the addresses — its tokens often omit email_verified and that's OK.
+    # Whether the address must be proven. Google proves it with email_verified. Microsoft pinned to one
+    # tenant does not need to: the org controls the addresses, and its tokens often omit the claim.
+    # Microsoft on `consumers` proves it with the personal-accounts tenant (see `verify_id_token`).
     require_email_verified: bool
+    # False only for Microsoft on `consumers`, which admits accounts from no single organization. A
+    # caller that trusts claims beyond the email (roles, groups) should refuse them when this is False.
+    pinned: bool = True
 
 
 @dataclass(frozen=True)
@@ -55,36 +63,46 @@ class Identity:
 
 
 def _discovery_url(key: str) -> str | None:
-    """The provider's OpenID discovery URL. Google is fixed; Microsoft is tenant-specific (and the
-    tenant must be pinned — an any-tenant authority is refused)."""
+    """The provider's OpenID discovery URL. Google is fixed; Microsoft is tenant-specific: a pinned
+    tenant id, or `consumers` for personal accounts. An any-tenant authority is refused."""
     if key == "google":
         return "https://accounts.google.com/.well-known/openid-configuration"
     if key == "microsoft":
-        tenant = os.environ.get("AGAMI_OIDC_MICROSOFT_TENANT", "").strip()
+        tenant = _ms_tenant()
         if not tenant or tenant.lower() in _UNPINNED_MS_TENANTS:
             raise ValueError(
-                "AGAMI_OIDC_MICROSOFT_TENANT must pin a single tenant id "
-                "(not 'common'/'organizations'/'consumers') — the tenant pin is the trust boundary."
+                "AGAMI_OIDC_MICROSOFT_TENANT must be a single tenant id, or 'consumers' for "
+                "personal Microsoft accounts (not 'common'/'organizations')."
             )
         return f"https://login.microsoftonline.com/{tenant}/v2.0/.well-known/openid-configuration"
     return None
 
 
+def _ms_tenant() -> str:
+    return os.environ.get("AGAMI_OIDC_MICROSOFT_TENANT", "").strip()
+
+
 def provider(key: str) -> Provider | None:
     """The configured provider for `key`, or None when its client id/secret env is absent (so the
     option is simply hidden). Env: AGAMI_OIDC_<KEY>_CLIENT_ID / _CLIENT_SECRET (+ _TENANT for MS).
-    Raises ValueError on a misconfigured Microsoft tenant (an unpinned authority is refused)."""
+    Raises ValueError on a misconfigured Microsoft tenant (an any-tenant authority is refused)."""
     if key not in _PROVIDERS:
         return None
     client_id = os.environ.get(f"AGAMI_OIDC_{key.upper()}_CLIENT_ID", "").strip()
     client_secret = os.environ.get(f"AGAMI_OIDC_{key.upper()}_CLIENT_SECRET", "").strip()
     if not client_id or not client_secret:
         return None
-    discovery_url = _discovery_url(key)  # may raise for an unpinned MS tenant
+    discovery_url = _discovery_url(key)  # may raise for an any-tenant MS authority
     if discovery_url is None:
         return None
+    pinned = not (key == "microsoft" and _ms_tenant().lower() == _MS_PERSONAL_AUTHORITY)
     return Provider(
-        key, discovery_url, client_id, client_secret, require_email_verified=key == "google"
+        key,
+        discovery_url,
+        client_id,
+        client_secret,
+        require_email_verified=key == "google" or not pinned,
+        pinned=pinned,
     )
 
 
@@ -157,9 +175,10 @@ def verify_id_token(p: Provider, id_token: str, *, nonce: str) -> Identity:
 
     Explicit and uniform: RS256 signature against the IdP JWKS, `aud` == our client_id, `iss` == the
     discovered issuer, `exp` enforced, `sub` present, and the `nonce` matches the one we sent (replay
-    defense). `email_verified` is required for providers that serve any email (Google); for a
-    tenant-pinned provider (Microsoft) the pin is the trust, so email_verified may be absent.
-    `preferred_username` is never used as identity."""
+    defense). The address must be proven where the provider requires it: Google by `email_verified`,
+    Microsoft on `consumers` by `tid` being the personal-accounts tenant (Microsoft sends no
+    `email_verified`, so that claim is not read there). For a tenant-pinned Microsoft the pin is the
+    trust, so neither is needed. `preferred_username` is never used as identity."""
     meta = _discover(p)
     # Reuse the JWKS client per provider — it keeps its own key cache, so steady-state logins don't
     # re-fetch the IdP's keys on every request (and don't amplify into the IdP under load).
@@ -177,7 +196,10 @@ def verify_id_token(p: Provider, id_token: str, *, nonce: str) -> Identity:
     )
     if claims.get("nonce") != nonce:
         raise ValueError("nonce mismatch")
-    if p.require_email_verified and claims.get("email_verified") is not True:
+    if p.key == "microsoft" and not p.pinned:
+        if claims.get("tid") != _MS_PERSONAL_TENANT:
+            raise ValueError("not a personal Microsoft account")
+    elif p.require_email_verified and claims.get("email_verified") is not True:
         raise ValueError("email_verified is not true")
     email = claims.get("email")
     if not email:
