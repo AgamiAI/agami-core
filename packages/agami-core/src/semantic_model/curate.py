@@ -490,7 +490,9 @@ class ApplyResult:
     provenance_changed: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
-        return {"applied": self.applied, "skipped": self.skipped, "errors": self.errors,
+        # `applied_count` matches `sm describe-file`, so one key reads both commands (#678).
+        return {"applied": self.applied, "applied_count": len(self.applied),
+                "skipped": self.skipped, "errors": self.errors,
                 "validated": self.validated, "committed": self.committed,
                 **({"commit_note": self.commit_note} if self.commit_note else {}),
                 **({"stale": self.stale} if self.stale else {}),
