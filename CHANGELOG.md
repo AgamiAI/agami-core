@@ -333,6 +333,12 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **`sm suggest-metrics` proposes a count for a table whose rows repeat each record.** Introspection
+  measures the repeat and rightly leaves such a table without a one-column grain, but nothing was
+  then proposed on it, so the tables people ask about most often had no count. It now proposes a
+  distinct-record count on the measured record key (`COUNT(DISTINCT <key>)`), test-run like the
+  others, alongside the distinct-record flag rates; still no duration average over the repeats. A
+  table that holds each record once is unchanged.
 - **`sm introspect` says why the database couldn't be used.** A credentials profile missing its
   password read every table, got no columns, and ended with "every name yielded zero columns. Check
   the --tables list", pointing at shell quoting. A failure about the connection (missing

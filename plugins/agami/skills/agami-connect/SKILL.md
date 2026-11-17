@@ -1095,7 +1095,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add "$ROOT" --kind entity --area <area> 
 
 Metrics come from two sources, handled very differently. **Always prefer declared metrics** — schema-only inference is a shallow guess (it finds start→end durations, and flag rates when asked; it misses the domain KPIs a business actually tracks — refund rate, repeat-purchase rate, cohort retention, fulfillment SLA — because those aren't visible in column names).
 
-**A table whose caveats begin "Rows repeat about N times per <key>"** holds each record on several rows (introspection measured it; often a view joining a record to its stages). Any metric on it counts records with `COUNT(DISTINCT <key>)`, never `COUNT(*)`, and averages or sums per record, not per row; never write a grain of `<key>` alone for it.
+**A table whose caveats begin "Rows repeat about N times per <key>"** holds each record on several rows (introspection measured it; often a view joining a record to its stages). Any metric on it counts records with `COUNT(DISTINCT <key>)`, never `COUNT(*)`, and averages or sums per record, not per row; never write a grain of `<key>` alone for it. `suggest-metrics` proposes its distinct-record count (`<table>_distinct_<key>_count`) and no duration average on it.
 
 **(A) Declared metrics — extract in FULL, no cap.** If the user attached a semantic-layer repo or a metrics file in 1.5 (`$DATA_MODEL_DOC_TEXT`), those are the org's *real* definitions — pull **every** one, don't sample to 4:
 - **LookML** `measure {}` → metric: `type` + `sql` → `bindings`, `description` → `description` + `calculation`, `label` → `description` when there is no description (below), `label`+`view_label` → `other_names`.
