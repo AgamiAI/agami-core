@@ -1135,6 +1135,7 @@ def _fiscal_start_question() -> dict:
     one answer, so its options are months, never how the agent should behave."""
     return {
         "kind": "fiscal_start",
+        "id": "fiscal:start",
         "question": "Which month does your fiscal year start in? Type another month in Other.",
         "options": [{"label": calendar.month_name[m], "month": m} for m in _FISCAL_MONTHS],
     }
@@ -1155,44 +1156,108 @@ def _codes(values: list[str]) -> bool:
     return bool(values) and sum(_code_like(v) for v in values) * 2 >= len(values)
 
 
+# Values that say themselves as a yes/no flag: a code list of only these needs no meaning typed.
+_YES_NO = frozenset({"y", "n", "yes", "no", "true", "false", "t", "f", "0", "1"})
+# How many distinct values an unclear column shows on the page, and how long each may be.
+_SAMPLES = 5
+_MAX_SAMPLE = 60
+
+
+def _says_itself(values: list[str], labels: dict) -> bool:
+    """Whether a code list needs no meaning from a person: a yes/no flag, or every code already
+    carrying its label (its label is the code itself, or the code is a word, not a code)."""
+    keys = [str(v).strip().lower() for v in values]
+    if keys and set(keys) <= _YES_NO:
+        return True
+    return all(
+        not _code_like(v) or (labels.get(v) or "").strip().lower() == str(v).strip().lower()
+        for v in values
+    )
+
+
+def _plain_numbers(c: Column, values: list[str]) -> bool:
+    """A count of 1 to 5 is a number: numeric values on a column whose name doesn't say code."""
+    numeric = all(re.fullmatch(r"-?\d+(\.\d+)?", str(v).strip()) for v in values)
+    return (c.type != "string" or numeric) and not _CODE_NAME.search(c.name)
+
+
+def _opaque(c: Column) -> bool:
+    """A name a reader can't decode (`v_1`, `qty`, `xq7`): every word short or holding a digit."""
+    words = _words(c.name)
+    return bool(words) and all(len(w) <= 3 or re.search(r"\d", w) for w in words)
+
+
 def _unread_columns(
-    tables: list[tuple[Table, str, str]], nouns: dict
+    tables: list[tuple[Table, str, str]],
+    nouns: dict,
+    *,
+    page: bool = False,
+    confirmed: frozenset = frozenset(),
 ) -> tuple[list[dict], list[dict]]:
+    """Code lists and columns a person should say the meaning of. On the cards: codes left blank
+    and columns the build couldn't read. On the page (#676) also the build's own guesses, to
+    confirm: a code list it filled in alone, and an opaque column it described alone."""
     coded, unknown = [], []
     labels = {id(t): label for t, label, _ in tables}
     for t, _, area in tables:
         for c in t.columns:
             if not _readable(c):
                 continue
-            blank = [v for v, lbl in (c.choice_field or {}).items() if not (lbl or "").strip()]
-            if (c.type != "string" and not _CODE_NAME.search(c.name)) or not _codes(blank):
-                blank = []  # a count of 1 to 5 is a number, and "east" or "enterprise" says itself
+            current = dict(c.choice_field or {})
+            blank = [v for v, lbl in current.items() if not (lbl or "").strip()]
             where = {"table": labels[id(t)], "column": c.name}
-            if blank:
-                shown = ", ".join(f"{v} = …" for v in blank[:2])
+            # From the table's label: it gains a schema, and so changes, if a same-named table appears in another.
+            ident = f"{labels[id(t)]}.{c.name}"
+            asked = bool(blank) and _codes(blank) and not _plain_numbers(c, blank)
+            # a list the build filled in with no person's word: asked on the page only
+            guessed = (
+                page
+                and current
+                and not blank
+                and c.description_source == "ai_unvalidated"
+                and (labels[id(t)].lower(), c.name.lower()) not in confirmed
+                and _codes(list(current))
+                and not _plain_numbers(c, list(current))
+            )
+            if (asked or guessed) and not _says_itself(list(current), current):
+                values = blank or list(current)
+                shown = ", ".join(f"{v} = …" for v in values[:2])
                 coded.append(
                     {
                         "kind": "coded_values",
+                        "id": f"codes:{ident}",
                         **where,
                         "values": blank,
-                        "evidence": "Codes: " + ", ".join(blank),
+                        "labels": current,
+                        "guess": {v: lbl for v, lbl in current.items() if (lbl or "").strip()},
+                        "rows": _rows(t),
+                        "evidence": "Codes: " + ", ".join(values),
                         # the labels the person gives are filled into this map's blanks
                         "op": _table_op(
-                            t,
-                            area,
-                            column=c.name,
-                            field="choice_field",
-                            value=dict(c.choice_field or {}),
+                            t, area, column=c.name, field="choice_field", value=current
                         ),
                         "question": f"What do the values of {plain_words(c.name)} on "
                         f"{_noun(nouns, t)[0]} mean? Type them in Other, e.g. {shown}",
                     }
                 )
-            elif c.description_source == "ai_unknown" and not (c.description or "").strip():
+                continue
+            if c.primary_key or c.foreign_key:
+                continue
+            cant_read = c.description_source == "ai_unknown" and not (c.description or "").strip()
+            opaque_guess = (
+                page
+                and c.description_source == "ai_unvalidated"
+                and (c.description or "").strip()
+                and _opaque(c)
+            )
+            if cant_read or opaque_guess:
                 unknown.append(
                     {
                         "kind": "unknown_column",
+                        "id": f"column:{ident}",
                         **where,
+                        "guess": "" if cant_read else c.description.strip(),
+                        "rows": _rows(t),
                         "question": f"What does {plain_words(c.name)} on {_noun(nouns, t)[0]} "
                         "hold? Type a short description in Other.",
                         # the person's words go in `value`; `source: human` says whose they are
@@ -1207,6 +1272,50 @@ def _unread_columns(
                     }
                 )
     return coded, unknown
+
+
+def _samples(dialect: D.Dialect, runner: Runner, t: Table, column: str) -> Optional[list[str]]:
+    """A few distinct values of one column, for the page, or None when they can't be read. Only a
+    column `_readable` lets through reaches here; a value with a control character is left out,
+    and a failure says nothing (its message could quote a value)."""
+    if t.source_type != "table" or I._too_big_to_probe(t):
+        return None
+    q = dialect.quote_ident(column)
+    sql = dialect.limited(
+        f"SELECT DISTINCT {q} AS v FROM {dialect.qualified(t.schema_name, t.name)} "
+        f"WHERE {q} IS NOT NULL",
+        _SAMPLES,
+    )
+    try:
+        rows = runner(sql)
+    except Exception:
+        return None
+    out = []
+    for r in rows:
+        v = str(next(iter(r.values()), ""))
+        if v and not _UNSAFE.search(v):
+            out.append(v[:_MAX_SAMPLE])
+    return out
+
+
+def confirmed_code_lists(log: list[Optional[dict]]) -> frozenset:
+    """(table, column) of every code list a person signed in the curation log: once confirmed or
+    fixed on the page, the build's guess there is theirs and is not asked again."""
+    out = set()
+    for e in log:
+        if (
+            isinstance(e, dict)
+            and e.get("op") == "edit"
+            and e.get("field") == "choice_field"
+            and e.get("signer")
+            and e.get("role") != "system"
+            and isinstance(e.get("name"), str)
+            and isinstance(e.get("column"), str)
+        ):
+            out.add((e["name"].lower(), e["column"].lower()))
+            if e.get("schema"):
+                out.add((f"{e['schema']}.{e['name']}".lower(), e["column"].lower()))
+    return frozenset(out)
 
 
 # ---------------------------------------------------------------------------
@@ -1330,10 +1439,21 @@ def _labels(org: Datasource) -> dict[int, str]:
 
 
 def open_questions(
-    org: Datasource, runner: Runner, dialect: D.Dialect, *, today: Optional[date] = None
+    org: Datasource,
+    runner: Runner,
+    dialect: D.Dialect,
+    *,
+    today: Optional[date] = None,
+    page: bool = False,
+    confirmed: frozenset = frozenset(),
 ) -> dict:
     """Every candidate the data shows, checked by running its readings, then what the build couldn't
-    read; see the module docstring."""
+    read; see the module docstring.
+
+    `page` (#676) is the list for the review page instead of the cards: every item with no card
+    (but an unasked fiscal start, which the page can't answer, keeps its card); the build's guessed code lists and opaque columns too, with a few sample values
+    of each unclear column; code lists and columns of the largest tables first. `confirmed` is
+    `confirmed_code_lists` of the curation log, so a list a person signed is not asked again."""
     today = today or date.today()
     calls = [0]
 
@@ -1444,11 +1564,27 @@ def open_questions(
             failed.append({"table": None, "pattern": "fiscal", "reason": str(e)})
 
     candidates.sort(key=lambda c: -c["spread"])
-    coded, unknown = _unread_columns(tables, nouns)
+    for c in candidates:
+        c["id"] = f"question:{c['op']['name']}"
+    for la in look_alikes:
+        la["id"] = "same:" + "|".join(sorted(t["table"] for t in la["tables"]))
+    coded, unknown = _unread_columns(tables, nouns, page=page, confirmed=confirmed)
     asked = [_fiscal_start_question()] if org.fiscal_year_start_unasked() else []
-    questions = asked + candidates + look_alikes + coded + unknown
-    for i, q in enumerate(questions, 1):
-        q["card"] = _card(q, _header(i, len(questions)))
+    if page:
+        # A code list or a column on a large table is read by more answers than one on a small one.
+        coded.sort(key=lambda q: -(q["rows"] or 0))
+        unknown.sort(key=lambda q: -(q["rows"] or 0))
+        by_label = {label: t for t, label, _ in tables}
+        for q in unknown:
+            q["samples"] = _samples(dialect, counted, by_label[q["table"]], q["column"])
+        # The page has no fiscal-start row, so that question keeps its card, asked before the page.
+        for q in asked:
+            q["card"] = _card(q, _header(1, 1))
+        questions = asked + candidates + look_alikes + coded + unknown
+    else:
+        questions = asked + candidates + look_alikes + coded + unknown
+        for i, q in enumerate(questions, 1):
+            q["card"] = _card(q, _header(i, len(questions)))
     return {
         "questions": questions,
         "counts": {
