@@ -64,6 +64,7 @@ from . import build, pii
 from . import dialects as D
 from . import placeholders as P
 from . import profile as PF
+from .failure_kinds import CONNECTION_KINDS
 from .models import (
     ROW_COUNT_CAP,
     Column,
@@ -456,8 +457,43 @@ def _refusal_rule(stderr: str) -> Optional[str]:
     return refusal.get("rule") if isinstance(refusal, dict) else None
 
 
+class ConnectionUnusable(RuntimeError):
+    """The database connection could not be used, so introspection or discovery stopped before writing anything."""
+
+
+class _ConnectionWatch:
+    """A runner that remembers the first failure about the connection.
+
+    Each table's reads catch their own failures and treat them as "this table has nothing to read",
+    which is right for a missing table and wrong for a missing password: a live run read all 34
+    tables, got nothing, and blamed the --tables list. `check()` turns a remembered connection
+    failure into an error with the database's own message."""
+
+    def __init__(self, runner: Runner) -> None:
+        self._runner = runner
+        self.failure: Optional[ExecuteSqlFailure] = None
+
+    def __call__(self, sql: str) -> list:
+        if self.failure is not None:
+            # every later statement would fail the same way, and on a network failure each would
+            # first wait out its own timeout: fail it at once, as the database would
+            raise self.failure
+        try:
+            return self._runner(sql)
+        except ExecuteSqlFailure as exc:
+            if self.failure is None and exc.kind in CONNECTION_KINDS:
+                self.failure = exc
+            raise
+
+    def check(self) -> None:
+        if self.failure is not None:
+            raise ConnectionUnusable(
+                f"the database connection could not be used, so nothing was written: {self.failure}")
+
+
 def make_execute_sql_runner(
-    profile: str, python: Optional[str] = None, *, building_the_model: bool = False
+    profile: str, python: Optional[str] = None, *, building_the_model: bool = False,
+    artifacts_dir: Optional[str | Path] = None,
 ) -> Runner:
     """A runner that sends each statement through `execute_sql.py`, and returns its rows.
 
@@ -473,16 +509,24 @@ def make_execute_sql_runner(
     does not declare yet, probe mode samples with `SELECT *`, and catalogs such as Redshift's `svv_*`,
     SQLite's `pragma_*` functions and Oracle's `ALL_*` views are not in the build profile.
     `--build-profile` is added beside it, off a hosted server, so agami's own catalog queries that
-    call a catalog function (`dialects.catalog_function_queries`) pass the recon gate."""
+    call a catalog function (`dialects.catalog_function_queries`) pass the recon gate.
+
+    `artifacts_dir`, when given, is where execute_sql reads the credentials: it otherwise finds the
+    folder through AGAMI_ARTIFACTS_DIR or the pointer file, which can name a different folder than the
+    one the command was told to build in."""
     exe = python or sys.executable
     script = str(SCRIPT_DIR / "execute_sql.py")
     hosted = bool(os.environ.get("AGAMI_DB_URL") or os.environ.get("APP_DATABASE_URL"))
     unscoped = (["--no-safety"] + ([] if hosted else ["--build-profile"])) if building_the_model else []
 
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+    if artifacts_dir is not None:
+        env["AGAMI_ARTIFACTS_DIR"] = str(Path(artifacts_dir).expanduser())
+
     def run(sql: str) -> list[dict]:
         proc = subprocess.run(
             [exe, script, "--profile", profile, "--sql", sql, *unscoped],
-            capture_output=True, text=True, encoding="utf-8", env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+            capture_output=True, text=True, encoding="utf-8", env=env,
         )
         if proc.returncode != 0:
             raise ExecuteSqlFailure(proc.stderr.strip() or f"execute_sql exit {proc.returncode}", proc.returncode)
@@ -556,9 +600,11 @@ def _introspect(
     out = Path(out_dir) if out_dir else (artifacts_dir / profile)
 
     report = IntrospectReport(profile=profile, db_type=db_type, out_dir=str(out), dry_run=dry_run)
+    runner = watch = _ConnectionWatch(runner)
 
     # 1. discover (schema, table) pairs
     pairs = _discover_tables(dialect, runner, tables, report)
+    watch.check()
     if not pairs:
         raise RuntimeError(
             "no tables discovered. If the catalog is locked down, pass an explicit "
@@ -573,7 +619,7 @@ def _introspect(
     repeats_unread: set[tuple] = set()   # (schema, table) whose repeat check settled nothing
     samples: dict[tuple, tuple] = {}   # (schema, table) -> (sample, est_rows), for the placeholder scan
     built = _read_tables(dialect, runner, pairs, conn_name, report, budget, reads, keys_unread, samples, pp,
-                         repeats_unread)
+                         repeats_unread, check=watch.check)
     unknown = [q for q, (_, kind) in report.counted_sizes.items() if kind == "unknown"]
     if unknown:
         spent = (f"; {budget.skipped} of them not counted because the run's {_COUNT_BUDGET_S:.0f}s for "
@@ -836,6 +882,9 @@ def _introspect(
         _merge_candidates(prior, report, read or set(), rels, built, sg)
     _progress(pp, f"join candidates: {len(report.join_candidates)} found "
                   f"({report.join_candidate_probes} probe(s) this run)")
+    # Every probe above swallows its own failure, which is right for one probe's bad statement and
+    # wrong for a connection lost mid-build: the model would be written without its joins.
+    watch.check()
     if refreshing:   # counted after the join merge and relabel, which are changes too
         report.notes.append(
             f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
@@ -1408,7 +1457,9 @@ def discover_inventory(
         dialect = D.BigQuery(region=bigquery_region)
 
     report = IntrospectReport(profile=profile, db_type=db_type, out_dir="", dry_run=True)
+    runner = watch = _ConnectionWatch(runner)
     pairs = _discover_tables(dialect, runner, tables, report)
+    watch.check()   # a dead connection reads as an empty catalog: say so, not "locked down"
     if schemas:
         keep = {s for s in schemas}
         pairs = [(s, t) for s, t in pairs if s in keep]
@@ -1446,6 +1497,7 @@ def discover_inventory(
             if not used_bulk:
                 column_mode = cmode
         inv_tables.append({"schema": schema, "table": table, "columns": cols})
+    watch.check()
     if row_estimates and schemas:
         _add_row_estimates(dialect, runner, schemas, inv_tables)
 
@@ -1582,6 +1634,7 @@ def _read_tables(
     dialect: D.Dialect, runner: Runner, pairs: list[tuple], conn_name: str, report: IntrospectReport,
     budget: _CountBudget, reads: _ReadBudget, keys_unread: set, samples: dict,
     pp: Optional[Path] = None, repeats_unread: Optional[set] = None,
+    check: Optional[Callable[[], None]] = None,
 ) -> list[Table]:
     """Read every table's columns, keys and sample, up to `PF.WORKERS` tables at once (#677: one at a
     time, a wide build spent 30 s to 3 min per view waiting on the warehouse).
@@ -1591,7 +1644,8 @@ def _read_tables(
     finish in. The two run-wide budgets are shared and locked: the counts' time budget, and the
     DISTINCT reads, which tables claim in `pairs` order (`_TableReads`). PF.WORKERS is 1 for a sign-in
     that may prompt, which reads one at a time. One table failing, or Ctrl-C, cancels the tables still
-    queued; those already running finish their statements."""
+    queued; those already running finish their statements. `check` runs after each table: a
+    connection failure fails every table alike, so it raises at the first and cancels the rest."""
     step = max(1, len(pairs) // 10)   # throttle the log to ~10 lines, not one per table
     turn = threading.Condition()
     next_up = [0]
@@ -1617,6 +1671,8 @@ def _read_tables(
         futures = [pool.submit(one, k, p) for k, p in enumerate(pairs)]
         for i, f in enumerate(as_completed(futures), 1):
             f.result()   # a table that failed stops the build now, not after every other table
+            if check is not None:
+                check()
             if i % step == 0 or i == len(pairs):
                 _progress(pp, f"columns+grain {i}/{len(pairs)}")
         results = [f.result() for f in futures]

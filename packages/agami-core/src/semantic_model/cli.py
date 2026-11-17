@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import build_settings as BS
+from . import failure_kinds as FK
 from . import introspect as INTRO
 from . import loader as L
 from . import metadata_sources as MS
@@ -715,11 +716,10 @@ def cmd_approve_queue(args) -> int:
     return 0 if res.validated else 1
 
 
-# Failure kinds (execute_sql's exit-code table) that say the database could not be reached as
-# configured: every metric would fail the same way, so none of them is the binding's fault.
-_CONNECTION_KINDS = frozenset({"auth", "dsn", "network", "driver_missing", "sign_in_required"})
-# Kinds that say the statement itself is wrong: the binding's fault, never a connection check.
-_STATEMENT_KINDS = frozenset({"syntax", "column_not_found", "table_not_found", "permission"})
+# A connection kind means every metric would fail the same way, so none is the binding's fault; a
+# statement kind is the binding's fault, never a connection check.
+_CONNECTION_KINDS = FK.CONNECTION_KINDS
+_STATEMENT_KINDS = FK.STATEMENT_KINDS
 
 
 def _connection_failed(runner, exc: Exception) -> bool:
@@ -1830,26 +1830,32 @@ def cmd_introspect(args) -> int:
                      if ln.strip() and not ln.lstrip().startswith("#")]
         tables = (tables or []) + _normalize_table_list(from_file)
 
-    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
+    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True,
+                                           artifacts_dir=args.artifacts)
     # Each statement is its own connection: several at once would open as many sign-in prompts.
     from . import profile as PF
     PF.WORKERS = 1 if _may_prompt_to_sign_in(args.profile) else PF.WORKERS
     progress = args.progress or str(
         Path(args.artifacts).expanduser() / args.profile / ".introspect" / "progress.log")
-    org, report = INTRO.introspect(
-        args.profile,
-        args.db_type,
-        runner=runner,
-        artifacts_dir=args.artifacts,
-        out_dir=args.out,
-        tables=tables,
-        exclude_columns=args.exclude_columns,
-        dry_run=args.dry_run,
-        bigquery_region=args.bigquery_region,
-        progress_path=progress,
-        append=getattr(args, "append", False),
-        batch=_batch_arg(getattr(args, "batch", None)),
-    )
+    try:
+        org, report = INTRO.introspect(
+            args.profile,
+            args.db_type,
+            runner=runner,
+            artifacts_dir=args.artifacts,
+            out_dir=args.out,
+            tables=tables,
+            exclude_columns=args.exclude_columns,
+            dry_run=args.dry_run,
+            bigquery_region=args.bigquery_region,
+            progress_path=progress,
+            append=getattr(args, "append", False),
+            batch=_batch_arg(getattr(args, "batch", None)),
+        )
+    except INTRO.ConnectionUnusable as exc:
+        # the database's own reason, not a traceback: it is a setup problem the person fixes
+        sys.stderr.write(f"agami: {exc}\n")
+        return 2
     res = V.validate(org)
     print(report.render())
     print(V.format_result(res))
@@ -2161,16 +2167,21 @@ def cmd_discover(args) -> int:
     removed, and `--out` is still accepted from older callers but ignored (said in `note`)."""
     from . import introspect as INTRO
 
-    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
-    inventory = INTRO.discover_inventory(
-        args.profile,
-        args.db_type,
-        runner=runner,
-        tables=args.tables,
-        schemas=args.schemas,
-        bigquery_region=args.bigquery_region,
-        row_estimates=args.row_estimates,
-    )
+    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True,
+                                           artifacts_dir=args.artifacts)
+    try:
+        inventory = INTRO.discover_inventory(
+            args.profile,
+            args.db_type,
+            runner=runner,
+            tables=args.tables,
+            schemas=args.schemas,
+            bigquery_region=args.bigquery_region,
+            row_estimates=args.row_estimates,
+        )
+    except INTRO.ConnectionUnusable as exc:
+        sys.stderr.write(f"agami: {exc}\n")   # as `sm introspect`: a setup problem, not a traceback
+        return 2
 
     artifacts = Path(args.artifacts).expanduser()
     inv_path = (Path(args.inventory_out).expanduser() if args.inventory_out

@@ -607,6 +607,17 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **`sm introspect` says why the database couldn't be used.** A credentials profile missing its
+  password read every table, got no columns, and ended with "every name yielded zero columns. Check
+  the --tables list", pointing at shell quoting. A failure about the connection (missing
+  credentials, no driver, authentication, the network) now stops the run at the first statement
+  with the database's own message and exit code 2, instead of failing each table in turn (on a
+  network failure, each after its own timeout). A connection lost later in the build, while joins
+  are probed, stops it the same way before anything is written; one probe failing on its own
+  statement still only skips that probe. `sm discover` stops the same way, instead of advising an
+  explicit table list as if the catalog were locked down. Both commands also read the credentials
+  in the `--artifacts` folder they were given; they used whichever folder the pointer file named.
+
 - **A refusal's echo drops Unicode control characters, and a self-reported question is capped
   (#415).** The expression a receipt echoes back stripped only ASCII controls, so C1 controls, the
   Unicode line and paragraph separators, text-direction characters and lone surrogates reached the
