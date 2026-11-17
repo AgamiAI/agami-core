@@ -349,3 +349,46 @@ def test_no_datasource_yaml_still_stops_one_area(tmp_path, fake_db):
     (tmp_path / "datasource.yaml").unlink()
     rc, out = _run(["seed-validate", str(tmp_path), "--profile", "p", "--area", "sales"])
     assert rc == 3 and json.loads(out)["error"] == "no_model"
+
+
+def test_remove_example_area_prefix_ignores_case_and_spaces(tmp_path):
+    _model(tmp_path)
+    _examples(tmp_path)
+    rc, out = _run(["remove-example", str(tmp_path), "--question", "OPS / how many rows?",
+                    "--question", "total billed?"])
+    d = json.loads(out)
+    assert rc == 0 and d["totals"] == {"areas": 2, "rejected": 2, "skipped": 0}
+    assert [e["question"] for e in list_prompt_examples(tmp_path, "ops")] == ["broken seed"]
+    assert [e["question"] for e in list_prompt_examples(tmp_path, "sales")] == ["how many rows?"]
+
+
+def test_remove_example_with_one_area_takes_that_areas_prefix(tmp_path):
+    _model(tmp_path)
+    _examples(tmp_path)
+    rc, out = _run(["remove-example", str(tmp_path), "--area", "ops",
+                    "--question", "ops/how many rows?"])
+    assert rc == 0 and json.loads(out)["rejected"] == ["example (rejected) ops/how many rows?"]
+    assert [e["question"] for e in list_prompt_examples(tmp_path, "ops")] == ["broken seed"]
+
+
+def test_remove_example_refuses_a_prefix_naming_an_area_not_covered(tmp_path):
+    _model(tmp_path)
+    _examples(tmp_path)
+    rc, out = _run(["remove-example", str(tmp_path), "--area", "sales",
+                    "--question", "ops/how many rows?"])
+    d = json.loads(out)
+    assert rc == 1 and d["refused"] == "area_not_covered"
+    assert d["questions"] == [{"question": "ops/how many rows?", "area": "ops"}]
+    assert len(list_prompt_examples(tmp_path, "ops")) == 2
+
+
+def test_remove_example_reports_an_already_rejected_example_never_silently(tmp_path):
+    _model(tmp_path)
+    _examples(tmp_path)
+    _run(["remove-example", str(tmp_path), "--question", "ops/how many rows?"])
+    rc, out = _run(["remove-example", str(tmp_path), "--question", "ops/how many rows?",
+                    "--question", "total billed?"])
+    d = json.loads(out)
+    assert rc == 0 and d["totals"] == {"areas": 2, "rejected": 1, "skipped": 1}
+    assert d["skipped"] == [{"item": "how many rows?",
+                             "reason": "already rejected in area 'ops'; nothing changed"}]

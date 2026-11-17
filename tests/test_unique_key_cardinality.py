@@ -238,6 +238,8 @@ def test_a_declared_but_unenforced_unique_key_is_kept_only_when_the_data_bears_i
         unique={"users": [["email"], ["handle"]]})
 
     def runner(sql: str) -> list[dict]:
+        if "AS estimated_rows" in sql:   # Redshift keeps no estimate here, so the table is counted
+            return [{"estimated_rows": "10"}]
         if "COUNT(DISTINCT" in sql:
             distinct = "10" if '"email"' in sql else "7"
             return [{"total": "10", "distinct_count": distinct, "null_count": "0"}]
@@ -513,6 +515,8 @@ def test_a_refresh_spends_one_budget_on_both_passes(db, tmp_path, monkeypatch):
         made.append(real(*a, **kw))
         return made[-1]
     monkeypatch.setattr(I, "_ProbeBudget", tracking)
+    # A join checked on the whole key settles uniqueness with no probe (#448); make both passes probe.
+    monkeypatch.setattr(I, "_unique_from_check", lambda r, checked: False)
     _build(db, art, append=True, dry_run=True)
     assert len(made) == 1 and made[0].left < I._UNIQUE_PROBE_CAP
 

@@ -42,9 +42,7 @@
                             {"column": null,
                              "metric": {"name":"revenue","area":"sales","definition_prose":"...",
                                         "expression":"SUM(amount)","confidence":"...",
-                                        "review_state":"approved","origin":"model",
-                                        "signed_off_by":"you@example.com","signed_off_role":"cfo",
-                                        "signed_off_at":"2026-03-15T10:00:00Z"}}],
+                                        "review_state":"approved","origin":"model"}}],
                   "undetermined": "..."},
 
       // ONE ENTRY PER REFERENCE, not per table: a table read twice appears twice, which is what
@@ -88,7 +86,6 @@
                            "name":"orders_to_customers","from_to":"orders → customers",
                            "cardinality":"many_to_one","confidence":"inferred",
                            "review_state":"unreviewed","origin":"introspect_heuristic",
-                           "signed_off_by":null,"signed_off_role":null,"signed_off_at":null,
                            "cross_schema":false,"on":"orders.customer_id = customers.id"}],
                 "undetermined": "..."},
 
@@ -694,53 +691,16 @@
       const rs = (m && m.review_state || 'unreviewed').toLowerCase();
       return rs !== 'approved' && rs !== 'rejected';
     }
-    // Display a sign-off role nicely: known roles use their canonical label, acronyms
-    // upper-case (cto → CTO), free-text title-cases (data engineer → Data Engineer).
-    function prettifyRole(role) {
-      if (!role) return '';
-      const key = String(role).trim().toLowerCase();
-      const KNOWN = { cfo: 'CFO', cto: 'CTO', ceo: 'CEO', coo: 'COO', cio: 'CIO', cdo: 'CDO',
-                      data_lead: 'Data Lead', engineer: 'Engineer', analyst: 'Analyst' };
-      if (KNOWN[key]) return KNOWN[key];
-      const ACR = { cto: 'CTO', ceo: 'CEO', cfo: 'CFO', coo: 'COO', cio: 'CIO', cdo: 'CDO',
-                    vp: 'VP', pm: 'PM', bi: 'BI', hr: 'HR', it: 'IT' };
-      return key.replace(/_/g, ' ').split(/\s+/).filter(Boolean)
-        .map(w => ACR[w] || (w.charAt(0).toUpperCase() + w.slice(1))).join(' ');
-    }
     // Build a readable approval phrase like:
-    //   "auto-approved (FK declared in DB)"
-    //   "approved by you@example.com (CFO), Mar 15"
+    //   "approved"
     //   "unreviewed (confidence inferred)"
+    // Only WHETHER it is approved: the receipt never says who approved it — that stays in the
+    // model, for the people who own it.
     // Shared by the trust banner at the top and the provenance panel at the bottom, so one
     // relationship never gets described two ways in one report.
     function approvalPhrase(entry) {
       const state = (entry.review_state || 'unreviewed').toLowerCase();
-      if (state === 'approved') {
-        // System-approved (auto) vs human-approved.
-        if (entry.signed_off_by === 'agami_introspect_v1' || entry.signed_off_role === 'system') {
-          const reasons = {
-            fk:                    'FK declared in DB',
-            column_comment:        'DBA-authored column comment',
-            introspect_heuristic:  'unique-index + name match',
-          };
-          const why = reasons[entry.origin] || 'introspect signal';
-          return 'auto-approved (' + why + ')';
-        }
-        let txt = 'approved';
-        if (entry.signed_off_by) {
-          txt += ' by ' + entry.signed_off_by;
-          if (entry.signed_off_role && entry.signed_off_role !== 'system') {
-            txt += ' (' + prettifyRole(entry.signed_off_role) + ')';
-          }
-        }
-        if (entry.signed_off_at) {
-          const d = new Date(entry.signed_off_at);
-          if (!isNaN(d.getTime())) {
-            txt += ', ' + d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-          }
-        }
-        return txt;
-      }
+      if (state === 'approved') return 'approved';
       if (state === 'rejected') return 'rejected';
       // Stale: approved once, then changed (an edit, or the database moved under it) — not signed off.
       if (state === 'stale')    return 'stale (changed since it was approved — not signed off until re-approved)';
@@ -1489,7 +1449,8 @@
           if (t.rows !== undefined && t.rows !== null) {
             // estimated_row_count is an introspection-time ESTIMATE — mark it (≈) and, when
             // we know when the count was last checked (`rows_as_of`), say so.
-            let txt = ' — ≈' + Number(t.rows).toLocaleString() + ' rows';
+            // `rows_text` says "at least" for a count that reached the cap, whose stored number is cap + 1.
+            let txt = t.rows_text ? ' — ' + t.rows_text : ' — ≈' + Number(t.rows).toLocaleString() + ' rows';
             const ao = t.rows_as_of ? String(t.rows_as_of).trim() : '';
             if (ao) txt += ' (estimated as of ' + maybePrettifyDate(ao) + ')';
             li.appendChild(document.createTextNode(txt));
@@ -1656,10 +1617,86 @@
             if (m.definition_prose) {
               li.appendChild(document.createTextNode(' — ' + m.definition_prose));
             }
+            // The rows this number was counted over beyond the metric's own definition (ACE-177):
+            // without them a count over one slice reads as the whole metric.
+            if ((m.restrictions || []).length) {
+              li.appendChild(document.createTextNode(', counted only where '));
+              li.appendChild(el('code', { text: m.restrictions.join(' and ') }));
+            }
+            if ((m.result_filters || []).length) {
+              li.appendChild(document.createTextNode(', then kept only results where '));
+              li.appendChild(el('code', { text: m.result_filters.join(' and ') }));
+            }
+            // Joins its rows went through that the model does not declare (ACE-178).
+            if ((m.joins_not_declared || []).length) {
+              li.appendChild(document.createTextNode(', counted through a join the semantic model does not declare: '));
+              li.appendChild(el('code', { text: m.joins_not_declared.join(', ') }));
+            }
             li.appendChild(el('br'));
             li.appendChild(el('span', { class: 'receipt-meta', text: approvalPhrase(m) }));
             ul.appendChild(li);
           });
+          rb.appendChild(ul);
+        }
+        // A returned number that computes a defined metric without that metric's own condition
+        // (ACE-177): said beside the definitions, so it never reads as the metric.
+        const missing = outputColumns().filter(i => (i.missing_conditions || []).length);
+        if (missing.length) {
+          const ul = el('ul');
+          missing.forEach(i => i.missing_conditions.forEach(mc => {
+            const li = el('li');
+            li.appendChild(el('code', { text: i.column }));
+            li.appendChild(document.createTextNode(' is not '));
+            li.appendChild(el('code', { text: mc.metric }));
+            li.appendChild(document.createTextNode(': it leaves out '));
+            li.appendChild(el('code', { text: (mc.conditions || []).join(' and ') }));
+            ul.appendChild(li);
+          }));
+          rb.appendChild(el('h5', { text: 'Not a defined metric' }));
+          rb.appendChild(ul);
+        }
+        // A number whose expression is a defined metric's, over tables it was not counted over
+        // (ACE-178, #630): said beside the definitions, so it never reads as that metric.
+        const elsewhere = outputColumns().filter(i => (i.missing_tables || []).length);
+        if (elsewhere.length) {
+          const ul = el('ul');
+          elsewhere.forEach(i => i.missing_tables.forEach(mt => {
+            const li = el('li');
+            li.appendChild(el('code', { text: i.column }));
+            li.appendChild(document.createTextNode(' is not counted over '));
+            li.appendChild(el('code', { text: (mt.tables || []).join(', ') }));
+            li.appendChild(document.createTextNode(', which '));
+            li.appendChild(el('code', { text: mt.metric }));
+            li.appendChild(document.createTextNode(' is defined on'));
+            ul.appendChild(li);
+          }));
+          rb.appendChild(el('h5', { text: 'Defined on tables it does not count' }));
+          rb.appendChild(ul);
+        }
+        // A number built on a defined metric (ACE-178): an average of a per-day total is not the
+        // total, and it is said as what it is built from.
+        const built = outputColumns().filter(i => i.built_from && i.status !== 'matched');
+        if (built.length) {
+          const ul = el('ul');
+          built.forEach(i => {
+            const b = i.built_from;
+            const li = el('li');
+            li.appendChild(el('code', { text: i.column }));
+            li.appendChild(document.createTextNode(' is built from '));
+            li.appendChild(el('code', { text: b.metric }));
+            li.appendChild(document.createTextNode(': the ' + String(b.aggregate || '').toLowerCase() + ' of it per '));
+            li.appendChild(el('code', { text: (b.by || []).join(', ') }));
+            if ((b.restrictions || []).length) {
+              li.appendChild(document.createTextNode(', its rows counted only where '));
+              li.appendChild(el('code', { text: b.restrictions.join(' and ') }));
+            }
+            if ((b.joins_not_declared || []).length) {
+              li.appendChild(document.createTextNode(', through joins the semantic model does not declare: '));
+              li.appendChild(el('code', { text: b.joins_not_declared.join(', ') }));
+            }
+            ul.appendChild(li);
+          });
+          rb.appendChild(el('h5', { text: 'Built from a defined metric' }));
           rb.appendChild(ul);
         }
         if (columns.length) {

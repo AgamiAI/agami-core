@@ -385,3 +385,20 @@ def test_used_schemas_counts_each_dotted_name_once():
         {"schema": "billing", "mentions": 1},
         {"schema": "sales", "mentions": 1},
     ]
+
+
+def test_two_flagged_tables_never_copy_each_other(tmp_path):
+    # `orders` lives only in two backup-like schemas: each once named the other its original, both
+    # started unticked, and a default save left `orders` out entirely.
+    code, out = _run(tmp_path, _inventory({"backup": ["orders"], "staging": ["orders"]}))
+    assert {n["table"]: n["copy_of"] for n in out["likely_noise"]} == {
+        "backup.orders": None,
+        "staging.orders": None,
+    }
+    assert out["noise_all_copies"] is False
+    rows = {r["name"]: r["copy_of"] for r in inventory_summary.picker_rows(
+        _inventory({"backup": ["orders"], "staging": ["orders"]}))}
+    assert rows == {"backup.orders": None, "staging.orders": None}
+    # A plain original is still found from a backup schema.
+    code, out = _run(tmp_path, _inventory({"backup": ["orders"], "sales": ["orders"]}))
+    assert {n["table"]: n["copy_of"] for n in out["likely_noise"]} == {"backup.orders": "sales.orders"}

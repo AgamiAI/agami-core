@@ -333,6 +333,19 @@ def _area_members(spec: dict) -> dict[str, set[str]]:
     return out
 
 
+def _keyed_cardinality(j: dict, tables: dict, on: Optional[str]) -> str:
+    """A join the spec gives no cardinality: decided from each end's keys, the way the engine labels
+    the joins it builds. Defaulting to many_to_one called a record → its parent-class record
+    (`sys_id → sys_id`, each end its own table's key) many-to-one (#678). An `on` join keeps the
+    default, since its condition is not a plain pair of columns."""
+    if on:
+        return "many_to_one"
+    from .build import infer_cardinality
+
+    ft, tt = tables[_low(j.get("from_table"))], tables[_low(j.get("to_table"))]
+    return infer_cardinality(ft, tt, [_low(j.get("from_column"))], [_low(j.get("to_column"))])
+
+
 def _relationship(
     j: dict, tables: dict, signer: Optional[str], role: Optional[str], now: str
 ) -> Relationship:
@@ -355,7 +368,7 @@ def _relationship(
         to_schema=tables[tt].schema_name,
         on=on,
         join_type=(str(j.get("join_type") or "LEFT").strip().upper()),
-        relationship=_low(j.get("cardinality")) or "many_to_one",
+        relationship=_low(j.get("cardinality")) or _keyed_cardinality(j, tables, on),
         description=desc,
         confidence="confirmed" if approved else "proposed",
         review_state="approved" if approved else "unreviewed",
@@ -572,6 +585,7 @@ def apply_spec(
     org.cross_subject_area_relationships = cross
     if spec.get("fiscal_year_start_month"):
         org.fiscal_year_start_month = int(spec["fiscal_year_start_month"])
+        org.fiscal_year_start_confirmed = True  # a spec a person filled in is their answer
 
     v = validator.validate(org)
     res.errors = v.errors

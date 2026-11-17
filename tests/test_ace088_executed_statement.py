@@ -384,7 +384,7 @@ def test_the_two_paths_reach_the_same_outcome_for_the_same_statement(shop, monke
 
     assert in_process["status"] == forked["status"] == "ok", (in_process, forked)
     for receipt in receipts:
-        assert set(receipt) == {"model_version", *execute_sql.Receipt.SECTIONS}
+        assert set(receipt) == {"model_version", "agami_core_version", *execute_sql.Receipt.SECTIONS}
     for receipt in receipts:
         assert [item["ref"] for item in receipt["tables"]["items"]] == ["orders", DROPPED_TABLE]
     assert asdict(execute_sql.undetermined_receipt("x")) != receipts[0]

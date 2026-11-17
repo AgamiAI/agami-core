@@ -1,0 +1,419 @@
+"""Five receipt fixes found by an automated question test, every one generic and failing closed.
+
+1. A positional `GROUP BY 1` behind a built-on number is named by the expression it points at,
+   never reported as the literal `1`; when the position cannot be read, the grouping is unknown.
+2. A window calculation over an aggregate (a running total, a share of a total) is `undetermined`
+   when its inner aggregate would match a metric — and stays `unmatched` when that inner aggregate
+   is itself not the metric: the window does not excuse a wrong base.
+3. A join through one of several declared relationships between the same two tables names the
+   column(s) it went through.
+4. A row count over a table whose rows repeat per record says so, when the agreed metric counts
+   each record once.
+5. `sm examples --metric` works without `--query`: it lists the examples tagged with that metric.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import shutil
+import sys
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("pydantic")
+pytest.importorskip("sqlglot")
+yaml = pytest.importorskip("yaml")
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PKG_SRC = REPO_ROOT / "packages" / "agami-core" / "src"
+if str(PKG_SRC) not in sys.path:
+    sys.path.insert(0, str(PKG_SRC))
+
+from semantic_model import build, cli, curate  # noqa: E402
+from semantic_model import loader as L  # noqa: E402
+from semantic_model import runtime as rt  # noqa: E402
+
+from test_ace178_metrics_traced_through_steps import (  # noqa: E402
+    ALL_METRICS,
+    _org,
+    _write_model,
+)
+from test_ace178_receipt_audit_fixes import _audit, _rel  # noqa: E402
+
+
+@pytest.fixture()
+def org(tmp_path):
+    return _org(tmp_path)
+
+
+def _one(org, sql: str, column: str) -> dict:
+    items = rt.assemble_receipt(org, sql)["columns"]["items"]
+    (item,) = [i for i in items if i["kind"] == "output" and i["column"] == column]
+    return item
+
+
+# --- 1. a positional GROUP BY behind a built-on number ------------------------------------------
+
+AVG_DAILY_BY_POSITION = (
+    "SELECT AVG(daily) AS avg_daily FROM (SELECT DATE_TRUNC('day', opened) AS d, "
+    "COUNT(DISTINCT number) AS daily FROM incidents GROUP BY 1) x"
+)
+
+
+def test_a_positional_group_by_is_named_by_the_expression_it_points_at(org):
+    item = _one(org, AVG_DAILY_BY_POSITION, "avg_daily")
+    built = item["built_from"]
+    assert (built["metric"], built["aggregate"]) == ("incident_count", "AVG")
+    assert built["by"] == ["DATE_TRUNC('DAY', opened)"]
+    assert "1" not in built["by"]
+
+
+def test_a_named_group_by_is_unchanged(org):
+    sql = AVG_DAILY_BY_POSITION.replace("GROUP BY 1", "GROUP BY DATE_TRUNC('day', opened)")
+    assert _one(org, sql, "avg_daily")["built_from"]["by"] == ["DATE_TRUNC('DAY', opened)"]
+
+
+@pytest.mark.parametrize(
+    "group",
+    ["GROUP BY 3", "GROUP BY 0", "GROUP BY opened, 7"],
+    ids=["past-the-end", "zero", "one-of-two"],
+)
+def test_a_position_that_points_at_nothing_leaves_the_grouping_unknown(org, group):
+    """Never the literal number, and never a guess: the whole grouping is unknown."""
+    sql = AVG_DAILY_BY_POSITION.replace("GROUP BY 1", group)
+    built = _one(org, sql, "avg_daily")["built_from"]
+    assert built is None or built["by"] is None
+
+
+def test_a_group_by_position_is_read_in_its_own_select_list():
+    """The inner query's position, not the outer one's: position 1 here is `d`, not `avg_daily`."""
+    select = rt.sqlglot.parse_one(AVG_DAILY_BY_POSITION, read="postgres")
+    inner = next(s for s in select.find_all(rt.exp.Select) if s is not select)
+    (by,) = rt._group_by_items(inner)
+    assert by.sql(dialect="postgres") == "DATE_TRUNC('DAY', opened)"
+    assert (
+        rt._group_by_items(
+            rt.sqlglot.parse_one("SELECT * FROM incidents GROUP BY 1", read="postgres")
+        )
+        is None
+    )
+
+
+# --- 2. a window calculation over an aggregate --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sql, metric",
+    [
+        (
+            "SELECT month, SUM(COUNT(DISTINCT number)) OVER (ORDER BY month) AS v "
+            "FROM incidents GROUP BY month",
+            "incident_count",
+        ),
+        (
+            "SELECT status, SUM(SUM(total_amount)) OVER (ORDER BY status) AS v "
+            "FROM orders GROUP BY status",
+            "total_sales",
+        ),
+        (
+            "SELECT status, SUM(total_amount) * 1.0 / SUM(SUM(total_amount)) OVER () AS v "
+            "FROM orders GROUP BY status",
+            "total_sales",
+        ),
+        ("SELECT opened, SUM(total_amount) OVER (ORDER BY opened) AS v FROM orders", "total_sales"),
+        (
+            "SELECT month, LAG(COUNT(DISTINCT number)) OVER (ORDER BY month) AS v "
+            "FROM incidents GROUP BY month",
+            "incident_count",
+        ),
+    ],
+    ids=["running-count", "running-sum", "share", "running-over-rows", "lag"],
+)
+def test_a_window_over_a_matching_aggregate_is_undetermined_and_says_so(org, sql, metric):
+    item = _one(org, sql, "v")
+    assert (item["status"], item["name"]) == (rt.UNDETERMINED, None)
+    assert "window calculation" in item["reason"] and metric in item["reason"]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # A count of rows where the metric counts distinct records.
+        "SELECT month, SUM(COUNT(*)) OVER (ORDER BY month) AS v FROM incidents GROUP BY month",
+        # A metric's expression over a table the metric is not defined on.
+        "SELECT status, SUM(COUNT(DISTINCT number)) OVER (ORDER BY status) AS v "
+        "FROM orders GROUP BY status",
+        # A different aggregate.
+        "SELECT status, SUM(MAX(total_amount)) OVER (ORDER BY status) AS v "
+        "FROM orders GROUP BY status",
+    ],
+    ids=["count-star-vs-distinct", "wrong-table", "other-aggregate"],
+)
+def test_a_window_over_a_wrong_base_is_still_not_the_metric(org, sql):
+    """The window does not excuse its base: when the inner aggregate is not the metric, the item
+    says so exactly as it would for the inner aggregate alone."""
+    item = _one(org, sql, "v")
+    assert item["status"] in (rt.UNMATCHED, rt.COMPUTED_DIFFERENTLY)
+    assert item["name"] is None
+    assert "window calculation" not in (item["reason"] or "")
+
+
+def test_a_window_over_a_wrong_base_reports_what_the_inner_aggregate_lacks(org):
+    """`SUM(total_amount)` over `payments` only: the metric's table is never read, and the item
+    names it, as the plain aggregate would."""
+    window = _one(
+        org,
+        "SELECT SUM(SUM(amount)) OVER () AS v FROM payments",
+        "v",
+    )
+    plain = _one(org, "SELECT SUM(amount) AS v FROM payments", "v")
+    assert plain["status"] == rt.MATCHED  # payment_total: the control
+    assert window["status"] == rt.UNDETERMINED and "payment_total" in window["reason"]
+    wrong = _one(org, "SELECT SUM(SUM(total_amount)) OVER () AS v FROM payments", "v")
+    wrong_plain = _one(org, "SELECT SUM(total_amount) AS v FROM payments", "v")
+    assert wrong["status"] == wrong_plain["status"] != rt.UNDETERMINED
+    assert wrong["missing_tables"] == wrong_plain["missing_tables"]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT status, COUNT(*) AS v FROM orders o JOIN payments p ON p.order_id = o.id "
+        "GROUP BY status",
+        "SELECT COUNT(DISTINCT number) AS v FROM orders",
+        "SELECT MAX(total_amount) AS v FROM orders",
+        "SELECT COUNT(*) AS v FROM incidents",
+    ],
+    ids=["through-a-join", "wrong-table", "other-aggregate", "count-star"],
+)
+def test_a_plain_aggregate_that_is_not_the_metric_is_still_not_undetermined(org, sql):
+    """Only window outputs move: a plain aggregate's error is still reported as one."""
+    item = _one(org, sql, "v")
+    assert item["status"] != rt.UNDETERMINED or "window" not in (item["reason"] or "")
+    assert item["status"] != rt.MATCHED or item["name"] == "order_count"
+
+
+def test_a_plain_count_star_on_the_wrong_table_stays_unmatched(org):
+    assert _one(org, "SELECT COUNT(*) AS v FROM incidents", "v")["status"] == rt.UNMATCHED
+
+
+# --- 3. which of several links a join went through ----------------------------------------------
+
+
+def _join(org, sql: str) -> dict:
+    (item,) = rt.assemble_receipt(org, sql)["joins"]["items"]
+    return item
+
+
+def test_a_join_through_one_of_several_links_names_its_column(tmp_path):
+    org = _audit(tmp_path)
+    item = _join(org, "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.managed_by_id")
+    assert item["status"] == rt.DECLARED
+    assert item["via"] == ["managed_by_id"]
+    assert item["summary"] == "assets linked to users through managed_by_id"
+
+
+def test_a_join_with_one_declared_link_names_none(tmp_path):
+    org = _audit(tmp_path)
+    item = _join(
+        org,
+        "SELECT SUM(e.amount) AS n FROM expense_lines e "
+        "JOIN award_departments d ON d.award_id = e.award_id",
+    )
+    assert item["status"] == rt.DECLARED
+    assert (item["via"], item["summary"]) == (None, None)
+
+
+def test_a_join_link_written_as_on_names_its_columns(tmp_path):
+    rel = _rel("assets", "owned_by_id", "users", "id")
+    del rel["from_column"], rel["to_column"]
+    rel["on"] = "assets.owned_by_id = users.id"
+    org = _audit(tmp_path, relationships=[_rel("assets", "assigned_to_id", "users", "id"), rel])
+    item = _join(org, "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.owned_by_id")
+    assert item["via"] == ["owned_by_id"]
+    assert "through owned_by_id" in item["summary"]
+
+
+def test_a_link_declared_the_other_way_round_is_still_told_apart(tmp_path):
+    org = _audit(
+        tmp_path,
+        relationships=[
+            _rel("assets", "assigned_to_id", "users", "id"),
+            _rel("users", "id", "assets", "owned_by_id"),
+        ],
+    )
+    item = _join(org, "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.owned_by_id")
+    assert item["via"] == ["owned_by_id"]
+
+
+def test_two_links_on_the_same_columns_name_none(tmp_path):
+    """Nothing tells them apart by their columns, so nothing is claimed."""
+    twin = _rel("assets", "assigned_to_id", "users", "id")
+    twin["relationship"] = "one_to_one"
+    org = _audit(tmp_path, relationships=[_rel("assets", "assigned_to_id", "users", "id"), twin])
+    item = _join(org, "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id")
+    assert (item["via"], item["summary"]) == (None, None)
+
+
+def test_an_undeclared_join_names_no_link(tmp_path):
+    org = _audit(tmp_path)
+    item = _join(org, "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.status")
+    assert item["status"] != rt.DECLARED
+    assert (item["via"], item["summary"]) == (None, None)
+
+
+# --- 4. a row count on a table whose rows repeat per record -------------------------------------
+
+
+def _repeating(tmp_path, caveat: "str | None"):
+    root = tmp_path / "rep"
+    root.mkdir()
+    _write_model(root, ALL_METRICS)
+    path = root / "subject_areas" / "s" / "tables" / "incidents.yaml"
+    doc = yaml.safe_load(path.read_text())
+    if caveat:
+        doc["caveats"] = [caveat]
+    path.write_text(yaml.safe_dump(doc))
+    return L.load_datasource(root)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT COUNT(*) AS v FROM incidents",
+        "SELECT month, COUNT(number) AS v FROM incidents GROUP BY month",
+        "SELECT COUNT(state) AS v FROM incidents",
+    ],
+    ids=["count-star", "count-key", "count-other-column"],
+)
+def test_a_row_count_on_a_repeating_table_says_why_it_is_not_the_metric(tmp_path, sql):
+    org = _repeating(tmp_path, build.repeat_caveat("number", 4.0))
+    item = _one(org, sql, "v")
+    assert item["status"] in (rt.UNMATCHED, rt.COMPUTED_DIFFERENTLY)
+    assert item["reason"] == (
+        "counts rows; each record appears several times on this table; "
+        "the agreed metric counts each record once"
+    )
+
+
+def test_without_the_recorded_repeat_the_reason_is_unchanged(tmp_path):
+    org = _repeating(tmp_path, None)
+    item = _one(org, "SELECT COUNT(*) AS v FROM incidents", "v")
+    assert (item["status"], item["reason"]) == (rt.UNMATCHED, None)
+
+
+def test_a_repeat_on_another_key_says_nothing(tmp_path):
+    """The repeat is per `month`, the metric counts distinct `number`: not the fact to state."""
+    org = _repeating(tmp_path, build.repeat_caveat("month", 4.0))
+    assert _one(org, "SELECT COUNT(*) AS v FROM incidents", "v")["reason"] is None
+
+
+def test_a_distinct_count_on_a_repeating_table_still_matches(tmp_path):
+    org = _repeating(tmp_path, build.repeat_caveat("number", 4.0))
+    item = _one(org, "SELECT COUNT(DISTINCT number) AS v FROM incidents", "v")
+    assert (item["status"], item["name"], item["reason"]) == (rt.MATCHED, "incident_count", None)
+
+
+# --- 5. `sm examples --metric` -----------------------------------------------------------------
+
+SAMPLE = REPO_ROOT / "plugins" / "agami" / "samples" / "store" / "model"
+AREA = "agami-example"
+TAGGED = {
+    "question": "Weekly takings",
+    "area": AREA,
+    "sql": "SELECT SUM(total_amount) AS revenue FROM orders",
+    "tables": ["orders"],
+    "metrics": ["revenue"],
+}
+
+
+def _cli(argv: list[str]) -> "tuple[int, dict | None]":
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = cli.main(argv)
+    return rc, (json.loads(buf.getvalue()) if buf.getvalue().strip() else None)
+
+
+@pytest.fixture()
+def sample(tmp_path: Path) -> Path:
+    dst = tmp_path / "art" / "demo"
+    shutil.copytree(SAMPLE, dst)
+    assert curate.add_examples(dst, AREA, [dict(TAGGED)]).applied
+    return dst
+
+
+def test_examples_by_metric_alone_lists_the_tagged_examples(sample):
+    rc, out = _cli(["examples", str(sample), "--area", AREA, "--metric", "revenue"])
+    assert rc == 0
+    questions = [m["example"]["question"] for m in out["matches"]]
+    assert TAGGED["question"] in questions
+    assert all(
+        "revenue"
+        in [t.lower() for t in m["example"].get("metrics") or [m["example"].get("metric") or ""]]
+        for m in out["matches"]
+    )
+
+
+def test_examples_needs_a_query_or_a_metric(sample, capsys):
+    rc, out = _cli(["examples", str(sample), "--area", AREA])
+    assert rc != 0 and out is None
+    assert "--query or --metric" in capsys.readouterr().err
+
+
+def test_the_query_skill_names_a_flag_the_cli_takes():
+    """Every `examples` call a skill writes uses flags the parser accepts."""
+    skills = REPO_ROOT / "plugins" / "agami" / "skills"
+    text = "\n".join(p.read_text() for p in skills.rglob("SKILL.md"))
+    assert "--metric" in text
+    parser_help = io.StringIO()
+    with contextlib.redirect_stdout(parser_help), pytest.raises(SystemExit):
+        cli.main(["examples", "--help"])
+    for flag in ("--metric", "--query", "--area", "--top-k"):
+        assert flag in parser_help.getvalue()
+
+
+# --- the helpers' fail-closed edges ------------------------------------------------------------
+
+
+def _expr(sql: str):
+    return rt.sqlglot.parse_one(sql, read="postgres").expressions[0]
+
+
+def test_window_parts_reads_only_windows_over_aggregates():
+    assert rt._window_parts(None) is None
+    assert rt._window_parts(_expr("SELECT SUM(x) FROM t")) is None
+    assert rt._window_parts(_expr("SELECT ROW_NUMBER() OVER (ORDER BY x) FROM t")) is None
+    # Only the outermost aggregate of a nest is a part.
+    (part,) = rt._window_parts(_expr("SELECT SUM(MAX(COUNT(x))) OVER () FROM t"))
+    assert part.sql() == "MAX(COUNT(x))"
+
+
+def test_group_by_items_edges():
+    def sel(sql: str):
+        return rt.sqlglot.parse_one(sql, read="postgres")
+
+    assert rt._group_by_items(sel("SELECT a FROM t")) == ()
+    assert rt._group_by_items(sel("SELECT a, b, SUM(c) FROM t GROUP BY ROLLUP (a, b)")) is None
+    all_ = rt.sqlglot.parse_one("SELECT a, SUM(c) FROM t GROUP BY ALL", read="duckdb")
+    assert rt._group_by_items(all_) is None
+
+
+def test_distinct_count_of_reads_one_column_only():
+    assert rt._distinct_count_of(_expr("SELECT COUNT(DISTINCT a, b) FROM t")) is None
+    assert rt._distinct_count_of(_expr("SELECT SUM(a) FROM t")) is None
+    assert rt._distinct_count_of(_expr("SELECT COUNT(DISTINCT A) FROM t")) == "a"
+
+
+def test_a_link_beside_one_whose_columns_cannot_be_read_names_none(tmp_path):
+    odd = _rel("assets", "owned_by_id", "users", "id")
+    del odd["from_column"], odd["to_column"]
+    odd["on"] = "assets.owned_by_id = users.id AND users.active"
+    org = _audit(tmp_path, relationships=[_rel("assets", "assigned_to_id", "users", "id"), odd])
+    item = _join(org, "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id")
+    assert item["status"] == rt.DECLARED
+    assert (item["via"], item["summary"]) == (None, None)
+    rels = [r for r in rt._cardinality_index(org) if r.on]
+    assert rt._link_columns(rels[0], [rels[0], *rt._cardinality_index(org)], None) is None

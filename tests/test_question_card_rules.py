@@ -138,12 +138,27 @@ def test_the_identifier_guard_catches_each_form(line: str) -> None:
     assert _IDENTIFIER_IN_QUESTION.search(line)
 
 
-def test_the_full_view_is_a_card_option_in_rule_6() -> None:
+def test_rule_6_pages_are_card_options_and_a_deciding_page_saves_itself() -> None:
     doc = (PLUGIN / "shared" / "question-cards.md").read_text(encoding="utf-8")
     six = doc[doc.index("## 6."):doc.index("## 7.")]
-    assert "every\nreview or sign-off card that has a page behind it offers **Show the full view**" in six
+    # #651: a page that takes decisions saves them, offered on every question that has one
+    assert "Every review or sign-off question that has such a page behind it offers\n  **Review on a page**" in six
+    assert "on every\n  question of the card, not only the first" in six
+    assert "**Show the full view** option, rendered `--read-only`" in six
+    six_a = six[six.index("### 6a."):]
+    for step in ("SSH_CONNECTION", "--save-to-helper", "--decisions", "Monitor tool", "**I've saved it** (or the skill's wording for its page; the saved page tells the person\n   to press it) / **Back to the cards**",
+                 '{"status": "saved", "decisions": "<file>"}', '{"status": "expired"}', "never by hand-editing"):
+        assert step in six_a, step
     three_a = doc[doc.index("## 3a."):doc.index("## 3b.")]
     assert "an example question's statement too" in three_a
+
+
+def test_rule_4_a_bulk_sign_off_never_signs_an_unseen_item() -> None:
+    """Issue 13 of the question-cards test log: "Approve all remaining" signed 14 definitions unseen."""
+    text = (PLUGIN / "shared" / "question-cards.md").read_text(encoding="utf-8")
+    rule_4 = text[text.index("## 4. "):text.index("## 5. ")]
+    assert "**A bulk sign-off never signs an item the person has not been shown.**" in rule_4
+    assert '"bulk": true' in rule_4 and "curation_log.jsonl" in rule_4
 
 
 def test_rule_4_group_options_show_their_items() -> None:
@@ -152,3 +167,18 @@ def test_rule_4_group_options_show_their_items() -> None:
     rule_4 = text[text.index("## 4. "):text.index("## 5. ")]
     assert "A group option's `preview` lists every item the option" in rule_4
     assert "chat table above" in rule_4
+
+
+def test_rule_6a_back_to_the_cards_reads_the_helper_before_stopping_it() -> None:
+    """#651 review: a page saved and then "Back to the cards" was stopped and silently discarded, and
+    an open card is not interrupted by the helper's exit, so nothing may rely on that."""
+    doc = (PLUGIN / "shared" / "question-cards.md").read_text(encoding="utf-8")
+    six_a = doc[doc.index("### 6a."):doc.index("## 7.")]
+    back = six_a[six_a.index("**Back to the cards** → read the helper's output **first**"):]
+    assert back.index("A `saved`") < back.index("TaskStop")
+    assert "**Apply it**" in back and "**Discard it**" in back
+    assert "Assume an open card is not interrupted when the helper\n   exits" in six_a
+    assert "A cloud or web session can be remote without setting it" in six_a
+    for skill in sorted(SKILLS_DIR.glob("*/SKILL.md")):
+        text = skill.read_text(encoding="utf-8")
+        assert "brings you back on its own" not in text, skill.parent.name

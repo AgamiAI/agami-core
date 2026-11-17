@@ -998,6 +998,9 @@ def model_overview_html(
     tree = _model_tree_html(org, datasource, datasources)
     table_total = sum(len(a.tables_defined) for a in org.subject_areas)
     ver = ui.esc(version[:8]) if version else f"v{org.version}"
+    # Unset until someone says when the fiscal year starts (ACE-182); never shown as a month.
+    month = org.fiscal_year_start_month
+    fiscal = f"Starts month {month}" if month else "Not set yet"
     stats = (
         f'<div class="stat"><div class="k">Subject areas</div>'
         f'<div class="v">{len(org.subject_areas)}</div></div>'
@@ -1005,7 +1008,7 @@ def model_overview_html(
         f'<div class="stat"><div class="k">Version</div>'
         f'<div class="v mono" style="font-size:14px">{ver}</div></div>'
         f'<div class="stat"><div class="k">Fiscal year</div>'
-        f'<div class="v" style="font-size:14px">Starts month {org.fiscal_year_start_month}</div></div>'
+        f'<div class="v" style="font-size:14px">{fiscal}</div></div>'
     )
     areas = "".join(
         f'<a class="trow" href="{_model_url(datasource, area=a.name)}">'
@@ -1074,7 +1077,7 @@ def model_area_html(
         f'<span class="nm">{ui.esc(t.name)}</span>'
         f'<span class="d">{ui.esc(t.description or "")}</span>'
         f'<span class="meta">{len(t.columns)} cols · '
-        f"{ui.esc(_human_count(_est_rows_obj(t)))}</span>{_conf_badge(t.confidence)}"
+        f"{ui.esc(_table_size(t))}</span>{_conf_badge(t.confidence)}"
         '<span class="chev">›</span></a>'
         for t in area.tables_defined
     )
@@ -1106,6 +1109,20 @@ def model_area_html(
 def _est_rows_obj(table: Any) -> int | None:
     ph = getattr(table, "performance_hints", None)
     return getattr(ph, "estimated_row_count", None) if ph is not None else None
+
+
+def _table_size(table: Any) -> str:
+    """The table's size for the page: `≈ 6.6k`, `≥ 5M` when the build counted it only up to its cap (a
+    view keeps no estimate, `ROW_COUNT_CAP`), or `size unknown` when it has no size (never sized, or
+    its count failed)."""
+    from semantic_model.models import ROW_COUNT_CAP
+
+    n = _est_rows_obj(table)
+    if n is None:
+        return "size unknown"
+    if n == ROW_COUNT_CAP + 1:
+        return "≥ " + _human_count(ROW_COUNT_CAP).removeprefix("≈ ")
+    return _human_count(n)
 
 
 # --- the table (dataset) page ------------------------------------------------
@@ -1244,7 +1261,7 @@ def model_table_html(
     schema = (
         f'<span class="schema">{ui.esc(table.schema_name)}.</span>' if table.schema_name else ""
     )
-    rows = _human_count(_est_rows_obj(table))
+    rows = _table_size(table)
     grain = ", ".join(table.grain) if table.grain else ""
     aichip = (
         ' <span class="descsrc">AI-described · unvalidated</span>'
@@ -1262,7 +1279,7 @@ def model_table_html(
         f"<span>{s}</span>"
         for s in (
             f"<b>{len(table.columns)}</b> columns",
-            f"<b>{ui.esc(rows)}</b> rows" if rows else "",
+            f"<b>{ui.esc(rows)}</b> rows" if _est_rows_obj(table) is not None else ui.esc(rows),
             f'grain · <b class="mono">{ui.esc(grain)}</b>' if grain else "",
             ui.esc(table.storage_connection or ""),
         )

@@ -35,7 +35,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from . import build_settings as BS
+from . import failure_kinds as FK
+from . import introspect as INTRO
 from . import loader as L
+from . import metadata_sources as MS
+from . import platform_joins as PJ
 from . import runtime as RT
 from . import validator as V
 from .plain_names import column_label, distinct_labels
@@ -214,6 +219,9 @@ def cmd_set_org(args) -> int:
 
 
 def cmd_examples(args) -> int:
+    if not args.query and not args.metric:
+        print("examples: give --query or --metric (or both)", file=sys.stderr)
+        return 2
     examples = L.list_prompt_examples(args.root, args.area)
     org = None
     if args.metric:
@@ -221,8 +229,14 @@ def cmd_examples(args) -> int:
             org = L.load_datasource(args.root)
         except Exception:  # noqa: BLE001 - an unreadable model only costs the selector resolution
             org = None
-    matches = RT.get_prompt_examples(args.query, examples, top_k=args.top_k, metrics=args.metric,
-                                     org=org, area=args.area)
+    if not args.query:
+        # By metric alone: the examples tagged with any of them, the most tags first. With no
+        # question there is nothing to rank the rest by, so they are left out.
+        wanted = RT.metric_tags([str(m) for m in args.metric], org)
+        examples = [ex for ex in examples
+                    if RT.example_metric_hits(ex, wanted, ex.get("area") or args.area)]
+    matches = RT.get_prompt_examples(args.query or "", examples, top_k=args.top_k,
+                                     metrics=args.metric, org=org, area=args.area)
     _print_json(
         {
             "high_confidence": RT.is_high_confidence(matches),
@@ -520,6 +534,40 @@ def cmd_coverage(args) -> int:
     return 0
 
 
+def cmd_profile(args) -> int:
+    """What the build read from the data (#448): the column profile and the join checks from
+    `<root>/.introspect/profile.json`, narrowed to `--table` names (bare or `schema.table`) and the
+    joins that touch them. Enrichment reads this instead of sampling rows itself."""
+    from .introspect import PROFILE_FILE
+    path = Path(args.root) / ".introspect" / PROFILE_FILE
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        _print_json({"error": f"no profile at {path}: run introspect first"})
+        return 1
+    # The file may predate a flag set since: cut it to what the model serves now before anyone reads it.
+    from . import profile as PF
+    from .introspect import _check_key, _never_read, served_join_keys
+    org = L.load_datasource(args.root, include_rejected=True)
+    model = [t for sa in org.subject_areas for t in sa.tables_defined]
+    doc["tables"] = PF.scrub(doc.get("tables", {}), model, lambda t, c: _never_read(c))
+    # A join's evidence only while the model serves that join, both its tables and its key columns;
+    # an entry without its key columns (an older file) can't be matched, so it is left out.
+    served = served_join_keys(org)
+    doc["joins"] = [j for j in doc.get("joins", []) if j.get("from_columns") and _check_key(
+        j.get("from_schema"), j["from_table"], j["from_columns"], j.get("to_schema"), j["to_table"],
+        j["to_columns"]) in served]
+    if args.table:
+        wanted = {t.lower() for t in args.table}
+        doc["tables"] = {k: v for k, v in doc.get("tables", {}).items()
+                         if k.lower() in wanted or k.lower().rsplit(".", 1)[-1] in wanted}
+        names = {k.lower().rsplit(".", 1)[-1] for k in doc["tables"]}
+        doc["joins"] = [j for j in doc.get("joins", [])
+                        if {j["from_table"].lower(), j["to_table"].lower()} & names]
+    _print_json(doc)
+    return 0
+
+
 def cmd_choice_coverage(args) -> int:
     """Coded columns whose `choice_field` skeleton still has blank labels. The enrichment
     runs this to confirm the value-enum decode ran — `ok: false` means coded columns are
@@ -539,10 +587,24 @@ def cmd_sensitive(args) -> int:
     from . import curate
     org = L.load_datasource(args.root, include_rejected=True)
     flagged = curate.sensitive_columns(org)
-    suspected = curate.suspected_sensitive_columns(org)
     # `count`/`columns` keep their meaning (flagged PII — the gate signal); `suspected` is the
     # second review tier (might-be-PII the strict flag missed, for the PII tab to confirm).
+    if BS.warehouse_enforces_personal_data(Path(args.root).parent):
+        # The warehouse controls it (#675): nothing to suspect. A flag still on a column was set before
+        # the setting, possibly by a person, so it is still counted.
+        _print_json({**flagged, "suspected": [], "suspected_count": 0,
+                     "personal_data": BS.PERSONAL_DATA_ENFORCED})
+        return 0
+    suspected = curate.suspected_sensitive_columns(org)
     _print_json({**flagged, "suspected": suspected["columns"], "suspected_count": suspected["count"]})
+    return 0
+
+
+def cmd_set_personal_data(args) -> int:
+    """Record who keeps people from seeing personal data (#675). Build-only: it lives in the local
+    config, so nothing deployed carries it and an older core never meets the key."""
+    BS.set_personal_data(args.artifacts_dir, args.setting)
+    _print_json({"personal_data": args.setting, "config": str(BS.config_path(args.artifacts_dir))})
     return 0
 
 
@@ -576,6 +638,15 @@ def cmd_set_description(args) -> int:
     model. Validated + committed."""
     from . import curate
     res = curate.set_datasource_description(args.root, args.description)
+    _print_json({"applied": res.applied, "validated": res.validated,
+                 "committed": res.committed, **_commit_note(res), "errors": res.errors})
+    return 0 if res.validated else 1
+
+
+def cmd_set_fiscal_year(args) -> int:
+    """Record the month the fiscal year starts in, as the person answered it (ACE-182)."""
+    from . import curate
+    res = curate.set_fiscal_year_start(args.root, args.month)
     _print_json({"applied": res.applied, "validated": res.validated,
                  "committed": res.committed, **_commit_note(res), "errors": res.errors})
     return 0 if res.validated else 1
@@ -654,11 +725,10 @@ def cmd_approve_queue(args) -> int:
     return 0 if res.validated else 1
 
 
-# Failure kinds (execute_sql's exit-code table) that say the database could not be reached as
-# configured: every metric would fail the same way, so none of them is the binding's fault.
-_CONNECTION_KINDS = frozenset({"auth", "dsn", "network", "driver_missing", "sign_in_required"})
-# Kinds that say the statement itself is wrong: the binding's fault, never a connection check.
-_STATEMENT_KINDS = frozenset({"syntax", "column_not_found", "table_not_found", "permission"})
+# A connection kind means every metric would fail the same way, so none is the binding's fault; a
+# statement kind is the binding's fault, never a connection check.
+_CONNECTION_KINDS = FK.CONNECTION_KINDS
+_STATEMENT_KINDS = FK.STATEMENT_KINDS
 
 
 def _connection_failed(runner, exc: Exception) -> bool:
@@ -685,6 +755,7 @@ def _metric_test_runs(root: str, profile: str, items: list) -> tuple[dict[str, d
     `WHERE 1 = 0` reads no rows and still makes the database resolve every column and operator.
     A metric over several tables needs their join to run, so it is reported `not_test_run`.
     """
+    from . import derived as DV
     from . import dialects as D
     from . import introspect as INTRO
     from .models import table_key
@@ -697,6 +768,8 @@ def _metric_test_runs(root: str, profile: str, items: list) -> tuple[dict[str, d
     # Keyed by (schema, name): two same-named tables in different schemas stay apart.
     defs = list({table_key(t.name, t.schema_name): t for sa in org.subject_areas for t in sa.tables_defined}.items())
     runner = INTRO.make_execute_sql_runner(profile, building_the_model=True)
+    batch = _metric_batch(items)
+    idx = {**DV.metric_index(org), **batch} if batch else {}
     out: dict[str, dict] = {}
     for it in items:
         if not isinstance(it, dict):
@@ -707,6 +780,17 @@ def _metric_test_runs(root: str, profile: str, items: list) -> tuple[dict[str, d
         if not binding:
             out[name] = {"not_test_run": f"no binding for {storage_type}"}
             continue
+        met = batch.get(name)
+        if met is not None and (DV.is_derived(met) or DV.is_second_order(met)):
+            # A `{base}` placeholder is model syntax, not SQL: sent as written, every database
+            # refuses it as a syntax error. Run the SQL the metric resolves to at query time.
+            try:
+                binding = DV.resolve_metric_sql(met, storage_type, idx, org)
+            except DV.DerivedError as e:
+                out[name] = {"error": f"its SQL could not be built from its base metrics: {e}"}
+                continue
+            if not sources:
+                sources = _base_sources(met, storage_type, idx)
         hits = _tables_named(defs, str(sources[0])) if len(sources) == 1 else []
         if len(sources) != 1 or not hits:
             out[name] = {"not_test_run": "reads more than one table, or a table the model doesn't have"}
@@ -726,6 +810,30 @@ def _metric_test_runs(root: str, profile: str, items: list) -> tuple[dict[str, d
                 return {"connection": {"error": reason}}, reason
             out[name] = {"error": reason}
     return out, None
+
+
+def _metric_batch(items: list) -> dict:
+    """The structurally valid metrics of an add batch by name, so a derived one can be resolved
+    against a base written alongside it; one that does not parse is the validator's to report."""
+    from .models import Metric
+    out: dict = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        try:
+            met = Metric.model_validate({k: v for k, v in it.items() if k not in ("area", "qname")})
+        except Exception:  # noqa: BLE001 — structural problems are reported by the write
+            continue
+        out[met.name] = met
+    return out
+
+
+def _base_sources(met, storage_type: str, idx: dict) -> list:
+    """The tables a derived metric reads through its bases, when it names none itself."""
+    from . import derived as DV
+    names = DV.binding_refs((met.bindings or {}).get(storage_type))
+    tables = [t for n in names if n in idx for t in (idx[n].source_tables or [])]
+    return list(dict.fromkeys(tables))
 
 
 def cmd_add(args) -> int:
@@ -806,6 +914,28 @@ def cmd_remove_example(args) -> int:
     _print_json({"rejected": res.applied, "examples": examples, **note, "skipped": res.skipped,
                  "validated": res.validated, "committed": res.committed, **_commit_note(res)})
     return 0 if (res.applied or not res.skipped) else 1
+
+
+def cmd_open_questions(args) -> int:
+    """The questions the data can't settle, for the build's "ask me as you go" step (#486): candidate
+    ambiguities found from patterns in the model and kept only when running both readings gives
+    different answers, then coded values and columns the build couldn't read. Read-only: each probe
+    is a bounded aggregate through `execute_sql`'s gates, and nothing is declared; each candidate
+    carries the `curate` op a person's answer completes."""
+    from . import curate
+    from . import dialects as D
+    from . import introspect as INTRO
+    from . import open_questions as OQ
+    org = L.load_datasource(args.root)
+    if not org.storage_connections:
+        _print_json({"error": "the model declares no storage connection, so there is nothing to probe"})
+        return 2
+    dialect = D.get_dialect(org.storage_connections[0].storage_type)
+    # `--all` is the review page's list (#676): every item, the build's guesses, sample values.
+    confirmed = OQ.confirmed_code_lists(curate.read_log(args.root)) if args.all else frozenset()
+    _print_json(OQ.open_questions(org, INTRO.make_execute_sql_runner(args.profile), dialect,
+                                  page=args.all, confirmed=confirmed))
+    return 0
 
 
 def cmd_suggest_units(args) -> int:
@@ -900,8 +1030,10 @@ def _num(v) -> Optional[float]:
 
 
 def _test_run_sql(table, dialect, props: list[dict]) -> str:
-    """One bounded statement that evaluates every proposal on `table`: each one's AVG (its binding)
-    with the MIN and MAX of the per-row value it averages, over a sample of the columns they read."""
+    """One bounded statement that evaluates every proposal on `table`: each one's own binding with
+    the MIN and MAX of the per-row value it aggregates, over a sample of the columns they read.
+    The binding, never a re-derived AVG: on a table whose rows repeat each record it counts
+    distinct records, and an AVG over the rows would preview a different number than it writes."""
     cols = sorted({c for p in props for c in p["_proposal"]["columns"]})
     if table.source_type == "sql":
         # Newlines keep a trailing `--` comment in the table's SQL from swallowing the `)`.
@@ -913,7 +1045,8 @@ def _test_run_sql(table, dialect, props: list[dict]) -> str:
     parts = []
     for i, p in enumerate(props):
         v = p["_proposal"]["row_expr"]
-        parts += [f"AVG({v}) AS m{i}", f"MIN({v}) AS m{i}_min", f"MAX({v}) AS m{i}_max"]
+        binding = next(iter(p["bindings"].values()))
+        parts += [f"{binding} AS m{i}", f"MIN({v}) AS m{i}_min", f"MAX({v}) AS m{i}_max"]
     return f"SELECT {', '.join(parts)}, COUNT(*) AS n_rows FROM ({inner}) sample_rows"
 
 
@@ -1237,14 +1370,18 @@ def cmd_describe_file(args) -> int:
               "case_corrected": m["case_corrected"],
               "schema_prefix_stripped": m["schema_prefix_stripped"]}
     if not m["ops"]:
-        _print_json({"described": 0, "reason": "no row matched a column of the model", **report,
+        _print_json({"described": 0, "applied": [], "applied_count": 0,
+                     "reason": "no row matched a column of the model", **report,
                      "skipped": [], "errors": []})
         return 0
     res = curate.apply(root, m["ops"])
     # `skipped` carries why an edit didn't land — e.g. a person's or a dictionary's description kept
     # over a generated one — so the skill can say so instead of counting it as described.
-    _print_json({"described": len(res.applied), **report, "skipped": res.skipped,
-                 **_provenance_note(res), "errors": res.errors})
+    # `applied` / `applied_count` / `validated` are `sm curate`'s own keys (#678): a reader that
+    # checked `applied` here found nothing and took a successful write for a no-op.
+    _print_json({"described": len(res.applied), "applied": res.applied,
+                 "applied_count": len(res.applied), "validated": res.validated, **report,
+                 "skipped": res.skipped, **_provenance_note(res), "errors": res.errors})
     return 0 if res.validated else 1
 
 
@@ -1561,25 +1698,63 @@ def _commit_notes(per_area: list[dict]) -> dict:
     return {"commit_note": " ".join(notes)} if notes else {}
 
 
-def _match_question(known: dict[str, set[str]], question: str) -> tuple[list[str], str]:
-    """The areas `question` names an example in, and the question text to reject there.
-    `<area>/<question>` (the label `rejected` prints) names the area outright, even when that area
-    has no such question: another area's example is never the one meant."""
+def _area_prefix(question: str, areas: list[str]) -> tuple[Optional[str], str]:
+    """The area a `<area>/<question>` names (the label `rejected` prints), and the question after it;
+    (None, question) when the text before the first `/` is no area. Matched ignoring case and the
+    spaces around the slash, so `Request / q` names `request` instead of being looked up whole."""
     q = question.strip()
     head, _, rest = q.partition("/")
-    if rest.strip() and head in known:
-        return [head], rest.strip()
+    by_key = {a.strip().casefold(): a for a in areas}
+    area = by_key.get(head.strip().casefold())
+    if rest.strip() and area is not None:
+        return area, rest.strip()
+    return None, q
+
+
+def _match_question(known: dict[str, set[str]], question: str) -> tuple[list[str], str]:
+    """The areas `question` names an example in, and the question text to reject there.
+    `<area>/<question>` names the area outright, even when that area has no such question: another
+    area's example is never the one meant."""
+    area, rest = _area_prefix(question, list(known))
+    if area is not None:
+        return [area], rest
+    q = question.strip()
     return [a for a, questions in known.items() if q in questions], q
+
+
+def _model_area_names(root: str) -> list[str]:
+    """Every subject area the model declares; empty when it does not load."""
+    try:
+        return [sa.name for sa in L.load_datasource(root, include_rejected=True).subject_areas]
+    except Exception:  # noqa: BLE001 — a model that won't load is reported by _resolve_areas
+        return []
 
 
 def cmd_remove_example_areas(args) -> int:
     areas = _resolve_areas(args)
     if areas is None:
         return 1
-    if len(args.area or []) == 1:
-        return cmd_remove_example(argparse.Namespace(**{**vars(args), "area": areas[0]}))
     known = {a: {(e or {}).get("question", "").strip()
                  for e in L.list_prompt_examples(args.root, a, include_rejected=True)} for a in areas}
+    model_areas = _model_area_names(args.root)
+    outside = []
+    for question in args.question:
+        named, _ = _area_prefix(question, model_areas)
+        literal = any(question.strip() in qs for qs in known.values())
+        if named is not None and named not in areas and not literal:
+            outside.append({"question": question, "area": named})
+    if outside:
+        # The prefix names an area this call does not cover: looking the text up whole in the
+        # covered areas would miss it and report nothing about the area that was meant.
+        _print_json({"refused": "area_not_covered", "questions": outside, "areas": areas,
+                     "message": "these questions name an area this call does not cover; nothing was "
+                                "rejected. Add that --area, or drop --area to cover every area."})
+        return 1
+    if len(args.area or []) == 1:
+        # `<area>/<question>` for the one area named is that area's question, as across several.
+        qs = [question if question.strip() in known[areas[0]] else _area_prefix(question, areas)[1]
+              for question in args.question]
+        return cmd_remove_example(argparse.Namespace(**{**vars(args), "area": areas[0], "question": qs}))
     by_area: dict[str, list[str]] = {}
     ambiguous, missing = [], []
     for question in args.question:
@@ -1629,6 +1804,31 @@ def _normalize_table_list(raw: Optional[list[str]]) -> Optional[list[str]]:
     return out or None
 
 
+# Snowflake authenticators that sign in without a person: a password, a key pair, a token. Any other
+# value (`externalbrowser`, `username_password_mfa`, an Okta `https://…` URL, one added later) may
+# open a window or ask for a code on every connection, and each statement is its own connection.
+_NON_PROMPTING_AUTHENTICATORS = frozenset({
+    "snowflake", "oauth", "snowflake_jwt", "programmatic_access_token", "oauth_client_credentials",
+})
+
+
+def _may_prompt_to_sign_in(profile: str) -> bool:
+    """Whether a connection for `profile` may ask a person to sign in, so the build opens one at a
+    time. Reads only the `authenticator` setting, never a secret. No setting is a password or key sign-in
+    (Postgres, Redshift, MySQL and the like, or Snowflake's default); a credentials file that can't
+    be read is treated as one that may prompt."""
+    import configparser
+
+    from agami_paths import credentials_path
+    cp = configparser.ConfigParser(interpolation=None)
+    try:
+        cp.read(credentials_path(), encoding="utf-8")
+        auth = cp.get(profile, "authenticator", fallback="").strip().lower()
+    except (configparser.Error, OSError):
+        return True
+    return bool(auth) and auth not in _NON_PROMPTING_AUTHENTICATORS
+
+
 def cmd_introspect(args) -> int:
     from . import introspect as INTRO
     from . import validator as V
@@ -1642,26 +1842,73 @@ def cmd_introspect(args) -> int:
                      if ln.strip() and not ln.lstrip().startswith("#")]
         tables = (tables or []) + _normalize_table_list(from_file)
 
-    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
+    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True,
+                                           artifacts_dir=args.artifacts)
+    # Each statement is its own connection: several at once would open as many sign-in prompts.
+    from . import profile as PF
+    PF.WORKERS = 1 if _may_prompt_to_sign_in(args.profile) else PF.WORKERS
     progress = args.progress or str(
         Path(args.artifacts).expanduser() / args.profile / ".introspect" / "progress.log")
-    org, report = INTRO.introspect(
-        args.profile,
-        args.db_type,
-        runner=runner,
-        artifacts_dir=args.artifacts,
-        out_dir=args.out,
-        tables=tables,
-        exclude_columns=args.exclude_columns,
-        dry_run=args.dry_run,
-        bigquery_region=args.bigquery_region,
-        progress_path=progress,
-        append=getattr(args, "append", False),
-    )
+    try:
+        org, report = INTRO.introspect(
+            args.profile,
+            args.db_type,
+            runner=runner,
+            artifacts_dir=args.artifacts,
+            out_dir=args.out,
+            tables=tables,
+            exclude_columns=args.exclude_columns,
+            dry_run=args.dry_run,
+            bigquery_region=args.bigquery_region,
+            progress_path=progress,
+            append=getattr(args, "append", False),
+            batch=_batch_arg(getattr(args, "batch", None)),
+        )
+    except INTRO.ConnectionUnusable as exc:
+        # the database's own reason, not a traceback: it is a setup problem the person fixes
+        sys.stderr.write(f"agami: {exc}\n")
+        return 2
     res = V.validate(org)
     print(report.render())
     print(V.format_result(res))
     return 0 if res.ok else 1
+
+
+def _batch_arg(text: Optional[str]) -> Optional[tuple[int, int]]:
+    """`--batch 3/5` -> (3, 5); anything else is refused, so a typo never prints a wrong position."""
+    if not text:
+        return None
+    m = re.fullmatch(r"\s*(\d+)\s*/\s*(\d+)\s*", text)
+    if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
+        raise SystemExit(f"--batch takes n/total, such as 3/5, not {text!r}")
+    return int(m.group(1)), int(m.group(2))
+
+
+# A metadata source is read whole, so each read's row cap is sized from the source's own count rather
+# than left to the deployment's query-time cap, which a platform dictionary can pass by itself. The
+# margin covers rows written between the count and the read; past the ceiling the read is refused with
+# the count, never attempted.
+_METADATA_READ_CEILING = 5_000_000
+_METADATA_READ_MARGIN = 1_000
+
+
+def _metadata_read_cap(runner, fq: str) -> int | str | None:
+    """The row cap for reading `fq` whole: its count plus a margin, at most the ceiling. None when
+    the count could not be read (the read then runs under the deployment's cap, as before); an error
+    message naming the count when it is past the ceiling."""
+    try:
+        rows = runner(f"SELECT COUNT(*) AS n FROM {fq}") or []
+    except Exception:  # noqa: BLE001 — an unread count leaves the read as it was, not failed
+        return None
+    # The one column, by position: a dialect may fold the alias's case.
+    first = rows[0] if rows and isinstance(rows[0], dict) and len(rows[0]) == 1 else None
+    n = _num(next(iter(first.values()))) if first else None
+    if n is None or n < 0:
+        return None
+    if n > _METADATA_READ_CEILING:
+        return (f"{fq} holds {n:,.0f} rows, more than the {_METADATA_READ_CEILING:,} a metadata "
+                "source is read up to; enrich-metadata reads each source whole, so it was not read")
+    return min(int(n) + _METADATA_READ_MARGIN + int(n) // 100, _METADATA_READ_CEILING)
 
 
 def cmd_enrich_metadata(args) -> int:
@@ -1671,48 +1918,66 @@ def cmd_enrich_metadata(args) -> int:
     or takes --preset; the authoritative platform metadata becomes the model's enrichment."""
     from . import curate
     from . import dialects as D
-    from . import introspect as INTRO
-    from . import metadata_sources as MS
     from .loader import load_datasource
 
     root = Path(args.root).expanduser()
     org = load_datasource(root)
-    model_tables = [t.name for sa in org.subject_areas for t in sa.tables_defined]
     valid = {(t.name.lower(), c.name.lower())
              for sa in org.subject_areas for t in sa.tables_defined for c in t.columns}
-    schema_of: dict[str, str] = {}
-    for sa in org.subject_areas:
-        for t in sa.tables_defined:
-            schema_of.setdefault(t.name.lower(), t.schema_name)
 
-    preset = args.preset or MS.detect_preset(model_tables)
+    dialect = D.get_dialect(args.db_type)
+    # Build mode: the dictionary is read where it lies, never modelled, so the model-scope pass that
+    # confines a statement to modelled tables would refuse every read of it (ACE-181). On a hosted
+    # server the runner still passes --no-safety but drops --build-profile, so the recon gate refuses
+    # the catalog reads that would find an unmodelled dictionary; there only a modelled one is read.
+    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
+    # Finding the sources lists the catalog, which a large warehouse holds past the query-time cap,
+    # and a refused listing reads as "no such source"; it is a build read, bounded by the ceiling.
+    catalog_runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True,
+                                                   max_rows=_METADATA_READ_CEILING)
+    preset, sources = _metadata_sources(org, catalog_runner, dialect, args.preset)
     if not preset:
         # most databases carry no in-DB dictionary; that is nothing to do, not a failure (#526)
         _print_json({"enriched": False,
                      "reason": "no metadata preset applies to this database — nothing to do "
                                "(pass --preset to name one)"})
         return 0
-    sources = MS.usable_sources(preset, model_tables)
     if not sources:
         _print_json({"enriched": False, "preset": preset,
-                     "reason": "preset's source table(s) are not in the model"})
+                     "reason": "preset's source table(s) are neither in the model nor in the catalog"})
         return 1
 
-    dialect = D.get_dialect(args.db_type)
-    runner = INTRO.make_execute_sql_runner(args.profile)
     ops: list[dict] = []
     fetched: dict[str, int] = {}
     dict_rows: list[dict] = []
     dict_cfg: dict = {}
-    for role, cfg in sources.items():
-        src = cfg["source"]
-        sch = schema_of.get(src.lower())
+    parents: dict[str, str] = {}
+    choice_rows: list[dict] = []
+    choice_cfg: dict = {}
+    fetched_rows: dict[str, list[dict]] = {}
+    for role, (cfg, (sch, src), cols) in sources.items():
         fq = dialect.qualified(sch, src) if sch else dialect.quote_ident(src)
-        col_names = [v for k, v in cfg.items() if k.endswith("_col")]
-        sel = ", ".join(dialect.quote_ident(c) for c in col_names)
-        rows = runner(f"SELECT {sel} FROM {fq}") or []
-        fetched[role] = len(rows)
+        # Each column is read under the role's own name, whatever the export spells it, so
+        # everything after this reads the same keys (`"reference_value" AS "reference"`).
+        sel = ", ".join(dialect.quote_ident(a) if a == c else f"{dialect.quote_ident(a)} AS {dialect.quote_ident(c)}"
+                        for c, a in cols.items())
+        cap = _metadata_read_cap(runner, fq)
+        if isinstance(cap, str):
+            _print_json({"enriched": False, "preset": preset, "error": cap})
+            return 1
+        read = runner if cap is None else INTRO.make_execute_sql_runner(
+            args.profile, building_the_model=True, max_rows=cap)
+        fetched_rows[role] = read(f"SELECT {sel} FROM {fq}") or []
+        fetched[role] = len(fetched_rows[role])
+    for role, (cfg, _at, _cols) in sources.items():
+        rows = fetched_rows[role]
+        # A column holding the referenced record's id, not its name, reads through that record.
+        for col_key, by_role in cfg.get("resolve_ids", {}).items():
+            if by_role in sources and col_key in cfg:
+                rows = MS.resolve_record_ids(rows, cfg[col_key],
+                                             MS.record_names(fetched_rows[by_role], sources[by_role][0]))
         if role == "choice":
+            choice_rows, choice_cfg = rows, cfg
             ops += MS.choice_field_ops(rows, table_col=cfg["table_col"], column_col=cfg["column_col"],
                                        value_col=cfg["value_col"], label_col=cfg["label_col"], valid=valid)
         elif role == "dictionary":
@@ -1720,6 +1985,32 @@ def cmd_enrich_metadata(args) -> int:
                                       label_col=cfg.get("label_col"), comment_col=cfg.get("comment_col"),
                                       valid=valid)
             dict_rows, dict_cfg = rows, cfg
+        elif role == "hierarchy":
+            parents = MS.class_parents(rows, table_col=cfg["table_col"], id_col=cfg["id_col"],
+                                       parent_col=cfg["parent_col"])
+
+    # No class table: the preset's standard hierarchy stands in, so a child class still inherits
+    # the references its parent declares (an incident is a task).
+    hierarchy = "class table" if "hierarchy" in sources else "none"
+    if "hierarchy" not in sources and dict_rows and "table_col" in dict_cfg:
+        parents = MS.preset_class_parents(preset, {str(r.get(dict_cfg["table_col"]) or "") for r in dict_rows})
+        hierarchy = "preset (no class table found)" if parents else "none"
+
+    # A renamed export: its tables carry the platform's classes under other names, and its link
+    # columns the fields under `<field>_sys_id` (ACE-181). Value labels follow the mapping.
+    spec = MS.PRESETS.get(preset, {})
+    key, suffix = spec.get("key", ""), spec.get("link_suffix", "")
+    mapping = PJ.map_model(org, preset, dict_rows, dict_cfg, parents)
+    if choice_rows and mapping:
+        labelled = {(o["name"].lower(), o["column"].lower()) for o in ops if o.get("field") == "choice_field"}
+        held = {t.name: {c.name: list(c.choice_field) for c in t.columns
+                         if c.choice_field and (t.name.lower(), c.name.lower()) not in labelled}
+                for sa in org.subject_areas for t in sa.tables_defined if t.name in mapping}
+        chains = {t: [m["class"], *MS.ancestors(m["class"], parents)] for t, m in mapping.items()}
+        ops += MS.view_choice_ops(choice_rows, table_col=choice_cfg["table_col"],
+                                  column_col=choice_cfg["column_col"], value_col=choice_cfg["value_col"],
+                                  label_col=choice_cfg["label_col"], held=held, chains=chains, key=key,
+                                  link_suffix=suffix)
 
     # Inheritance: ServiceNow (and any table-inheritance platform) declares a shared field's
     # description ONCE under the parent table (`task`), but the column physically lives on every
@@ -1740,12 +2031,17 @@ def cmd_enrich_metadata(args) -> int:
                         continue  # don't override an existing description
                     if (t.name.lower(), c.name.lower()) in direct:
                         continue  # already got a table-specific dictionary description
-                    d = by_el.get(c.name.lower())
+                    d = by_el.get(c.name.lower()) or (
+                        by_el.get(MS.column_field(c.name, key, suffix) or "") if key else None)
                     if d:
                         ops.append({"op": "edit", "kind": "table", "name": t.name, "column": c.name,
                                     "field": "description", "value": d, "source": "metadata"})
                         inherited += 1
 
+    # sys_choice keys a list by the platform's value; the column's own data values key it instead (#678)
+    ops = MS.key_choices_on_held_values(ops, {
+        (t.name.lower(), c.name.lower()): [str(v) for v in c.choice_field]
+        for sa in org.subject_areas for t in sa.tables_defined for c in t.columns if c.choice_field})
     # 1) descriptions + choice_field — one validated curate batch
     cols_applied = 0
     errors: list[str] = []
@@ -1759,96 +2055,107 @@ def cmd_enrich_metadata(args) -> int:
     # 2) reference/FK edges from the dictionary — the join-graph half. The table/area structure
     # the curate batch above touched only descriptions/choices, so the loaded `org` is still
     # valid for routing references (names, schemas, grain, areas unchanged).
-    refs_added = refs_skipped_target = refs_declared = refs_unverified = 0
+    refs_added = 0
+    found = None
     if not args.skip_references:
-        # field-name → target, from this instance's dictionary AND the preset's KNOWN reference
-        # graph (declarative config). Instance declarations override the preset on conflict.
-        decls = (MS.reference_declarations(
-                    dict_rows, column_col=dict_cfg["column_col"], type_col=dict_cfg["type_col"],
-                    reference_col=dict_cfg["reference_col"],
-                    reference_type=dict_cfg.get("reference_type", "reference"))
-                 if (dict_rows and "reference_col" in dict_cfg) else {})
-        ref_map = {**MS.known_reference_graph(preset), **decls}
-        refs_declared = len(ref_map)
-        if ref_map:
-            intra, cross, refs_skipped_target, refs_unverified = _build_verified_references(
-                org, runner, dialect, ref_map, declared=set(decls))
-            if intra or cross:
-                rres = curate.add_relationships(root, intra=intra, cross=cross)
-                refs_added = len(rres.applied)
-                errors += rres.errors
+        found = PJ.find_reference_joins(org, runner, dialect, preset, dictionary_rows=dict_rows,
+                                        dictionary_cfg=dict_cfg, parents=parents)
+        intra, cross, skipped = _route_references(org, found.written)
+        found.skipped_target += skipped
+        written: set[tuple[str, str]] = set()
+        if intra or cross:
+            rres = curate.add_relationships(root, intra=intra, cross=cross)
+            refs_added = len(rres.applied)
+            errors += rres.errors
+            # what curate actually added: a join it refused keeps its stored candidate
+            written = {_applied_column(a) for a in rres.applied}
+        if found.review or written:
+            PJ.store_for_review(root, found.review, written)
+    refs = ({"relationships_added": refs_added,
+             "relationships_approved": len([s for s in found.written if s["review_state"] == "approved"]),
+             "relationships_for_review": len(found.review),
+             "tables_mapped_to_platform": {t: m["class"] for t, m in found.mapping.items()},
+             "class_hierarchy": hierarchy,
+             "reference_checks": found.probes,
+             "relationships_skipped_target_not_modelled": found.skipped_target,
+             "reference_notes": found.notes} if found is not None else {})
 
-    if not cols_applied and not refs_added:
-        _print_json({"enriched": False, "preset": preset, "fetched": fetched,
-                     "reference_fields_known": refs_declared,
-                     "relationships_skipped_target_not_modelled": refs_skipped_target,
+    if not cols_applied and not refs_added and not refs.get("relationships_for_review"):
+        _print_json({"enriched": False, "preset": preset, "fetched": fetched, **refs,
                      "reason": "nothing applicable for modelled columns", "errors": errors})
         return 0
     _print_json({"enriched": not errors, "preset": preset, "fetched": fetched,
                  "columns_enriched": cols_applied, "descriptions_inherited": inherited,
-                 "relationships_added": refs_added,
-                 "relationships_added_unverified": refs_unverified,
-                 "reference_fields_known": refs_declared,
-                 "relationships_skipped_target_not_modelled": refs_skipped_target,
-                 **provenance, "errors": errors})
+                 **refs, **provenance, "errors": errors})
     return 0 if not errors else 1
 
 
-def _build_verified_references(org, runner, dialect, ref_map: dict,
-                                declared: Optional[set[str]] = None) -> tuple[dict, list, int, int]:
-    """Turn a `field → target` map (preset known graph ∪ dictionary declarations) into reference
-    relationships, applied to EVERY modelled column with that name (inheritance-aware), and VERIFY
-    each candidate by value-overlap against the live data before keeping it:
-      overlap holds            → confirmed + system-approved when THIS database's dictionary declares
-                                 the reference (`declared`, its own foreign key); a reference only the
-                                 preset assumes stays inferred/unreviewed — matching values are
-                                 evidence, not a declaration (#509),
-      overlap can't be checked → inferred/unreviewed (target/from too big to scan, or probe cap hit),
-      overlap FAILS            → DROPPED (the standard join doesn't apply to this export — never
-                                 blindly trust the preset).
-    Returns `(intra, cross, skipped_target_count, unverified_count)`."""
-    from . import introspect as INTRO
-    specs: list[dict] = []
-    skipped_target = unverified = probes = 0
-    # resolve targets up front so we can verify before routing
-    tindex = {t.name.lower(): t for sa in org.subject_areas for t in sa.tables_defined}
-    for sa in org.subject_areas:
-        for t in sa.tables_defined:
-            for c in t.columns:
-                tgt = ref_map.get(c.name.lower())
-                if not tgt:
-                    continue
-                ttab = tindex.get(tgt.lower())
-                if ttab is None:
-                    skipped_target += 1
-                    continue
-                if not ttab.grain:
-                    continue
-                verified = None  # None = couldn't check
-                if INTRO._too_big_to_probe(t) or INTRO._too_big_to_probe(ttab):
-                    verified = None
-                elif probes < INTRO.FK_OVERLAP_PROBE_CAP:
-                    probes += 1
-                    verified = INTRO._overlaps(dialect, runner, t, c.name, ttab, ttab.grain[0])
-                if verified is False:
-                    continue  # standard join doesn't hold in this data → drop
-                spec = {"from_table": t.name, "from_column": c.name, "to_table": ttab.name}
-                if verified and c.name.lower() in (declared or set()):
-                    spec.update(confidence="confirmed", review_state="approved",
-                                signed_off_by="agami_enrich", signed_off_role="system",
-                                signed_off_at=INTRO._NOW,
-                                description=f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} (value-overlap verified)")
-                elif verified:
-                    spec.update(confidence="inferred", review_state="unreviewed",
-                                description=f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} "
-                                            "(preset's standard join, values overlap; not declared "
-                                            "by this database — confirm)")
-                else:
-                    unverified += 1
-                    spec["description"] = f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} (not overlap-verified — confirm)"
-                specs.append(spec)
-    intra, cross, skipped_more = _route_references(org, specs)
-    return intra, cross, skipped_target + skipped_more, unverified
+def _applied_column(applied: str) -> tuple[str, str]:
+    """(from table, from column), lower-cased, of one `curate.add_relationships` applied entry:
+    `rel <area>/<table>.<column>→<table>` or `xrel <table>.<column>→<table>`."""
+    label = applied.split(" ", 1)[1]
+    label = label.split("/", 1)[1] if applied.startswith("rel ") else label
+    table, column = label.split("→", 1)[0].rsplit(".", 1)
+    return table.lower(), column.lower()
+
+
+def _metadata_sources(org, runner, dialect, preset: Optional[str]) -> tuple[Optional[str], dict]:
+    """The preset and `{role: (config, (schema, table), columns)}` for each of its sources found: a
+    modelled table first, else the catalog, in any schema and under a renamed layer's name (ACE-181).
+    `columns` maps each column the role reads to the table's spelling of it (`reference` may be
+    `reference_value` in an export that writes a reference as a value + link pair).
+
+    The catalog is read only for a platform whose shape the model shows (its record-id column, or
+    a column named the way an export names a link), or one named with --preset: a database with no
+    platform behind it costs no query, as before."""
+    modelled = {t.name.lower(): (t.schema_name, t.name) for sa in org.subject_areas for t in sa.tables_defined}
+    columns = {c.name.lower() for sa in org.subject_areas for t in sa.tables_defined for c in t.columns}
+    schemas = {s for s, _ in modelled.values()}
+    catalog: Optional[list] = None
+
+    def shaped(spec: dict) -> bool:
+        key, suffix = spec.get("key", "").lower(), spec.get("link_suffix", "").lower()
+        return bool(key and key in columns) or bool(suffix and any(c.endswith(suffix) for c in columns))
+
+    model_cols = {t.name.lower(): [c.name for c in t.columns] for sa in org.subject_areas for t in sa.tables_defined}
+    resolved: dict[tuple, Optional[dict[str, str]]] = {}
+
+    def fits(cfg: dict, suffixes: list[str]):
+        def check(schema: Optional[str], table: str) -> bool:
+            rows = INTRO._try(runner, dialect.sql_columns(schema, table)) or []
+            have = [str(r.get("column_name", "")) for r in rows]
+            resolved[(schema, table)] = MS.resolve_columns(cfg, have, suffixes)
+            return resolved[(schema, table)] is not None
+        return check
+
+    def where(cfg: dict, look: bool, suffixes: list[str]):
+        nonlocal catalog
+        if cfg["source"].lower() in modelled:
+            at = modelled[cfg["source"].lower()]
+            same = {v: v for k, v in cfg.items() if k.endswith("_col")}
+            return at, MS.resolve_columns(cfg, model_cols[cfg["source"].lower()], suffixes) or same
+        if not look:
+            return None
+        if catalog is None:
+            catalog = []
+            for r in INTRO._try(runner, dialect.sql_schemas()) or []:
+                s = r.get("schema_name")
+                catalog += [(t.get("schema_name") or s, t["table_name"])
+                            for t in INTRO._try(runner, dialect.sql_tables(s)) or [] if t.get("table_name")]
+        at = MS.locate(cfg["source"], catalog, schemas, fits(cfg, suffixes))
+        return (at, resolved[at]) if at else None
+
+    for name in [preset] if preset else list(MS.PRESETS):
+        spec = MS.PRESETS.get(name, {})
+        look = bool(preset) or shaped(spec)
+        suffixes = spec.get("column_suffixes") or [""]
+        found = {}
+        for role, cfg in spec.items():
+            if isinstance(cfg, dict) and cfg.get("source") and (hit := where(cfg, look, suffixes)):
+                found[role] = (cfg, *hit)
+        if found or preset:
+            return name, found
+    return None, {}
 
 
 def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
@@ -1917,15 +2224,21 @@ def cmd_discover(args) -> int:
     removed, and `--out` is still accepted from older callers but ignored (said in `note`)."""
     from . import introspect as INTRO
 
-    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
-    inventory = INTRO.discover_inventory(
-        args.profile,
-        args.db_type,
-        runner=runner,
-        tables=args.tables,
-        schemas=args.schemas,
-        bigquery_region=args.bigquery_region,
-    )
+    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True,
+                                           artifacts_dir=args.artifacts)
+    try:
+        inventory = INTRO.discover_inventory(
+            args.profile,
+            args.db_type,
+            runner=runner,
+            tables=args.tables,
+            schemas=args.schemas,
+            bigquery_region=args.bigquery_region,
+            row_estimates=args.row_estimates,
+        )
+    except INTRO.ConnectionUnusable as exc:
+        sys.stderr.write(f"agami: {exc}\n")   # as `sm introspect`: a setup problem, not a traceback
+        return 2
 
     artifacts = Path(args.artifacts).expanduser()
     inv_path = (Path(args.inventory_out).expanduser() if args.inventory_out
@@ -1998,14 +2311,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--description", default=None)
     sp.set_defaults(func=cmd_set_org)
 
+    sp = sub.add_parser("set-personal-data", help="build-only: who keeps people from seeing personal data, "
+                        "kept in <artifacts_dir>/local/.config and never deployed")
+    sp.add_argument("artifacts_dir")
+    sp.add_argument("setting", choices=list(BS.PERSONAL_DATA_CHOICES),
+                    help="enforced_by_warehouse: the warehouse's own security does it, so a build flags "
+                         "nothing; flagged_by_agami: agami flags and asks (the default)")
+    sp.set_defaults(func=cmd_set_personal_data)
+
     sp = sub.add_parser("examples", help="rank prompt examples for a query")
     sp.add_argument("root")
     sp.add_argument("--area", required=True)
-    sp.add_argument("--query", required=True)
+    sp.add_argument("--query", default=None,
+                    help="the question; without it, --metric lists the examples tagged with that metric")
     sp.add_argument("--top-k", type=int, default=5)
     sp.add_argument("--metric", action="append", default=None,
                     help="a metric the question uses, by name or by the selector get_datasource_schema gave "
-                         "(repeatable): examples tagged with it rank first")
+                         "(repeatable): examples tagged with it rank first; alone, only those are listed")
     sp.set_defaults(func=cmd_examples)
 
     sp = sub.add_parser("preflight", help="fan-trap / chasm-trap pre-flight check")
@@ -2090,6 +2412,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.set_defaults(func=cmd_coverage)
 
+    sp = sub.add_parser("profile", help="what the build read from the data: per-column fill, distinct counts, "
+                                        "ranges, frequent values and findings, and every join's check")
+    sp.add_argument("root")
+    sp.add_argument("--table", nargs="*", default=None, help="only these tables (bare or schema.table)")
+    sp.set_defaults(func=cmd_profile)
+
     sp = sub.add_parser("choice-coverage", help="coded columns whose choice_field labels are still blank (value-enum decode not done)")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_choice_coverage)
@@ -2108,6 +2436,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.add_argument("--description", required=True, help="one line: what this datasource holds and when to query it")
     sp.set_defaults(func=cmd_set_description)
+
+    sp = sub.add_parser("set-fiscal-year", help="record the month the fiscal year starts in, as the person answered it")
+    sp.add_argument("root")
+    sp.add_argument("--month", type=int, required=True, help="1 (January) to 12 (December)")
+    sp.set_defaults(func=cmd_set_fiscal_year)
 
     sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit/move/add ops (validated)")
     sp.add_argument("root")
@@ -2235,6 +2568,14 @@ def build_parser() -> argparse.ArgumentParser:
                          "(see #564); never replaces a description a person wrote")
     sp.set_defaults(func=cmd_describe_file)
 
+    sp = sub.add_parser("open-questions", help="what the data can't settle: candidate ambiguities checked by running both readings, plus coded values and columns the build couldn't read (read-only; nothing is declared)")
+    sp.add_argument("root")
+    sp.add_argument("--profile", required=True, help="the database to probe (bounded aggregates only)")
+    sp.add_argument("--all", action="store_true",
+                    help="the review page's list: every item, uncapped and without cards, the build's own "
+                         "guesses to confirm, and a few sample values of each unclear column")
+    sp.set_defaults(func=cmd_open_questions)
+
     sp = sub.add_parser("suggest-units", help="list numeric money columns (for currency-unit stamping) via the tested name matcher")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_suggest_units)
@@ -2292,6 +2633,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="batched build: introspect only --tables this call, MERGE into the existing "
                          "model (prior tables loaded, not re-queried), write the union. Call once per "
                          "batch for quick foreground progress on a big schema (no background monitor).")
+    sp.add_argument("--batch", default=None,
+                    help="this call's place in a batched build, as n/total (e.g. 3/5): written as the "
+                         "progress log's first line, for the progress page")
     sp.set_defaults(func=cmd_introspect)
 
     sp = sub.add_parser("enrich-metadata",
@@ -2322,6 +2666,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--schemas", nargs="*", default=None,
                     help="restrict discovery to these schemas (the user's schema pick)")
     sp.add_argument("--bigquery-region", default="region-us", dest="bigquery_region")
+    sp.add_argument("--row-estimates", action="store_true", dest="row_estimates",
+                    help="add each table's row estimate from one catalog-statistics read, where the "
+                         "database keeps one (never a count) — for the table picker page")
     sp.set_defaults(func=cmd_discover)
 
     return p

@@ -159,6 +159,12 @@ class Dialect:
             return f"{self.quote_ident(schema)}.{self.quote_ident(table)}"
         return self.quote_ident(table)
 
+    def date_literal(self, iso_day: str) -> str:
+        """A `YYYY-MM-DD` day to compare a date, timestamp or ISO-text column against. A plain string
+        literal is what most engines coerce on both kinds of column (BigQuery refuses a DATE literal
+        beside a TIMESTAMP); the engines that never coerce a string override it."""
+        return self.quote_lit(iso_day)
+
     def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
                            end_type: str = "timestamp") -> str:
         """Per-row 'days between two columns' (identifiers as written) for an avg-duration metric.
@@ -184,6 +190,18 @@ class Dialect:
         if boolean:
             return f"CASE WHEN {col} THEN 1.0 WHEN NOT {col} THEN 0.0 END"
         return f"CASE WHEN {col} <> 0 THEN 1.0 WHEN {col} = 0 THEN 0.0 END"
+
+    # True where a UNION is typed two arms at a time, so a column NULL in the first two arms is text
+    # before a later arm's integer reaches it (`tagged_union`).
+    union_types_pairwise: bool = False
+    # Catalog types (lower-case, without their parameters) this engine cannot compare, so cannot
+    # DISTINCT, GROUP BY or MIN: such a column is read alone, never inside a combined statement it
+    # would fail whole.
+    not_comparable_types: frozenset = frozenset()
+
+    def comparable(self, raw_type: Optional[str]) -> bool:
+        base = re.split(r"[(<]", (raw_type or "").strip().lower(), maxsplit=1)[0].strip()
+        return base not in self.not_comparable_types
 
     # --- row-limit syntax (probe mode) ---
 
@@ -212,6 +230,32 @@ class Dialect:
         if self.limit_style == "fetch":
             return f"{select} FETCH FIRST {n} ROWS ONLY"
         return f"{select} LIMIT {n}"
+
+    def text_cast(self, expr: str) -> str:
+        """`expr` as text, so values of different types can share a column. Truncated at 255
+        characters, which a value read for the profile never needs past."""
+        return f"CAST({expr} AS VARCHAR(255))"
+
+    # False where a bounded read (a LIMIT) of an object of unknown size can still scan all of it:
+    # a view the engine materialises first, or an engine that bills every byte a column holds.
+    # There, an object whose size the catalog doesn't give isn't read for the profile or a join check.
+    scans_unsized: bool = True
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        """The clause after a table name that reads about `percent` of its rows spread across it, or
+        None where the engine has no such clause (then a bounded read takes the first rows)."""
+        return None
+
+    def sampled_rows(self, select: str, n: int, est_rows: Optional[int]) -> tuple[str, str]:
+        """`select` (one `SELECT ... FROM <table>`) bounded to `n` rows, spread across the table where
+        the engine can sample and its size is known, with how they were read: `sample` or
+        `first_rows`. Twice the share needed is asked for, so a sample rarely comes up short."""
+        if est_rows and est_rows > n:
+            pct = min(99.0, max(0.0001, 200.0 * n / est_rows))
+            clause = self.tablesample(f"{pct:.4f}".rstrip("0").rstrip("."))
+            if clause:
+                return self.limited(f"{select} {clause}", n), "sample"
+        return self.limited(select, n), "first_rows"
 
     def count_distinct_sql(self, schema: Optional[str], table: str, column: str) -> str:
         q = self.qualified(schema, table)
@@ -348,6 +392,36 @@ class Dialect:
         engine has never analysed). Read-only, and bounded like every other introspection read."""
         return f"SELECT COUNT(*) AS estimated_rows FROM {self.qualified(schema, table)}"
 
+    def sql_row_count_capped(self, schema: str, table: str, cap: int) -> Optional[str]:
+        """A count that stops at `cap + 1` rows, for an object the catalog cannot size (a view): an
+        answer over `cap` says only "more than the cap", which is all a size guard asks, and it never
+        reads a 100M-row view to the end. None where the engine gets no count at all (#459)."""
+        if self.sql_row_count(schema, table) is None:
+            return None
+        inner = self.limited(f"SELECT 1 AS one FROM {self.qualified(schema, table)}", cap + 1)
+        return f"SELECT COUNT(*) AS estimated_rows FROM ({inner}) capped"
+
+    def sql_row_estimates_bulk(self, schemas: list[str]) -> Optional[str]:
+        """Every table's row estimate across `schemas` from the catalog statistics, in ONE query
+        (`table_schema, table_name, estimated_rows`), for the table picker (#654). Never a count:
+        None where the catalog keeps no estimate, and the picker then shows the size as unknown."""
+        return None
+
+    def _row_estimates_from(self, source: str, rows: str, schema_col: str, table_col: str,
+                            schemas: list[str]) -> Optional[str]:
+        if not schemas:
+            return None
+        inlist = ", ".join(self.quote_lit(s) for s in schemas)
+        return (
+            f"SELECT {schema_col} AS table_schema, {table_col} AS table_name, "
+            f"{rows} AS estimated_rows FROM {source} WHERE {schema_col} IN ({inlist})"
+        )
+
+    def sql_row_estimates_bulk_fallback(self, schemas: list[str]) -> Optional[str]:
+        """A second estimate read, for the tables the first one returned no figure for. None where
+        the first read is the only one."""
+        return None
+
     # --- declared value lists (#517) ---
 
     def sql_enum_values(self, schema: str, table: str) -> Optional[str]:
@@ -378,6 +452,26 @@ class Dialect:
         return self.limited(
             f"SELECT DISTINCT {c} AS v FROM {self.qualified(schema, table)} WHERE {c} IS NOT NULL", n)
 
+    def distinct_many_sql(self, schema: Optional[str], table: str, columns: list[str], n: int) -> str:
+        """`distinct_sql` for several columns in one statement: each column's own read, unchanged, as
+        a derived table, tagged `c` (its position) and stacked with UNION ALL.
+
+        Column i's values come back in `v{i}` and are NULL in every other arm, so no column's values
+        are ever converted to share a type with another's: each arrives exactly as its own read
+        returns it. The row bound stays inside each arm, where every engine accepts it (TOP and
+        FETCH FIRST included). No `AS` before a table alias: Oracle refuses it."""
+        return tagged_union([self.distinct_sql(schema, table, col, n) for col in columns], ("v",),
+                            typed_first=self.union_types_pairwise)
+
+    def count_distinct_many_sql(self, schema: Optional[str], table: str, columns: list[str]) -> str:
+        """`count_distinct_sql` for several columns in one pass: the row count once, then each
+        column's distinct and filled counts (`distinct_count{i}`, `filled{i}`)."""
+        parts = ["COUNT(*) AS total"]
+        for i, col in enumerate(columns):
+            c = self.quote_ident(col)
+            parts += [f"COUNT(DISTINCT {c}) AS distinct_count{i}", f"COUNT({c}) AS filled{i}"]
+        return f"SELECT {', '.join(parts)} FROM {self.qualified(schema, table)}"
+
     def placeholder_value_expr(self, column: str, ctype: str) -> str:
         """How the placeholder scan reads a column (quoted `column`, its ColumnType)."""
         return column
@@ -395,10 +489,44 @@ class Dialect:
             f"CROSS JOIN (SELECT MIN({v}) AS lo, MAX({v}) AS hi, COUNT(*) AS total FROM {q}) m "
             f"ORDER BY g.n DESC, g.v", n)
 
+    def placeholder_scan_many_sql(self, schema: Optional[str], table: str, columns: list[tuple[str, str]],
+                                  n: int) -> str:
+        """`placeholder_scan_sql` for several (column, ColumnType) pairs in one statement, tagged as
+        `distinct_many_sql` is. Each arm keeps its own top-`n` read; the rows come back in each arm's
+        own order, since a column's later `v{j}` are NULL on every other arm's rows."""
+        arms = [self.placeholder_scan_sql(schema, table, col, ctype, n) for col, ctype in columns]
+        order = ", ".join(f"v{i}" for i in range(len(arms)))
+        union = tagged_union(arms, ("v", "lo", "hi"), ("n", "total"), typed_first=self.union_types_pairwise)
+        return f"{union} ORDER BY c, n DESC, {order}"
+
     # --- type mapping ---
 
     def map_type(self, raw: str, numeric_scale: Optional[int] = None) -> ColumnType:
         return normalize_type(raw, numeric_scale=numeric_scale)
+
+
+def tagged_union(arms: list[str], own: tuple[str, ...], shared: tuple[str, ...] = (), *,
+                 typed_first: bool = False) -> str:
+    """Several reads in one statement: each `arm` unchanged as a derived table, tagged `c` (its
+    position) and stacked with UNION ALL. Arm i's `own` columns come back as `{name}{i}` and are NULL
+    on every other arm's rows, so no read's values are converted to share a type with another's;
+    `shared` columns (counts) are one column for all. No `AS` before a table alias: Oracle refuses it.
+
+    `typed_first` leads with a zero-row arm that selects every arm's columns at once (tagged -1), for
+    an engine that types a UNION two arms at a time: there the first two arms' bare NULLs in `v2` are
+    typed text, and arm 2's integer then cannot be matched. The engine folds `WHERE 1=0`, so it reads
+    nothing."""
+    out = []
+    if typed_first:
+        picked = [f"t{j}.{k} AS {k}{j}" for k in own for j in range(len(arms))]
+        picked += [f"t0.{k} AS {k}" for k in shared]
+        froms = ", ".join(f"({arm}) t{j}" for j, arm in enumerate(arms))
+        out.append(f"SELECT -1 AS c, {', '.join(picked)} FROM {froms} WHERE 1=0")
+    for i, arm in enumerate(arms):
+        picked = [f"b{i}.{k} AS {k}{j}" if j == i else f"NULL AS {k}{j}" for k in own for j in range(len(arms))]
+        picked += [f"b{i}.{k} AS {k}" for k in shared]
+        out.append(f"SELECT {i} AS c, {', '.join(picked)} FROM ({arm}) b{i}")
+    return " UNION ALL ".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +537,11 @@ class Dialect:
 class PostgreSQL(Dialect):
     name = "PostgreSQL"
     folds_unquoted = "lower"
+    union_types_pairwise = True
+    not_comparable_types = frozenset({"json", "xml", "point", "line", "lseg", "box", "path", "polygon", "circle"})
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        return f"TABLESAMPLE SYSTEM ({percent})"   # whole pages: reads only the share asked for
 
     # Keys come from pg_constraint, not information_schema: Postgres shows a constraint in
     # table_constraints only to the table's owner or a role holding a privilege other than SELECT,
@@ -503,6 +636,14 @@ class PostgreSQL(Dialect):
             f"AND c.relname = {self.quote_lit(table)}"
         )
 
+    def sql_row_estimates_bulk(self, schemas: list[str]) -> Optional[str]:
+        # Tables, partitioned tables, materialized views and foreign tables; a view has no estimate.
+        q = self._row_estimates_from(
+            "pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace",
+            "c.reltuples::bigint", "n.nspname", "c.relname", schemas,
+        )
+        return q and q + " AND c.relkind IN ('r', 'p', 'm', 'f')"
+
     # From the pg_* catalog for the same reason as the keys: any role can read it.
     def sql_enum_values(self, schema: str, table: str) -> Optional[str]:
         return (
@@ -547,9 +688,16 @@ class Supabase(PostgreSQL):
 
 class Redshift(PostgreSQL):
     name = "Redshift"
+    # Measured on a live cluster: a combined read with bigint and timestamp columns past the first
+    # two arms types each column from all its arms, so it needs no typing arm.
+    union_types_pairwise = False
+    not_comparable_types = frozenset({"super", "geometry", "geography", "hllsketch", "varbyte"})
     duration_rounds = True
     fk_enforced = False  # Redshift declares but does not enforce FKs
     unique_enforced = False  # nor unique keys
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        return None   # no TABLESAMPLE: a bounded read takes the first rows
 
     # Redshift has no LATERAL and no unnest(...) WITH ORDINALITY, so the pg_constraint queries
     # PostgreSQL uses would fail there. It keeps the information_schema ones.
@@ -602,6 +750,16 @@ class Redshift(PostgreSQL):
                            end_type: str = "timestamp") -> str:
         return f"DATEDIFF('day', {start}, {end})"
 
+    def sql_row_estimates_bulk(self, schemas: list[str]) -> Optional[str]:
+        return self._row_estimates_from(
+            "svv_table_info", "tbl_rows", '"schema"', '"table"', schemas)
+
+    # `svv_table_info` shows a role that is not a superuser only the tables it owns, so a read-only
+    # role got no rows and the table picker showed no sizes at all (#678). `pg_class.reltuples` is
+    # readable by any role and ANALYZE keeps it, so it fills in what svv_table_info hid.
+    def sql_row_estimates_bulk_fallback(self, schemas: list[str]) -> Optional[str]:
+        return PostgreSQL.sql_row_estimates_bulk(self, schemas)
+
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         return (
             "SELECT tbl_rows AS estimated_rows FROM svv_table_info "
@@ -612,6 +770,7 @@ class Redshift(PostgreSQL):
 
 class MySQL(Dialect):
     name = "MySQL"
+    scans_unsized = False   # a view is materialised before its LIMIT applies
     backslash_escapes = True
     duration_rounds = True
     reserved_extra = frozenset({
@@ -625,6 +784,9 @@ class MySQL(Dialect):
         "show", "signal", "spatial", "sql", "system", "trigger", "undo", "unlock", "unsigned",
         "usage", "use", "varying", "virtual", "while", "write", "xor", "year_month", "zerofill",
     })
+
+    def text_cast(self, expr: str) -> str:
+        return f"CAST({expr} AS CHAR)"
 
     def placeholder_value_expr(self, column: str, ctype: str) -> str:
         # Some drivers crash fetching a zero date (0000-00-00); as text it reads safely.
@@ -672,6 +834,10 @@ class MySQL(Dialect):
             "AND referenced_table_name IS NOT NULL "
             "ORDER BY table_name, constraint_name, ordinal_position"
         )
+
+    def sql_row_estimates_bulk(self, schemas: list[str]) -> Optional[str]:
+        return self._row_estimates_from(
+            "information_schema.tables", "table_rows", "table_schema", "table_name", schemas)
 
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         return (
@@ -724,6 +890,9 @@ class Snowflake(Dialect):
     backslash_escapes = True
     unique_enforced = False  # Snowflake declares unique keys but does not enforce them
     duration_rounds = True
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        return f"SAMPLE SYSTEM ({percent})"
     reserved_extra = frozenset({
         "account", "alter", "connect", "connection", "database", "gscluster", "ilike", "increment",
         "issue", "lateral", "localtime", "localtimestamp", "minus", "of", "organization", "qualify",
@@ -736,6 +905,10 @@ class Snowflake(Dialect):
                            end_type: str = "timestamp") -> str:
         return f"DATEDIFF('day', {start}, {end})"
 
+    def sql_row_estimates_bulk(self, schemas: list[str]) -> Optional[str]:
+        return self._row_estimates_from(
+            "information_schema.tables", "row_count", "table_schema", "table_name", schemas)
+
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         return (
             "SELECT row_count AS estimated_rows FROM information_schema.tables "
@@ -746,6 +919,9 @@ class Snowflake(Dialect):
 
 class DuckDB(Dialect):
     name = "DuckDB"
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        return f"TABLESAMPLE {percent}%"
 
     def sql_check_constraints(self, schema: str, table: str) -> Optional[str]:
         return (
@@ -771,6 +947,12 @@ class Databricks(Dialect):
     fk_enforced = False  # Unity Catalog constraints are informational
     duration_rounds = True
 
+    def tablesample(self, percent: str) -> Optional[str]:
+        return None   # TABLESAMPLE here samples rows, reading every one: a bounded read takes the first rows
+
+    def text_cast(self, expr: str) -> str:
+        return f"CAST({expr} AS STRING)"
+
     def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
         return None  # Unity Catalog has no unique constraint
 
@@ -786,6 +968,14 @@ class Trino(Dialect):
     name = "Trino"
     fk_enforced = False  # Trino generally has no constraints -> probe FKs
     duration_rounds = True
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        # SYSTEM skips whole splits, so the scan is bounded; BERNOULLI would read every row.
+        return f"TABLESAMPLE SYSTEM ({percent})"
+
+    def date_literal(self, iso_day: str) -> str:
+        # Trino compares no timestamp with a varchar; a DATE literal is coerced to the column's type.
+        return f"DATE {self.quote_lit(iso_day)}"
 
     def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
                            end_type: str = "timestamp") -> str:
@@ -809,6 +999,7 @@ class Trino(Dialect):
 
 class SQLServer(Dialect):
     name = "SQLServer"
+    not_comparable_types = frozenset({"text", "ntext", "image", "xml", "geography", "geometry"})
     limit_style = "top"
     duration_rounds = True
     reserved_extra = frozenset({
@@ -829,8 +1020,15 @@ class SQLServer(Dialect):
     _SYS_SCHEMAS = ("sys", "INFORMATION_SCHEMA")
     case_insensitive_compare = True   # the default collations are *_CI_*
 
+
+    def date_literal(self, iso_day: str) -> str:
+        # `'YYYY-MM-DD'` is read through the session's DATEFORMAT for a datetime; `'YYYYMMDD'` never is.
+        return self.quote_lit(iso_day.replace("-", ""))
     def quote_ident(self, name: str) -> str:
         return "[" + name.replace("]", "]]") + "]"
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        return f"TABLESAMPLE ({percent} PERCENT)"
 
     def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
                            end_type: str = "timestamp") -> str:
@@ -899,7 +1097,15 @@ class SQLServer(Dialect):
 
 class BigQuery(Dialect):
     name = "BigQuery"
+    not_comparable_types = frozenset({"array", "struct", "json", "geography"})
+    scans_unsized = False   # a LIMIT bills every byte of the columns it reads
     backslash_escapes = True
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        return f"TABLESAMPLE SYSTEM ({percent} PERCENT)"
+
+    def text_cast(self, expr: str) -> str:
+        return f"CAST({expr} AS STRING)"
 
     def sql_row_count(self, schema: str, table: str) -> Optional[str]:
         # No exact-count fallback here until introspection reads carry this engine's own bound
@@ -1117,8 +1323,13 @@ class SQLite(Dialect):
 
 class Oracle(Dialect):
     name = "Oracle"
+    not_comparable_types = frozenset({"clob", "nclob", "blob", "long", "long raw", "bfile", "xmltype"})
     limit_style = "fetch"
     folds_unquoted = "upper"
+
+    def date_literal(self, iso_day: str) -> str:
+        # A bare string is read through the session's NLS_DATE_FORMAT, which need not be ISO.
+        return f"DATE {self.quote_lit(iso_day)}"
     reserved_extra = frozenset({
         "access", "add", "alter", "audit", "char", "cluster", "comment", "compress", "connect",
         "date", "decimal", "exclusive", "file", "float", "identified", "immediate", "increment",
@@ -1128,6 +1339,9 @@ class Oracle(Dialect):
         "rownum", "rows", "session", "set", "share", "size", "smallint", "start", "successful",
         "synonym", "sysdate", "uid", "validate", "varchar", "varchar2", "view", "whenever",
     })
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        return f"SAMPLE BLOCK ({percent})"   # whole blocks: `SAMPLE (p)` alone would read every row
 
     def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
                            end_type: str = "timestamp") -> str:
@@ -1252,9 +1466,12 @@ _REGISTRY: dict[str, Callable[[], Dialect]] = {
 
 # Agami's own catalog queries that call a catalog function the recon gate refuses (#523). Each is
 # rendered with a stand-in literal: `execute_sql` compares fingerprints, which ignore literal values,
-# so the same query for any schema matches while any other statement does not.
+# so the same query for any schema matches while any other statement does not. A catalog read missing
+# here is refused on every build, and discovery saw an empty warehouse (#668);
+# `test_every_built_in_catalog_read_the_recon_gate_refuses_is_on_the_build_allow_list` catches the next one.
 _CATALOG_FUNCTION_QUERIES: tuple[Callable[[], str], ...] = (
     lambda: PostgreSQL().sql_constraint_definitions("schema"),
+    lambda: Redshift().sql_schemas(),  # has_schema_privilege (#588)
 )
 
 

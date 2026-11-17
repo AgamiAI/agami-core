@@ -44,6 +44,8 @@ def _probe_runner(sql):
         raise RuntimeError("permission denied")
     if "WHERE 1=0" in s:
         return []
+    if "AS estimated_rows" in s:   # the catalog is closed, so each table gets the capped count
+        return [{"estimated_rows": "3"}]
     if "COUNT(DISTINCT" in s:
         return [{"total": "3", "distinct_count": "3", "null_count": "0"}]
     if "EXISTS" in s:
@@ -588,7 +590,9 @@ def test_giant_table_skips_grain_probe(tmp_path):
     fact = org.subject_areas[0].defined_table("sm_asset_mgmt")
     assert fact.grain == []                                   # left empty, not guessed
     assert rep.mode_per_capability["grain"] == "probe_skipped_large"
-    assert not any("COUNT(DISTINCT" in s for s in seen)       # the full scans never ran
+    # the full scans never ran: the profile's distinct counts on it read a bounded sample (#448)
+    assert not any("COUNT(DISTINCT" in s and "LIMIT" not in s for s in seen)
+    assert any("COUNT(DISTINCT" in s and "TABLESAMPLE SYSTEM" in s and "LIMIT 10000" in s for s in seen)
     assert any("skipped grain probe" in n for n in rep.notes)  # and the skip is surfaced
     # the catalog row estimate is still recorded (it's a cheap stat, fetched once)
     assert fact.performance_hints.estimated_row_count == 40_000_000
@@ -826,6 +830,14 @@ def test_same_named_tables_in_two_schemas_both_survive(tmp_path):
     assert inv_join and inv_join[0].to_table == "products" and inv_join[0].cross_schema is False
 
 
+def _join_check_rows(sql: str, matches: bool) -> list[dict]:
+    """What the data check (`profile.check_sql`) answers: one row per check in the statement, every
+    one of 5 values found in the key, or none of them."""
+    hit = "5" if matches else "0"
+    return [{"probe": str(i), "rows_read": "5", "rows_keyed": "5", "rows_matched": hit, "vals": "5",
+             "vals_matched": hit, "to_keys": "5", "to_rows": "5"} for i in range(sql.count("AS rows_read"))]
+
+
 def _redshift_fk_runner(overlap_matches: bool):
     """A single-schema Redshift catalog: orders.customer_id is a DECLARED (but unenforced)
     FK to customers.id. Redshift's catalog records the FK; the data may or may not honour it,
@@ -848,8 +860,8 @@ def _redshift_fk_runner(overlap_matches: bool):
         if "FOREIGN KEY" in s:
             return [{"from_table": "orders", "from_column": "customer_id", "from_schema": "public",
                      "to_table": "customers", "to_column": "id", "to_schema": "public"}]
-        if "matched" in s:                       # _overlaps EXISTS probe
-            return [{"matched": "5"}] if overlap_matches else [{"matched": "0"}]
+        if "AS rows_read" in s:                  # the data check of a declared key
+            return _join_check_rows(s, overlap_matches)
         if "reltuples" in s:
             return [{"estimated_rows": "1000"}]
         return []
@@ -887,9 +899,10 @@ def test_unenforced_fk_without_overlap_stays_unreviewed(tmp_path):
 
 def test_unenforced_fk_overlap_probing_is_capped(tmp_path, monkeypatch):
     """A schema that declares MANY FKs on an unenforced dialect must not fire one sequential
-    overlap COUNT per FK without bound. Past FK_OVERLAP_PROBE_CAP we stop probing and leave the
+    overlap COUNT per FK without bound. Past profile.JOIN_CHECK_CAP we stop checking and leave the
     rest unreviewed — the run stays bounded on inheritance-heavy Redshift/ServiceNow schemas."""
-    monkeypatch.setattr(I, "FK_OVERLAP_PROBE_CAP", 3)
+    # One cap on checks across the run (#448): declared keys are confirmed by the check of every join.
+    monkeypatch.setattr(I.PF, "JOIN_CHECK_CAP", 3)
     N = 8
     probes = {"n": 0}
 
@@ -911,15 +924,15 @@ def test_unenforced_fk_overlap_probing_is_capped(tmp_path, monkeypatch):
         if "FOREIGN KEY" in s:
             return [{"from_table": f"child{i}", "from_column": "parent_id", "from_schema": "public",
                      "to_table": "parent", "to_column": "id", "to_schema": "public"} for i in range(N)]
-        if "matched" in s:
-            probes["n"] += 1
-            return [{"matched": "5"}]
+        if "AS rows_read" in s:
+            probes["n"] += s.count("AS rows_read")
+            return _join_check_rows(s, True)
         if "reltuples" in s:
             return [{"estimated_rows": "1000"}]
         return []
 
     org, rep = I.introspect("shop", "redshift", runner=runner, artifacts_dir=tmp_path, dry_run=True)
-    # never probed more than the cap, even though there are N=8 declared FKs
+    # never checked more than the cap, even though there are N=8 declared FKs
     assert probes["n"] <= 3
     assert any("capped" in n for n in rep.notes), rep.notes
     # all FKs still modeled (the uncapped ones simply stay unreviewed rather than vanishing)
@@ -932,7 +945,8 @@ def test_introspect_writes_progress_log(tmp_path):
     pp = tmp_path / "progress.log"
     I.introspect("shop", "postgres", runner=_catalog_runner,
                  artifacts_dir=tmp_path, dry_run=True, progress_path=pp)
-    lines = pp.read_text().splitlines()
+    # Each line is stamped in UTC (#677); the message after the stamp is unchanged.
+    lines = [ln.split(" ", 1)[1] for ln in pp.read_text().splitlines()]
     assert any("discovered" in ln for ln in lines)
     assert any(ln.startswith("columns+grain 1/") for ln in lines)
     assert lines[-1].startswith("done:")
@@ -1148,10 +1162,11 @@ def test_a_table_the_catalog_cannot_size_is_counted(tmp_path, dialect, estimate)
     run = _estimate_runner("orders_v", estimate=estimate, count=7_000_000, seen=seen)
     org, _ = I.introspect("fin", dialect, runner=run, artifacts_dir=tmp_path, dry_run=True)
     view = org.subject_areas[0].defined_table("orders_v")
-    assert view.performance_hints.estimated_row_count == 7_000_000
+    # Counted only up to the cap: past it the size is a lower bound, never the whole view read.
+    assert view.performance_hints.estimated_row_count == I._SIZE_COUNT_CAP + 1
     # Large, so it carries the filter the scan-risk check names.
     assert view.performance_hints.recommended_filters == ["submitted_on"]
-    assert any("COUNT(*) AS estimated_rows" in s for s in seen)
+    assert any(f"LIMIT {I._SIZE_COUNT_CAP + 1}) capped" in s for s in seen)
 
 
 def test_a_table_with_a_catalog_estimate_is_not_counted(tmp_path):
@@ -1163,34 +1178,36 @@ def test_a_table_with_a_catalog_estimate_is_not_counted(tmp_path):
 
 
 @pytest.mark.parametrize("dialect, estimate", [("redshift", None), ("postgres", -1), ("postgres", 0)])
-def test_a_count_that_fails_leaves_the_size_unknown(tmp_path, dialect, estimate):
+def test_a_count_that_fails_reads_as_large(tmp_path, dialect, estimate):
     seen: list[str] = []
     run = _estimate_runner("orders_v", estimate=estimate, count=None, seen=seen)
-    org, _ = I.introspect("fin", dialect, runner=run, artifacts_dir=tmp_path, dry_run=True)
+    org, report = I.introspect("fin", dialect, runner=run, artifacts_dir=tmp_path, dry_run=True)
     hints = org.subject_areas[0].defined_table("orders_v").performance_hints
-    # Unknown, not -1: a never-analysed Postgres table no longer stores the catalog's -1.
-    assert hints is None or hints.estimated_row_count is None
+    # Never the catalog's -1 or 0, and never small: an unknown size is the cap's, so every cost guard
+    # skips or samples it, and the run's report says it is unknown.
+    assert hints.estimated_row_count == I._SIZE_COUNT_CAP + 1
+    assert report.counted_sizes["public.orders_v"] == (I._SIZE_COUNT_CAP + 1, "unknown")
     assert any("COUNT(*) AS estimated_rows" in s for s in seen)  # the fallback was tried
 
 
-def test_a_spent_count_budget_leaves_the_rest_unknown(tmp_path, monkeypatch):
-    """Counts run serially, so one run-level budget bounds them all; past it a table stays unsized
-    and the report says how many were skipped."""
+def test_a_spent_count_budget_treats_the_rest_as_large(tmp_path, monkeypatch):
+    """One run-level budget bounds every count; past it a table is not counted, reads as large, and
+    the report says how many were skipped."""
     monkeypatch.setattr(I, "_COUNT_BUDGET_S", 0.0)
     seen: list[str] = []
     run = _estimate_runner("orders_v", estimate=None, count=7_000_000, seen=seen)
     org, report = I.introspect("fin", "redshift", runner=run, artifacts_dir=tmp_path, dry_run=True)
-    hints = org.subject_areas[0].defined_table("orders_v").performance_hints
-    assert hints is None or hints.estimated_row_count is None
+    assert report.counted_sizes["public.orders_v"] == (I._SIZE_COUNT_CAP + 1, "unknown")
     assert not any("COUNT(*) AS estimated_rows" in s for s in seen)
-    assert any("1 table(s) left unsized" in n for n in report.notes)
+    assert any("1 of them not counted" in n for n in report.notes)
 
 
 def test_a_count_spends_the_budget():
     from semantic_model import dialects as D
 
     budget = I._CountBudget(seconds_left=5.0)
-    assert I._estimate_rows(D.get_dialect("redshift"), lambda sql: [], "s", "v", budget) is None
+    got = I._estimate_rows(D.get_dialect("redshift"), lambda sql: [], "s", "v", budget)
+    assert (got, got.kind) == (I._SIZE_COUNT_CAP + 1, "unknown")
     assert budget.seconds_left < 5.0 and budget.skipped == 0
 
 

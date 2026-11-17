@@ -1,0 +1,263 @@
+<!doctype html>
+<!-- The open questions page (#676): rendered by scripts/render_open_questions_page.py from
+     `sm open-questions --all` and served once by scripts/serve_page.py --decisions on 127.0.0.1.
+     Self-contained on purpose: no fonts, images or files from anywhere, and its scripts are allowed
+     by their hash. Every question, code, label and sample value is data in the JSON block below and
+     reaches the page only as text (textContent or a form value), never as markup. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="same-origin">
+<title>agami: open questions for {{PROFILE}}</title>
+<style>
+  :root {
+    color-scheme: light;
+    --brand: #0b57d0;
+    --brand-hover: #0a4ab1;
+    --tint: #eff4fc;
+    --tint-2: #dde8f7;
+    --ink: #262626;
+    --ink-2: #525252;
+    --ink-3: #737373;
+    --line: #e5e5e5;
+    --ok: #1e6b3a;
+    --bad: #a12b2b;
+    --sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #ffffff; color: var(--ink); font: 15px/1.5 var(--sans); }
+  main { max-width: 900px; margin: 0 auto; padding: 32px 24px 140px; }
+  .logo svg { display: block; height: 26px; width: auto; margin-bottom: 20px; }
+  h1 { font-size: 22px; line-height: 1.3; margin: 0 0 6px; }
+  .lede { margin: 0 0 12px; color: var(--ink-2); }
+  .note { margin: 0 0 20px; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--tint-2);
+          background: var(--tint); }
+  code, .mono { font-family: var(--mono); font-size: 13.5px; }
+  .row { margin: 0 0 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; }
+  .row.decided { border-color: var(--tint-2); background: #fbfcff; }
+  .row h2 { font-size: 15.5px; margin: 0 0 4px; }
+  .kind { font-size: 12.5px; font-weight: 600; color: var(--ink-3); text-transform: uppercase; letter-spacing: .03em; }
+  .evidence { margin: 4px 0 8px; color: var(--ink-2); }
+  .samples { margin: 4px 0 8px; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px; }
+  .samples li { font-family: var(--mono); font-size: 13px; background: var(--tint); border-radius: 6px; padding: 1px 8px; }
+  .guess { margin: 4px 0 8px; }
+  .codes { border-collapse: collapse; margin: 6px 0 8px; }
+  .codes td { padding: 3px 10px 3px 0; vertical-align: middle; }
+  input.label, textarea.text { font: inherit; padding: 5px 8px; border: 1px solid #a3a3a3; border-radius: 6px; }
+  input.label:disabled, textarea.text:disabled { background: #f5f5f5; color: var(--ink-2); }
+  textarea.text { width: 100%; min-height: 2.6em; margin-top: 6px; }
+  select { font: inherit; padding: 6px 8px; border-radius: 8px; border: 1px solid #a3a3a3; max-width: 100%; }
+  input:focus-visible, button:focus-visible, select:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--brand); outline-offset: 2px; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; }
+  footer { position: fixed; left: 0; right: 0; bottom: 0; background: #ffffff; border-top: 1px solid var(--line); }
+  footer .bar { max-width: 900px; margin: 0 auto; padding: 12px 24px; display: flex; gap: 16px;
+          align-items: center; flex-wrap: wrap; }
+  #total { flex: 1 1 auto; font-weight: 600; }
+  #save { color: #ffffff; background: var(--brand); border: 0; padding: 10px 18px; font-weight: 600; }
+  #save:hover { background: var(--brand-hover); }
+  #save:disabled { background: #a3a3a3; cursor: default; }
+  #status { flex-basis: 100%; margin: 0; font-weight: 600; }
+  #status:empty { display: none; }
+  #status.ok { color: var(--ok); }
+  #status.bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <div class="logo" aria-label="agami">{{LOGO}}</div>
+  <h1>What the data can't settle</h1>
+  <p class="lede">Answer the ones you know for <code>{{PROFILE}}</code>, then press <strong>Save answers</strong>.
+    A row left blank stays open and comes back next time; nothing is chosen for you.
+    The page saves once, and stops working when its time is up.</p>
+  <p class="note" role="note">{{WHO}}</p>
+  <div id="rows"></div>
+</main>
+<footer>
+  <div class="bar">
+    <span id="total" role="status" aria-live="polite"></span>
+    <button type="button" id="save">Save answers</button>
+    <p id="status" role="status" aria-live="polite"></p>
+  </div>
+</footer>
+<script type="application/json" id="agami-questions">{{DATA}}</script>
+<script>
+(function () {
+  var data = JSON.parse(document.getElementById('agami-questions').textContent);
+  var rows = [];  // {r, el, select, labels: [{code, input}], text}
+  var state = 'idle';
+  var KINDS = { question: 'Question', same: 'Look-alike tables', codes: 'Code list', column: 'Unclear column' };
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = text;  // text only, never markup
+    return n;
+  }
+
+  function build() {
+    var host = document.getElementById('rows');
+    data.rows.forEach(function (r, i) {
+      var box = el('section', 'row');
+      box.setAttribute('data-id', r.id);
+      box.appendChild(el('div', 'kind', (i + 1) + '. ' + (KINDS[r.kind] || '')));
+      box.appendChild(el('h2', null, r.title));
+      if (r.evidence) box.appendChild(el('p', 'evidence', r.evidence));
+      var row = { r: r, el: box, labels: [], text: null };
+      if (r.kind === 'codes') {
+        var table = el('table', 'codes');
+        r.codes.forEach(function (c) {
+          var tr = el('tr');
+          var code = el('td', 'mono', c.code);
+          var cell = el('td');
+          var input = el('input', 'label');
+          input.type = 'text';
+          input.value = c.guess || '';
+          input.disabled = true;
+          input.setAttribute('aria-label', 'Meaning of ' + c.code);
+          input.addEventListener('input', update);
+          cell.appendChild(input);
+          tr.appendChild(code);
+          tr.appendChild(cell);
+          table.appendChild(tr);
+          row.labels.push({ code: c.code, input: input });
+        });
+        box.appendChild(table);
+      }
+      if (r.kind === 'column') {
+        if (r.samples && r.samples.length) {
+          var ul = el('ul', 'samples');
+          ul.setAttribute('aria-label', 'Sample values');
+          r.samples.forEach(function (v) { ul.appendChild(el('li', null, v)); });
+          box.appendChild(ul);
+        } else {
+          box.appendChild(el('p', 'evidence', 'No sample values could be read.'));
+        }
+        box.appendChild(el('p', 'guess', r.guess ? 'agami’s guess: ' + r.guess : 'agami couldn’t tell what it holds.'));
+      }
+      var select = el('select');
+      select.setAttribute('aria-label', 'Answer for row ' + (i + 1));
+      var blank = el('option', null, 'Not answered yet');
+      blank.value = '';
+      select.appendChild(blank);
+      r.choices.forEach(function (c) {
+        var o = el('option', null, c.label);
+        o.value = c.value;
+        select.appendChild(o);
+      });
+      select.value = '';  // blank is undecided: nothing is picked for the person
+      select.addEventListener('change', update);
+      box.appendChild(select);
+      if (r.kind === 'column') {
+        var text = el('textarea', 'text');
+        text.value = '';
+        text.disabled = true;
+        text.setAttribute('aria-label', 'What this column holds');
+        text.addEventListener('input', update);
+        box.appendChild(text);
+        row.text = text;
+      }
+      row.select = select;
+      host.appendChild(box);
+      rows.push(row);
+    });
+  }
+
+  // The decision a row holds, or null when blank; {problem} when it can't be saved as it is.
+  function decision(row) {
+    var v = row.select.value;
+    if (!v) return null;
+    var d = { id: row.r.id };
+    if (v.indexOf('reading:') === 0) { d.choice = 'reading'; d.label = v.slice(8); return d; }
+    if (v.indexOf('table:') === 0) { d.choice = 'table'; d.table = v.slice(6); return d; }
+    d.choice = v;
+    if (v === 'fix' && row.r.kind === 'codes') {
+      d.labels = {};
+      row.labels.forEach(function (l) { d.labels[l.code] = l.input.value; });
+      if (!row.labels.some(function (l) { return l.input.value.trim(); })) {
+        return { problem: 'Type at least one meaning for row ' + (rows.indexOf(row) + 1) + ', or pick another answer.' };
+      }
+    }
+    if (v === 'fix' && row.r.kind === 'column') {
+      d.text = row.text.value;
+      if (!d.text.trim()) {
+        return { problem: 'Type what row ' + (rows.indexOf(row) + 1) + ' holds, or pick another answer.' };
+      }
+    }
+    return d;
+  }
+
+  function say(text, kind) {
+    var s = document.getElementById('status');
+    s.textContent = text;
+    s.className = kind || '';
+  }
+
+  function current() {
+    var out = [], problem = null;
+    rows.forEach(function (row) {
+      var d = decision(row);
+      if (d && d.problem) { problem = problem || d.problem; return; }
+      if (d) out.push(d);
+    });
+    return { decisions: out, problem: problem };
+  }
+
+  function update() {
+    rows.forEach(function (row) {
+      var fixing = row.select.value === 'fix' && state === 'idle';
+      row.labels.forEach(function (l) { l.input.disabled = !fixing; });
+      if (row.text) row.text.disabled = !fixing;
+      row.el.className = 'row' + (row.select.value ? ' decided' : '');
+    });
+    var c = current();
+    var n = c.decisions.length + (c.problem ? 1 : 0);
+    document.getElementById('total').textContent = n + ' of ' + rows.length + ' decided';
+    if (state !== 'idle') return;
+    var who = data.signer && data.signer.email && data.signer.role;
+    document.getElementById('save').disabled = !who || !!c.problem || c.decisions.length === 0;
+    if (!who) say('No sign-off identity is saved, so these answers can’t be saved from this page. Set it in the chat.', 'bad');
+    else if (c.problem) say(c.problem, 'bad');
+    else say('');
+  }
+
+  function lock(on) {
+    document.querySelectorAll('button, select, input, textarea').forEach(function (b) { b.disabled = on; });
+  }
+
+  function save() {
+    var c = current();
+    if (state !== 'idle' || c.problem || c.decisions.length === 0) return;
+    if (!(data.signer && data.signer.email && data.signer.role)) return;
+    state = 'saving'; lock(true); say('Saving…');
+    fetch('save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ page: 'open-questions', profile: data.profile, decisions: c.decisions }),
+                    cache: 'no-store', credentials: 'omit' })
+      .then(function (r) { return r.json().catch(function () { return {}; })
+        .then(function (b) { return { ok: r.ok, status: r.status, b: b }; }); })
+      .then(function (res) {
+        if (res.ok) {
+          state = 'saved';
+          say('Saved ' + c.decisions.length + ' of ' + rows.length + ' answers. Go back to the chat and press I’ve saved it.', 'ok');
+          return;
+        }
+        // Already saved or expired cannot change, so the page stays locked; anything else can be retried.
+        state = (res.status === 409 || res.status === 410) ? 'over' : 'idle';
+        if (state === 'idle') { lock(false); update(); }
+        say((res.b && res.b.message) || ('Not saved (' + res.status + ').'), 'bad');
+      })
+      .catch(function () {
+        state = 'idle'; lock(false); update();
+        say('Not saved: this page could not reach agami. If the chat has moved on, ask there for a new link.', 'bad');
+      });
+  }
+
+  build();
+  document.getElementById('save').addEventListener('click', save);
+  update();
+})();
+</script>
+</body>
+</html>

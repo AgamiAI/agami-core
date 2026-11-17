@@ -144,3 +144,129 @@ def test_discover_writes_the_inventory_and_no_page(tmp_path, monkeypatch, capsys
     assert json.loads((tmp_path / "main" / ".introspect" / "inventory.json").read_text())["table_count"] == 1
     assert not list(tmp_path.rglob("*.html"))
     assert ("note" in printed) == bool(out)
+
+
+# --- row estimates for the table picker (#654) -------------------------------
+
+from semantic_model import dialects as D  # noqa: E402
+
+
+def _estimating_runner(calls, estimates):
+    base = _bulk_runner(calls)
+
+    def run(sql):
+        if "estimated_rows" in sql:
+            calls.append(" ".join(sql.split()))
+            if isinstance(estimates, Exception):
+                raise estimates
+            return estimates
+        return base(sql)
+    return run
+
+
+@pytest.mark.parametrize("unknown", [-1, 0, "n/a", None])
+def test_row_estimates_are_one_catalog_read_and_never_a_count(unknown):
+    calls = []
+    est = [{"table_schema": "public", "table_name": "orders", "estimated_rows": "1200"},
+           {"table_schema": "public", "table_name": "customers", "estimated_rows": unknown}]
+    inv = I.discover_inventory("main", "postgres", runner=_estimating_runner(calls, est),
+                               row_estimates=True)
+    reads = [s for s in calls if "estimated_rows" in s]
+    assert len(reads) == 1 and "reltuples" in reads[0] and "COUNT(" not in reads[0]
+    by = {t["table"]: t.get("rows") for t in inv["tables"]}
+    assert by == {"orders": 1200, "customers": None}  # -1 (never analysed), 0 or junk: unknown, not empty
+
+
+def test_row_estimates_are_off_unless_asked():
+    calls = []
+    inv = I.discover_inventory("main", "postgres", runner=_estimating_runner(calls, []))
+    assert not [s for s in calls if "estimated_rows" in s]
+    assert all("rows" not in t for t in inv["tables"])
+
+
+def test_a_refused_estimate_read_leaves_the_sizes_unknown():
+    inv = I.discover_inventory("main", "postgres", runner=_estimating_runner([], RuntimeError("denied")),
+                               row_estimates=True)
+    assert inv["table_count"] == 2 and all("rows" not in t for t in inv["tables"])
+
+
+@pytest.mark.parametrize(("db", "source", "rows"), [
+    ("postgres", "pg_class", "reltuples"),
+    ("supabase", "pg_class", "reltuples"),
+    ("redshift", "svv_table_info", "tbl_rows"),
+    ("mysql", "information_schema.tables", "table_rows"),
+    ("snowflake", "information_schema.tables", "row_count"),
+])
+def test_each_catalog_with_estimates_reads_them_in_one_query(db, source, rows):
+    sql = D.get_dialect(db).sql_row_estimates_bulk(["sales", "o'brien"])
+    assert source in sql and rows in sql and "COUNT(" not in sql.upper()
+    assert "'o''brien'" in sql  # names are quoted as literals
+    assert D.get_dialect(db).sql_row_estimates_bulk([]) is None
+
+
+@pytest.mark.parametrize("db", ["sqlite", "duckdb", "bigquery", "oracle", "sqlserver", "trino", "databricks"])
+def test_a_catalog_without_a_bulk_estimate_offers_none(db):
+    assert D.get_dialect(db).sql_row_estimates_bulk(["sales"]) is None
+
+
+def test_discover_passes_row_estimates_on(tmp_path, monkeypatch, capsys):
+    seen = {}
+    monkeypatch.setattr(I, "make_execute_sql_runner", lambda *a, **k: None)
+    monkeypatch.setattr(I, "discover_inventory", lambda *a, **k: seen.update(k) or _inventory())
+    argv = ["discover", "--profile", "main", "--db-type", "postgres", "--artifacts", str(tmp_path),
+            "--row-estimates"]
+    args = cli.build_parser().parse_args(argv)
+    assert args.func(args) == 0 and seen["row_estimates"] is True
+
+
+
+def _routing_runner(calls, by_source):
+    """Answers an estimate read from whichever catalog it names (`svv_table_info` or `pg_class`)."""
+    def run(sql):
+        calls.append(" ".join(sql.split()))
+        for source, rows in by_source.items():
+            if source in sql:
+                if isinstance(rows, Exception):
+                    raise rows
+                return rows
+        return []
+    return run
+
+
+def _redshift_sizes(runner):
+    tables = [{"schema": "public", "table": "orders"}, {"schema": "public", "table": "customers"}]
+    I._add_row_estimates(D.get_dialect("redshift"), runner, ["public"], tables)
+    return {t["table"]: t.get("rows") for t in tables}
+
+
+def test_redshift_falls_back_to_pg_class_for_what_svv_table_info_hides():
+    """#678: `svv_table_info` shows a non-superuser only the tables it owns, so a read-only role got
+    no rows and the picker showed no sizes. `pg_class.reltuples` is readable by any role."""
+    calls = []
+    runner = _routing_runner(calls, {
+        "svv_table_info": [],
+        "pg_class": [{"table_schema": "public", "table_name": "orders", "estimated_rows": 1200.0}],
+    })
+    assert _redshift_sizes(runner) == {"orders": 1200, "customers": None}
+    assert len(calls) == 2 and "svv_table_info" in calls[0] and "reltuples" in calls[1]
+    assert "COUNT(" not in calls[1].upper()
+
+
+def test_redshift_keeps_svv_table_info_figures_and_skips_the_fallback_when_all_are_sized():
+    calls = []
+    runner = _routing_runner(calls, {
+        "svv_table_info": [{"table_schema": "public", "table_name": "orders", "estimated_rows": 5},
+                           {"table_schema": "public", "table_name": "customers", "estimated_rows": 7}],
+        "pg_class": RuntimeError("must not be read"),
+    })
+    assert _redshift_sizes(runner) == {"orders": 5, "customers": 7} and len(calls) == 1
+
+
+def test_redshift_fallback_refused_leaves_sizes_unknown():
+    runner = _routing_runner([], {"svv_table_info": RuntimeError("denied"),
+                                  "pg_class": RuntimeError("denied")})
+    assert _redshift_sizes(runner) == {"orders": None, "customers": None}
+
+
+def test_postgres_offers_no_second_estimate_read():
+    assert D.get_dialect("postgres").sql_row_estimates_bulk_fallback(["public"]) is None

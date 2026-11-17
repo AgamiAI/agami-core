@@ -578,7 +578,7 @@
         if (pendingLabel) {
           header.appendChild(el('span', {
             class: 'badge pending',
-            title: 'Queued in your browser. Hit Generate feedback for Claude to apply.',
+            title: window.agamiSave ? 'Queued in your browser. Press Save decisions to apply.' : 'Queued in your browser. Hit Generate feedback for Claude to apply.',
             text: pendingLabel,
           }));
         }
@@ -980,7 +980,39 @@
       }
     }
 
+    // A page that saves its own decisions (rendered --save-to-helper, served by serve_page.py
+    // --decisions, #651) sends them to the helper as one JSON object instead of a block to paste:
+    // each decided example by its number, area and question, which the chat checks against the items
+    // file before applying it with the commands the cards use.
+    const SAVE_ACTION = { validate: 'keep', reject: 'drop', edit: 'fix', note: 'note' };
+    function saveDecisions() {
+      const open = Object.entries(pendingActions).filter(([, p]) =>
+        (p.action === 'edit' && !p.editSaved) || (p.action === 'note' && !p.noteSaved));
+      if (open.length) {
+        window.agamiSave.say('Press Save edit or Save note on ' + open.map(([n]) => '#' + n).join(', ') + ' first, or cancel it.', 'bad');
+        return;
+      }
+      // Keeping an example signs it off, as the saved identity; with none saved, a keep would be
+      // recorded unsigned, so it is refused here as the explorer refuses an approval.
+      const signer = (window.AGAMI_SAVE || {}).signer;
+      if (!signer && Object.values(pendingActions).some(p => p.action === 'validate')) {
+        window.agamiSave.say('Keeping an example signs it off, and no sign-off identity is saved. Set it in the chat, or take the keeps off and save the rest.', 'bad');
+        return;
+      }
+      const decisions = [];
+      Object.keys(pendingActions).sort((a, b) => Number(a) - Number(b)).forEach(n => {
+        const p = pendingActions[n];
+        const it = items.find(x => String(x.n) === String(n)) || {};
+        const d = { n: Number(n), area: it.area || null, question: it.question || '', action: SAVE_ACTION[p.action] };
+        if (p.action === 'edit') d.sql = p.sql || '';
+        if (p.action === 'note') { d.note = (p.note || '').trim(); if (!d.note) return; }
+        decisions.push(d);
+      });
+      window.agamiSave({ page: 'examples', profile: profile, decisions: decisions, note_all: globalNote() || null });
+    }
+
     function generateFeedback() {
+      if (window.agamiSave) { saveDecisions(); return; }
       const email = reviewerEmail();
       const validates = [], rejects = [], editsByN = {}, notesByN = {};
       Object.entries(pendingActions).forEach(([n, p]) => {

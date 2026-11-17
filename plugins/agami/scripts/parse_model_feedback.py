@@ -9,7 +9,8 @@ script does the parse + the exclude/include → curate-op translation, so the sk
 just reads structured output and applies it via `sm curate` / `sm add` /
 `sm set-terminology`.
 
-Input (stdin or --block-file):
+Input (stdin or --block-file): the block below, or the decisions file a saving page wrote through
+`serve_page.py --decisions`, whose `block` holds the same text (#651).
 
     profile: <name>
     exclude tables:  <area>.<table>, <area>.<table>
@@ -56,6 +57,10 @@ _JSON_KEYS = {"curate-ops", "new-metrics", "key-terminology", "example-edits", "
 _KEYS = _LIST_KEYS | _JSON_KEYS | {"profile", "signed-off-by", "datasource-md"}
 _TABLE_QNAME = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
 _COLUMN_QNAME = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
+# A new definition's sign-off and provenance. The block only proposes: `sm add` stores what it is given,
+# so a field left here would let a page (or a pasted block) store a metric as approved by anyone it
+# names. Approval comes from an `approve` op, signed with --signer, and nothing else.
+_TRUST_FIELDS = ("review_state", "signed_off_by", "signed_off_at", "signed_off_role", "migrated_from")
 
 
 def _key_of(line: str):
@@ -85,6 +90,18 @@ def _sections(text: str) -> dict:
         # lines before the first key (headers) are ignored
     if cur_key:
         out[cur_key] = "\n".join(cur_val).strip()
+    return out
+
+
+def _proposed(item: dict, also: tuple, anomalies: list, kind: str) -> dict:
+    """`item` without any sign-off it claims (and the `also` provenance fields), so a metric lands
+    `proposed` (a `confidence` it sends is kept only when it says that, the default). What was dropped
+    is an anomaly, so a forged claim is visible rather than silently fixed."""
+    dropped = sorted(k for k in (*_TRUST_FIELDS, *also)
+                     if k in item and not (k == "confidence" and item[k] == "proposed"))
+    out = {k: v for k, v in item.items() if k not in dropped}
+    if dropped:
+        anomalies.append({"kind": kind, "detail": f"{item.get('name') or item.get('question')}: {', '.join(dropped)}"})
     return out
 
 
@@ -150,14 +167,16 @@ def parse(text: str) -> tuple[dict, list, dict | None]:
                 if not area:
                     anomalies.append({"kind": "metric_missing_area", "detail": str(m.get("name"))})
                     continue
-                data["new_metrics_by_area"].setdefault(area, []).append(m)
+                data["new_metrics_by_area"].setdefault(area, []).append(
+                    _proposed(m, ("confidence", "source"), anomalies, "metric_trust_fields_dropped"))
         elif jk in ("example-edits", "new-examples"):  # both apply via sm add-example
             for ex in (parsed or []):
                 area = ex.get("area")
                 if not area:
                     anomalies.append({"kind": "example_missing_area", "detail": str(ex.get("question"))})
                     continue
-                data["examples_by_area"].setdefault(area, []).append(ex)
+                data["examples_by_area"].setdefault(area, []).append(
+                    _proposed(ex, (), anomalies, "example_trust_fields_dropped"))
         elif jk == "key-terminology":
             data["key_terminology"] = parsed
         elif jk == "datasource-md":
@@ -181,12 +200,54 @@ def parse(text: str) -> tuple[dict, list, dict | None]:
     return data, anomalies, needs
 
 
+def decisions_file(text: str) -> dict | None:
+    """The decisions file a saving page posted to `serve_page.py --decisions`
+    (`{"page": "model-explorer", "profile": .., "block": ..}`), or None for a pasted block, which never
+    starts with `{`."""
+    if not text.lstrip().startswith("{"):
+        return None
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return None
+    return doc if isinstance(doc, dict) and isinstance(doc.get("block"), str) else None
+
+
+def block_text(text: str) -> str:
+    """The feedback block in `text`: the text itself, or the `block` of a saving page's decisions file."""
+    doc = decisions_file(text)
+    return doc["block"] if doc else text
+
+
+def check_decisions(doc: dict, data: dict, expect_profile: str | None) -> str | None:
+    """Why a saving page's decisions file can't be applied to `expect_profile`, or None. A post names
+    its page and its model itself, so neither is trusted: both must be what the skill rendered."""
+    if not expect_profile:
+        return "a decisions file needs --expect-profile, the profile the page was rendered for"
+    if doc.get("page") != "model-explorer":
+        return f"this decisions file is from the {doc.get('page')!r} page, not the model explorer"
+    if doc.get("profile") != expect_profile or data.get("profile") != expect_profile:
+        return f"this decisions file is for another model than {expect_profile}"
+    return None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Parse the agami-model back-channel feedback block.")
-    ap.add_argument("--block-file", help="path to the pasted block (else stdin)")
+    ap.add_argument("--block-file", help="path to the pasted block, or the decisions file a saving page "
+                                         "wrote through serve_page.py --decisions (else stdin)")
+    ap.add_argument("--expect-profile", help="with a decisions file: the profile the page was rendered "
+                                             "for; a file naming another page or model is refused")
     args = ap.parse_args(argv)
     text = Path(args.block_file).read_text(encoding="utf-8") if args.block_file else sys.stdin.read()
-    data, anomalies, needs = parse(text)
+    doc = decisions_file(text)
+    data, anomalies, needs = parse(doc["block"] if doc else text)
+    if doc:
+        problem = check_decisions(doc, data, args.expect_profile)
+        if problem:
+            print(json.dumps({"ok": False, "error": problem}))
+            return 2
+        # A page signs as the identity saved in local/.config, never as one named in what it posted.
+        data["signer"] = data["role"] = None
     print(json.dumps({"ok": True, "data": data, "anomalies": anomalies, "needs_judgment": needs}, indent=2))
     return 0
 

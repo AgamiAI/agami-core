@@ -52,6 +52,7 @@ from .models import (
     Table,
     TableRef,
     bare_name,
+    rows_text,
     stored_identity,
     table_key,
 )
@@ -66,6 +67,11 @@ DEFAULT_CONTEXT_INCLUDE = (
     "default_filters", "relationships", "caveats", "value_transforms", "performance_hints",
 )
 DEFAULT_BUNDLE_INCLUDE = DEFAULT_CONTEXT_INCLUDE + ("metrics",)
+
+# Who signed a definition off stays in the model, for the people who own it. What these readers
+# return goes to the AI client, which needs to know only THAT a definition is approved
+# (`review_state`), never who approved it.
+SIGNER_FIELDS = frozenset({"signed_off_by", "signed_off_role", "signed_off_at"})
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +148,8 @@ def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Data
         datasource=ds_doc.get("datasource", root.name),
         version=ds_doc.get("version", 1),
         description=ds_doc.get("description", ""),
-        fiscal_year_start_month=ds_doc.get("fiscal_year_start_month", 1),
+        fiscal_year_start_month=ds_doc.get("fiscal_year_start_month"),
+        fiscal_year_start_confirmed=bool(ds_doc.get("fiscal_year_start_confirmed")),
         storage_connections=connections,
         subject_areas=subject_areas,
         cross_subject_area_relationships=_load_cross_rels(root, ds_doc),
@@ -904,6 +911,10 @@ def _table_detail(
         )
     if "performance_hints" in include and table.performance_hints:
         tinfo["performance_hints"] = table.performance_hints.model_dump(exclude_none=True)
+        if table.performance_hints.estimated_row_count is not None:
+            # A capped count is stored as cap + 1; the words say "at least" so it is not read as a total.
+            tinfo["performance_hints"]["estimated_row_count_text"] = rows_text(
+                table.performance_hints.estimated_row_count)
     return tinfo
 
 
@@ -1034,12 +1045,12 @@ def _relationships_among(
             continue
         for rel in sa.relationships:
             if _table_alias(rel.from_table) in names or _table_alias(rel.to_table) in names:
-                d = rel.model_dump(exclude_none=True)
+                d = rel.model_dump(exclude_none=True, exclude=SIGNER_FIELDS)
                 out.append(_full_edge(d) if _both_ends_requested(rel) else _lean_edge(d))
     # cross-area edges touching these tables
     for rel in org.cross_subject_area_relationships:
         if _table_alias(rel.from_table) in names or _table_alias(rel.to_table) in names:
-            d = rel.model_dump(exclude_none=True)
+            d = rel.model_dump(exclude_none=True, exclude=SIGNER_FIELDS)
             out.append(_full_edge(d) if _both_ends_requested(rel) else _lean_edge(d))
     return out
 
@@ -1097,7 +1108,7 @@ def _metrics_for(org: Datasource, tables: list[str], area: Optional[str]) -> lis
             continue
         for met in sa.metrics:
             if not met.source_tables or any(_table_alias(s) in names for s in met.source_tables):
-                out.append(met.model_dump(exclude_none=True))
+                out.append(met.model_dump(exclude_none=True, exclude=SIGNER_FIELDS))
     return out
 
 
@@ -1125,7 +1136,8 @@ def get_subject_area_bundle(org: Datasource, area: str) -> dict[str, Any]:
         "description": sa.description,
         "default_time_window": sa.default_time_window,
     }
-    bundle["entities"] = [e.model_dump(exclude_none=True) for e in sa.entities]
+    bundle["entities"] = [e.model_dump(exclude_none=True, exclude=SIGNER_FIELDS)
+                         for e in sa.entities]
     return bundle
 
 

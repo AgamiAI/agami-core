@@ -257,13 +257,15 @@ def test_a_trailing_comment_or_semicolon_never_costs_the_row_its_zero_row_check(
 def test_a_semicolon_or_two_dashes_inside_a_value_is_not_read_as_the_end_of_the_statement(row, tail):
     """A `;` or a `--` inside a quoted value never ends a statement, so the wrap keeps it and the
     filter still means what the person wrote. Cutting there would make a sound statement a syntax
-    error, and a syntax error at this step is graded as the person's own defect."""
+    error, and a syntax error at this step is graded as the person's own defect.
+
+    The read-only gate now refuses any `;` that does not end the statement, inside a value too, so
+    the statement is refused before any wrap is built, and the refusal is what reaches disk rather
+    than a wrong answer. How the wrap keeps such a value is pinned on `_wrap_body` below."""
     got = row(f"SELECT COUNT(*) AS n FROM orders o WHERE o.status != 'a; -- b'{tail}")
 
-    assert got.rc == 0 and got.run["status"] == "ok"
-    assert (got.dir / "zero-row.sql").read_text().endswith(
-        "WHERE o.status != 'a; -- b'\n) AS _agami_check WHERE 1=0"
-    )
+    assert got.rc == 0 and got.run["status"] == "refused" and got.run["rule"] == "read_only"
+    assert not got.seen
 
 
 def test_what_the_zero_row_wrap_drops_off_the_end_and_what_it_must_not():

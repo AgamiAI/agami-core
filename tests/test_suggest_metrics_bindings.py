@@ -95,7 +95,7 @@ def test_durations_use_the_dialects_date_arithmetic_for_the_column_types(db, pai
     guard = {"bigquery": (f"{e} >= {s}" if pair is _DATE_PAIR
                           else f"CAST({e} AS TIMESTAMP) >= CAST({s} AS TIMESTAMP)"),
              "redshift": f"{e} >= {s}", "snowflake": f"{e} >= {s}"}.get(db, f"{days} >= 0")
-    assert _binding(met) == f"AVG(CASE WHEN {guard} THEN {days} END)"
+    assert _binding(met) == f"AVG(CASE WHEN {guard} THEN {days} * 1.0 END)"
 
 
 _MIXED_PAIR = (m.Column(name="opened_on", type="date"), m.Column(name="closed_at", type="timestamp"))
@@ -401,6 +401,32 @@ def test_a_sql_defined_table_is_test_run_over_its_sql(tmp_path, monkeypatch):
     assert p["test_run"]["value"] == pytest.approx(0.5) and p["flags"] == [] and p["write"], p
     assert "SELECT * FROM tickets -- the live rows\n) src" in seen[0] and "LIMIT 10000" in seen[0]
     assert (_metrics_dir(tmp_path / "m") / "tickets_is_urgent_rate.yaml").exists()
+
+
+def test_a_repeated_row_table_is_test_run_over_records_like_its_binding(tmp_path, monkeypatch):
+    """Ten rows of one true record and one row of a false record: the written metric counts
+    records (1 of 2), so the test run must too, not rows (10 of 11)."""
+    _model(tmp_path / "m")
+    _edit_table(tmp_path / "m", caveats=[build.repeat_caveat("ticket_id", 5.5)],
+                columns=[{"name": "id", "type": "integer", "primary_key": True},
+                         {"name": "ticket_id", "type": "integer"},
+                         {"name": "is_urgent", "type": "boolean"}])
+    con = sqlite3.connect(tmp_path / "db.sqlite")
+    con.execute("CREATE TABLE tickets (id INTEGER PRIMARY KEY, ticket_id INTEGER, is_urgent BOOLEAN)")
+    con.executemany("INSERT INTO tickets VALUES (?, ?, ?)",
+                    [(i, 1, 1) for i in range(10)] + [(10, 2, 0)])
+    con.commit()
+    con.close()
+    rc, out, seen = _profile_run(tmp_path, monkeypatch)
+    assert rc == 0, out
+    count, p = out["proposals"]
+    # the distinct-record count comes first, and test-runs to the two records, not the 11 rows
+    assert count["name"] == build.record_count_name("tickets", "ticket_id"), count
+    assert count["test_run"]["value"] == 2 and count["test_run"]["rows"] == 11, count
+    assert "COUNT(DISTINCT" in p["binding"], p
+    assert p["test_run"]["value"] == pytest.approx(0.5), (p, seen)
+    assert "ticket_id" in seen[0]   # the sample carries the record key the binding counts
+    assert [f["flag"] for f in p["flags"]] == ["low_confidence"]   # 11 rows; not degenerate
 
 
 def test_a_sql_defined_table_whose_read_fails_is_flagged_not_test_run(tmp_path, monkeypatch):

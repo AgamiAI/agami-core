@@ -123,11 +123,12 @@ def test_count_star_without_a_filter_still_names_no_column(org):
     assert "names no column" in item["reason"]
 
 
-def test_a_value_from_a_derived_table_is_still_not_matched_to_a_metric(org):
-    # ACE-058/060 keep this undetermined: matching a value through a subquery is not done here.
+def test_a_value_from_a_derived_table_is_read_through_it_and_not_matched(org):
+    # ACE-058/060 kept this undetermined: a value through a subquery was not followed. ACE-178
+    # follows it, and this model declares no metric computing it, so it settles as `unmatched`.
     receipt = rt.assemble_receipt(org, ACCEPTANCE)
     (output,) = [i for i in receipt["columns"]["items"] if i["kind"] == "output"]
-    assert output["status"] == "undetermined"
+    assert (output["status"], output["name"]) == ("unmatched", None)
 
 
 @pytest.mark.parametrize("sql", [ACCEPTANCE, OVER_CTE, PLAIN, COMPUTED, NESTED,
@@ -241,20 +242,16 @@ def test_a_star_before_an_alias_keeps_the_written_label(org):
     assert _references(org, STAR_THEN_ALIAS) == ["s.x", "public.t.*", "public.t.id"]
 
 
-def test_the_cte_cache_never_returns_another_trees_ids(org, monkeypatch):
+def test_the_cte_cache_never_returns_another_trees_ids(org):
+    """The bindings live on the tree (ACE-178 review; they were one module-wide entry). `copy()`
+    copies `meta`, so a copy carries the original's answer, keyed by node ids it does not have."""
     import sqlglot
 
     mine = sqlglot.parse_one("WITH a AS (SELECT 1 AS x) SELECT a.x FROM a")
-    other = sqlglot.parse_one("WITH b AS (SELECT 1 AS x) SELECT b.x FROM b")
-    other_ids = rt._cte_references(other)
-
-    class Racing(list):
-        # Another thread's write lands between this caller's write and its read.
-        def __getitem__(self, i):
-            return other if i == 0 else other_ids
-
-    monkeypatch.setattr(rt, "_CTE_REFS_LAST", Racing([other, other_ids]))
-    assert rt._cte_reference_ids(mine) == rt._cte_references(mine)
+    original = set(rt._tree_bindings(mine))
+    copy = mine.copy()
+    assert set(rt._tree_bindings(copy)) == rt._cte_references(copy)
+    assert set(rt._tree_bindings(copy)).isdisjoint(original)
 
 
 def test_the_cte_cache_under_two_threads(org):
@@ -268,7 +265,7 @@ def test_the_cte_cache_under_two_threads(org):
 
     def run(i: int) -> None:
         for _ in range(2000):
-            if rt._cte_reference_ids(trees[i]) != expected[i]:
+            if set(rt._tree_bindings(trees[i])) != expected[i]:
                 bad.append(i)
 
     threads = [threading.Thread(target=run, args=(i,)) for i in range(2)]

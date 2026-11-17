@@ -25,15 +25,19 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
-from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
+from dataclasses import dataclass, field, fields
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, Optional, Sequence
 
 # Introspection-run timestamp for system sign-offs on auto-approved structure.
 _NOW = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -59,7 +63,10 @@ _GRAIN_PROBE_MAX_ROWS = 5_000_000
 from . import build, pii
 from . import dialects as D
 from . import placeholders as P
+from . import profile as PF
+from .failure_kinds import CONNECTION_KINDS
 from .models import (
+    ROW_COUNT_CAP,
     Column,
     Datasource,
     PerformanceHints,
@@ -69,6 +76,7 @@ from .models import (
     Table,
     bare_name,
     on_text_key,
+    rows_text,
     table_key,
 )
 
@@ -107,51 +115,177 @@ ENUM_MAX_DISTINCT = 25
 # A list declared in the catalog (an enum type, a CHECK ... IN) is exact, so it is kept far past the
 # cap on a list read from the data.
 DECLARED_MAX_VALUES = 200
-# Each value list read from the data is one DISTINCT query; this bounds them per run, so a wide model
+# Each value list read from the data is one DISTINCT read; this bounds them per run, so a wide model
 # can't fire thousands.
 DISTINCT_READ_CAP = 1000
+# A table's per-column reads (its value lists, and the grain and unenforced-key checks) go this many
+# columns to a statement. Through `execute_sql.py` each statement is a new process and a new connection,
+# and on a view the view runs again each time: one statement per column cost a 60-column view minutes.
+# 25 value lists of ENUM_MAX_DISTINCT + 1 rows stay under the default 1000-row result cap.
+COMBINED_READ_COLUMNS = 25
 PROBE_TABLE_CAP = 200  # cap value-overlap probing work
-# Safety valve for confirming DECLARED-but-unenforced catalog FKs (Redshift/Databricks/Trino)
-# by value-overlap: each confirmation is one sequential COUNT probe, so a schema that declares
-# hundreds of FKs could otherwise fire hundreds of round-trips. Past the budget we stop probing
-# and leave the remaining declared FKs inferred/unreviewed (they still surface for sign-off).
+# The per-run budget the uniqueness probes and the join-candidate scan each get. Joins themselves,
+# declared keys an unenforcing engine leaves to the data included, are checked on `profile.JOIN_CHECK_CAP`.
 FK_OVERLAP_PROBE_CAP = 300
 # Above this FROM-table row estimate we SKIP the value-overlap scan and leave the join
 # unverified (inferred/unreviewed) rather than scan millions of rows over the network — the
 # guard that stops a 50-table Redshift introspect from crawling for half an hour on big fact
 # tables (incident/task/metric_instance). Mirrors the grain-probe size guard.
 _OVERLAP_PROBE_MAX_ROWS = 3_000_000
+# A table the catalog cannot size (a view keeps no statistics) is counted only this far: one count of
+# at most this many rows plus one, the largest line any size guard draws. Past it the size is "at least
+# the cap", which every guard reads as large, and a 100M-row view is never read to the end.
+_SIZE_COUNT_CAP = ROW_COUNT_CAP   # at least every guard's line; a test holds it there
 # Per-run cap on the uniqueness probes that check a join's many side on the data (one
 # COUNT(DISTINCT) each), on the same budget as the declared-FK overlap confirmation.
 _UNIQUE_PROBE_CAP = FK_OVERLAP_PROBE_CAP
 _DATA_UNIQUE_NOTE = "no constraint declares it — looks one-to-one, confirm"
-# The wider join-candidate scan (#512): one match-rate probe per column/key pair, at most this many
-# per run, each over a bounded sample of the column's distinct values. Its candidates are only
-# reported, never written to the model.
+# The wider join-candidate scan (#512): one match-rate check per column/key pair, at most this many
+# per run, each on the whole column or a bounded sample of it (`profile.JoinCheck`). Its candidates
+# are only reported, never written to the model.
 JOIN_CANDIDATE_PROBE_CAP = FK_OVERLAP_PROBE_CAP
-_CANDIDATE_SAMPLE = 1000
-# A candidate whose sampled values are found in the key at this rate or above is offered as a join.
-_CANDIDATE_MIN_MATCH = 0.95
+# A candidate whose values are found in the key at this rate or above is offered as a join.
+_CANDIDATE_MIN_MATCH = PF.JOIN_MIN_MATCH
 _KEY_TYPES = frozenset({"integer", "string", "uuid"})
 # Names of numbers that aren't references: a small `age` or `year` falls inside any id range.
 _NOT_A_REFERENCE_RE = re.compile(
     r"(^|_)(age|year|yr|month|day|week|hour|minute|qty|quantity|count|cnt|amount|total|price|score|rank|"
     r"level|size|duration|version|position|sort|seq)s?($|_)", re.IGNORECASE)
 JOIN_CANDIDATES_FILE = "join_candidates.json"
+PROFILE_FILE = "profile.json"
+# Profile findings the report lists one line per table rather than one per column.
+_GROUPED_FINDINGS = {"empty": "empty on every row read", "mostly_blank": "blank on 90% or more of rows",
+                     "constant": "one value on every row"}
+
+
+# A step that writes no line for this long gets a heartbeat line saying what it is waiting on, so a
+# slow statement and a hung build stop looking the same (#677: one step ran 30+ minutes silently).
+HEARTBEAT_S = 60.0
+# Workers write lines too; one line at a time, never interleaved. Re-entrant so the heartbeat can
+# hold it across its last check and its write.
+_LOG_LOCK = threading.RLock()
+_FINISHED: set[Path] = set()   # logs whose `done:` line is written: no heartbeat follows it
+_LAST_LINE: dict[Path, float] = {}   # log -> monotonic time of its last line of real progress
+_LAST_ANY: dict[Path, float] = {}    # log -> monotonic time of its last line, heartbeats included
+_WAITING: dict[Path, dict[int, str]] = {}   # log -> what each in-flight step is waiting on
+
+
+def _stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _write_line(path: Path, msg: str, *, beat: bool = False) -> None:
+    with _LOG_LOCK:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(f"{_stamp()} {msg.rstrip(chr(10))}\n")
+            fh.flush()
+        now = time.monotonic()
+        _LAST_ANY[path] = now
+        if not beat:
+            _LAST_LINE[path] = now
+        if msg.startswith("done:"):
+            _FINISHED.add(path)
 
 
 def _progress(path: Optional[Path], msg: str) -> None:
-    """Append a FLUSHED progress line so a tailing skill can surface a heartbeat during a long
-    introspection (the engine is otherwise silent until it returns — which reads as 'stuck' on a
-    big Redshift schema). Best-effort; never raises."""
+    """Append a FLUSHED progress line, stamped in UTC (`2026-11-17T10:04:00Z columns+grain 30/52`),
+    so a tailing skill or the progress page can surface a heartbeat during a long introspection (the
+    engine is otherwise silent until it returns — which reads as 'stuck' on a big Redshift schema).
+    The stamp goes first so a reader looking for the message still finds it. Best-effort; never raises."""
     if path is None:
         return
     try:
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(msg.rstrip("\n") + "\n")
-            fh.flush()
+        _write_line(path, msg)
     except Exception:
         pass
+
+
+@contextmanager
+def _waiting_on(path: Optional[Path], what: str) -> Iterator[None]:
+    """Name what the enclosed statements are doing, for the heartbeat. Table and column NAMES only,
+    never a value read from them: the log sits in the model folder and is shown on a page."""
+    if path is None:
+        yield
+        return
+    token = object()
+    with _LOG_LOCK:
+        _WAITING.setdefault(path, {})[id(token)] = what
+    try:
+        yield
+    finally:
+        with _LOG_LOCK:
+            _WAITING.get(path, {}).pop(id(token), None)
+
+
+def _quiet_for(seconds: float) -> str:
+    return f"{int(seconds)} s" if seconds < 60 else f"{int(seconds // 60)} min"
+
+
+def _watch(path: Optional[Path]) -> Optional[PF.Watch]:
+    """A `PF.Watch` naming each statement's work for the heartbeat, or None with no log."""
+    return None if path is None else (lambda what: _waiting_on(path, what))
+
+
+def _counted(path: Optional[Path], label: str, total: int) -> Optional[Callable[[int], None]]:
+    """A `done` callback that logs `<label> k/total` about every 10%, as the table reads do."""
+    if path is None:
+        return None
+    step = max(1, total // 10)
+    last = [0]
+
+    def done(k: int) -> None:
+        if k // step > last[0] // step or k >= total:
+            last[0] = k
+            _progress(path, f"{label} {min(k, total)}/{total}")
+    return done
+
+
+@contextmanager
+def _heartbeat(path: Optional[Path]) -> Iterator[None]:
+    """While the build runs, write `waiting on the database for <N> min: <what>` whenever no line has
+    been written for HEARTBEAT_S. N counts from the last line of real progress, so a step stuck for
+    half an hour says so rather than restarting the count at every beat."""
+    if path is None:
+        yield
+        return
+    stop = threading.Event()
+    with _LOG_LOCK:
+        _LAST_LINE[path] = _LAST_ANY[path] = time.monotonic()
+        _FINISHED.discard(path)
+
+    def beat() -> None:
+        while not stop.wait(min(5.0, HEARTBEAT_S / 4)):
+            with _LOG_LOCK:
+                now = time.monotonic()
+                quiet = now - _LAST_LINE.get(path, now)
+                due = now - _LAST_ANY.get(path, now) >= HEARTBEAT_S
+                doing = sorted(set(_WAITING.get(path, {}).values()))
+            if not due or stop.is_set():
+                continue
+            what = "; ".join(doing[:3]) + (f"; and {len(doing) - 3} more" if len(doing) > 3 else "")
+            with _LOG_LOCK:
+                # Checked again under the lock the last line takes, so no beat lands after `done:`
+                # or after the build has returned.
+                if stop.is_set() or path in _FINISHED:
+                    return
+                try:
+                    _write_line(path, f"waiting on the database for {_quiet_for(quiet)}: "
+                                      f"{what or 'the step on the line before'}", beat=True)
+                except Exception:
+                    pass
+
+    worker = threading.Thread(target=beat, name="introspect-heartbeat", daemon=True)
+    worker.start()
+    try:
+        yield
+    finally:
+        with _LOG_LOCK:   # a beat mid-write finishes first; none starts after this
+            stop.set()
+        worker.join(timeout=5.0)
+        with _LOG_LOCK:
+            for d in (_LAST_LINE, _LAST_ANY, _WAITING):
+                d.pop(path, None)
+            _FINISHED.discard(path)
 
 
 @dataclass
@@ -170,12 +304,23 @@ class IntrospectReport:
     # Listed so whoever builds the model confirms the filters; the seed is every date column, and on
     # a warehouse that is often load timestamps nobody asks a question about.
     large_tables: dict[str, tuple[int, list[str]]] = field(default_factory=dict)
+    # Tables the catalog could not size, so the build counted them (up to `_SIZE_COUNT_CAP`):
+    # `schema.table` -> (rows, kind), kind `at_least` past the cap, `unknown` when the count failed.
+    # The run's own record: the model keeps only the rows, so a reader that predates it still loads.
+    counted_sizes: dict[str, tuple[int, Optional[str]]] = field(default_factory=dict)
     sensitive_columns: int = 0
     # Joins tested on the data but not written (#512): each an `add` op plus its evidence.
     join_candidates: list[dict] = field(default_factory=list)
     join_candidates_low: list[dict] = field(default_factory=list)
     join_candidate_probes: int = 0
     join_candidate_cap_hit: bool = False
+    # Tables (`schema.table`) with columns the scan never tested because the cap stopped it; an
+    # append carries them until a run reads the table again.
+    join_candidate_unchecked: list[str] = field(default_factory=list)
+    # Every join of the model as checked on the data: its label, and the evidence (`JoinCheck.evidence`).
+    join_checks: list[dict] = field(default_factory=list)
+    # The column profile of each table this run read, keyed `schema.table` (`profile.profile_table`).
+    profile_tables: dict = field(default_factory=dict)
     # `table.column (reason)` for columns whose sampled values look personal but aren't flagged.
     suspected_columns: list[str] = field(default_factory=list)
     # Values that look like placeholders and wait for a person to say what they mean (#445).
@@ -189,6 +334,12 @@ class IntrospectReport:
     # On a refresh of an existing model: what changed structurally, per table. Empty on a first build.
     changes: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     new_tables: list[str] = field(default_factory=list)
+    # Tables whose combined per-column read failed and were read a column at a time instead.
+    read_column_by_column: list[str] = field(default_factory=list, repr=False)
+    # (schema, table) whose combined read ran out of time: read a column at a time for the rest of the run.
+    combined_too_slow: list[tuple] = field(default_factory=list, repr=False)
+    # (schema, table) -> columns the catalog types as ones the engine cannot compare (`Dialect.comparable`).
+    uncomparable: dict[tuple, list[str]] = field(default_factory=dict, repr=False)
 
     def render(self) -> str:
         lines = [
@@ -196,15 +347,22 @@ class IntrospectReport:
             f"out_dir: {self.out_dir}   (dry_run={self.dry_run})",
             f"capability modes: {self.mode_per_capability}",
             f"schemas: {self.schemas}",
-            f"tables: {self.table_count}   relationships: {self.relationship_count}",
+            # Candidates beside the joins: a build that writes no join may still have found some.
+            f"tables: {self.table_count}   relationships: {self.relationship_count}   "
+            f"join candidates found: {len(self.join_candidates)}",
             f"subject_areas ({len(self.subject_areas)}): {', '.join(self.subject_areas)}",
             *([f"new tables: {', '.join(self.new_tables)}"] if self.new_tables else []),
             *(f"changed {t}: " + "; ".join(f"{k} {', '.join(v)}" for k, v in c.items())
               for t, c in self.changes.items()),
             f"deep tables: {', '.join(self.deep_tables) or '(none)'}",
-            *(f"large table {t}: about {rows:,} rows; date columns: {', '.join(cols) or '(none)'}"
+            *(f"large table {t}: {rows_text(rows)}; date columns: {', '.join(cols) or '(none)'}"
               for t, (rows, cols) in self.large_tables.items()),
+            *(["sized by a count (no catalog estimate): " + "; ".join(
+                f"{t}: {_size_words(rows, kind, about=False)}" for t, (rows, kind) in self.counted_sizes.items())]
+              if self.counted_sizes else []),
             f"sensitive columns: {self.sensitive_columns}",
+            *self._render_profile(),
+            *self._render_join_checks(),
             *self._render_join_candidates(),
             *([f"suspected personal data (review): {', '.join(self.suspected_columns)}"]
               if self.suspected_columns else []),
@@ -218,8 +376,40 @@ class IntrospectReport:
         ]
         return "\n".join(lines)
 
+    def _render_profile(self) -> list[str]:
+        if not self.profile_tables:
+            return []
+        found = [(t, f) for t, p in self.profile_tables.items() for f in p.get("findings", [])]
+        out = [f"## column profile ({len(self.profile_tables)} tables read; {len(found)} finding(s); "
+               f"in .introspect/{PROFILE_FILE})"]
+        # The common kinds one line per table, the rest one line each: a wide table can have dozens.
+        grouped: dict[tuple, list[str]] = {}
+        for t, f in found:
+            if f["kind"] in _GROUPED_FINDINGS:
+                grouped.setdefault((t, f["kind"]), []).append(f["column"])
+            else:
+                out.append(f"  ! {t}: {f['detail']}")
+        out += [f"  - {t}: {_GROUPED_FINDINGS[k]}: {', '.join(cols)}" for (t, k), cols in grouped.items()]
+        return out
+
+    def _render_join_checks(self) -> list[str]:
+        if not self.join_checks:
+            return []
+        ran = [c for c in self.join_checks if c["read"] != "not_run"]
+        rated = [c for c in ran if "match_rate" in c]
+        whole = sum(1 for c in ran if c["read"] == "whole")
+        # Blank keys are an optional join's normal state; a value with no partner is not, nor a key
+        # the rows read point at repeating where the join promises one row (`JoinCheck.fans_out`).
+        worth = [c for c in rated if c["match_rate"] < 1 or c.get("fans_out")]
+        out = [f"## joins checked on the data ({len(ran)} of {len(self.join_checks)}: {whole} on the whole "
+               f"table, {len(ran) - whole} on a sample; {len(ran) - len(rated)} with no values to compare; "
+               f"{len(worth)} worth a look)"]
+        out += [f"  ! {c['join']}: {c['summary']}" for c in worth]
+        return out
+
     def _render_join_candidates(self) -> list[str]:
-        if not (self.join_candidates or self.join_candidates_low or self.join_candidate_cap_hit):
+        if not (self.join_candidates or self.join_candidates_low or self.join_candidate_cap_hit
+                or self.join_candidate_unchecked):
             return []
         out = [f"## join candidates (tested on the data, not written; {self.join_candidate_probes} probe(s))"]
         out += [f"  + {c['id']}: {c['evidence']['summary']}" for c in self.join_candidates]
@@ -229,6 +419,9 @@ class IntrospectReport:
             out.append(f"  accept one: {_accept_command(self.out_dir)}")
         if self.join_candidate_cap_hit:
             out.append(f"  stopped after {JOIN_CANDIDATE_PROBE_CAP} probes: columns past the cap were not tested")
+        if self.join_candidate_unchecked:
+            out.append("  not tested past the cap: " + ", ".join(self.join_candidate_unchecked)
+                       + " (build them again with --append to test them)")
         return out
 
 
@@ -249,10 +442,58 @@ class ExecuteSqlFailure(RuntimeError):
         except ImportError:  # the stdlib-only mirror without the executor module: kind unknown
             EXIT_TO_FAILURE_KIND = {}
         self.kind: Optional[str] = EXIT_TO_FAILURE_KIND.get(returncode)
+        self.refusal_rule: Optional[str] = _refusal_rule(message)
+
+
+def _refusal_rule(stderr: str) -> Optional[str]:
+    """The rule a refusal names, from the JSON object `execute_sql` writes for it as stderr's last
+    line. The last line, not the whole stream: a driver warning printed above it would otherwise
+    make the refusal unreadable, and discovery would report an empty catalog again (#668)."""
+    lines = [ln for ln in stderr.splitlines() if ln.strip()]
+    try:
+        refusal = json.loads(lines[-1]).get("refusal")
+    except (IndexError, ValueError, AttributeError):
+        return None
+    return refusal.get("rule") if isinstance(refusal, dict) else None
+
+
+class ConnectionUnusable(RuntimeError):
+    """The database connection could not be used, so introspection or discovery stopped before writing anything."""
+
+
+class _ConnectionWatch:
+    """A runner that remembers the first failure about the connection.
+
+    Each table's reads catch their own failures and treat them as "this table has nothing to read",
+    which is right for a missing table and wrong for a missing password: a live run read all 34
+    tables, got nothing, and blamed the --tables list. `check()` turns a remembered connection
+    failure into an error with the database's own message."""
+
+    def __init__(self, runner: Runner) -> None:
+        self._runner = runner
+        self.failure: Optional[ExecuteSqlFailure] = None
+
+    def __call__(self, sql: str) -> list:
+        if self.failure is not None:
+            # every later statement would fail the same way, and on a network failure each would
+            # first wait out its own timeout: fail it at once, as the database would
+            raise self.failure
+        try:
+            return self._runner(sql)
+        except ExecuteSqlFailure as exc:
+            if self.failure is None and exc.kind in CONNECTION_KINDS:
+                self.failure = exc
+            raise
+
+    def check(self) -> None:
+        if self.failure is not None:
+            raise ConnectionUnusable(
+                f"the database connection could not be used, so nothing was written: {self.failure}")
 
 
 def make_execute_sql_runner(
-    profile: str, python: Optional[str] = None, *, building_the_model: bool = False
+    profile: str, python: Optional[str] = None, *, building_the_model: bool = False,
+    artifacts_dir: Optional[str | Path] = None, max_rows: Optional[int] = None,
 ) -> Runner:
     """A runner that sends each statement through `execute_sql.py`, and returns its rows.
 
@@ -260,23 +501,38 @@ def make_execute_sql_runner(
     model doesn't list yet. Those skip the semantic-model pass, which confines a statement to the
     tables an existing model declares, so once any model exists it refuses every one of them (#428):
     a second batch, a re-introspection and a new schema all came back with no readable columns. The
-    always-on gate still runs, so these reads stay read-only. Everything that answers or validates
-    against the model (seed examples, enrichment) keeps the default and is confined as before.
+    always-on gate still runs, so these reads stay read-only. `sm enrich-metadata` uses it too, to read
+    a platform's dictionary where it lies without modelling it (ACE-181). Everything that answers or
+    validates against the model (seed examples) keeps the default and is confined as before.
 
     They keep `--no-safety` rather than `--build-profile` alone (#523): probing reads tables the model
     does not declare yet, probe mode samples with `SELECT *`, and catalogs such as Redshift's `svv_*`,
     SQLite's `pragma_*` functions and Oracle's `ALL_*` views are not in the build profile.
     `--build-profile` is added beside it, off a hosted server, so agami's own catalog queries that
-    call a catalog function (`dialects.catalog_function_queries`) pass the recon gate."""
+    call a catalog function (`dialects.catalog_function_queries`) pass the recon gate.
+
+    `artifacts_dir`, when given, is where execute_sql reads the credentials: it otherwise finds the
+    folder through AGAMI_ARTIFACTS_DIR or the pointer file, which can name a different folder than the
+    one the command was told to build in.
+
+    `max_rows`, when given, is the row cap for this runner's statements in place of the
+    deployment's `AGAMI_SQL_MAX_ROWS`: for a build read sized from the source's own count, so a
+    command that must read a table whole does not depend on its caller guessing a cap."""
     exe = python or sys.executable
     script = str(SCRIPT_DIR / "execute_sql.py")
     hosted = bool(os.environ.get("AGAMI_DB_URL") or os.environ.get("APP_DATABASE_URL"))
     unscoped = (["--no-safety"] + ([] if hosted else ["--build-profile"])) if building_the_model else []
 
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+    if artifacts_dir is not None:
+        env["AGAMI_ARTIFACTS_DIR"] = str(Path(artifacts_dir).expanduser())
+    if max_rows is not None:
+        env["AGAMI_SQL_MAX_ROWS"] = str(max_rows)
+
     def run(sql: str) -> list[dict]:
         proc = subprocess.run(
             [exe, script, "--profile", profile, "--sql", sql, *unscoped],
-            capture_output=True, text=True, encoding="utf-8", env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+            capture_output=True, text=True, encoding="utf-8", env=env,
         )
         if proc.returncode != 0:
             raise ExecuteSqlFailure(proc.stderr.strip() or f"execute_sql exit {proc.returncode}", proc.returncode)
@@ -303,13 +559,44 @@ def introspect(
     bigquery_region: str = "region-us",
     progress_path: Optional[str | Path] = None,
     append: bool = False,
+    batch: Optional[tuple[int, int]] = None,
 ) -> tuple[Datasource, IntrospectReport]:
     """Introspect a live DB into the semantic model and (unless dry_run) write the
     canonical tree. `tables` (optional) is the allowlist of `schema.table` to build —
     the prune step's kept set (also the no-catalog case where enumeration is denied).
     `exclude_columns` (optional, `schema.table.column`) marks those columns excluded
-    (the prune step's dropped columns).
+    (the prune step's dropped columns). `batch` (n, of) names this call's place in a batched
+    build as the progress log's first line, so the progress page can say "batch 3 of 5".
     """
+    pp = Path(progress_path) if progress_path else None
+    if pp is not None:
+        try:
+            pp.parent.mkdir(parents=True, exist_ok=True)
+            pp.write_text("", encoding="utf-8")  # fresh log per run
+        except Exception:
+            pp = None
+    if batch is not None:
+        _progress(pp, f"batch {batch[0]} of {batch[1]}")
+    with _heartbeat(pp):
+        return _introspect(profile, db_type, runner=runner, artifacts_dir=artifacts_dir, out_dir=out_dir,
+                           tables=tables, exclude_columns=exclude_columns, dry_run=dry_run,
+                           bigquery_region=bigquery_region, pp=pp, append=append)
+
+
+def _introspect(
+    profile: str,
+    db_type: str,
+    *,
+    runner: Runner,
+    artifacts_dir: str | Path,
+    out_dir: Optional[str | Path],
+    tables: Optional[list[str]],
+    exclude_columns: Optional[list[str]],
+    dry_run: bool,
+    bigquery_region: str,
+    pp: Optional[Path],
+    append: bool,
+) -> tuple[Datasource, IntrospectReport]:
     dialect = D.get_dialect(db_type)
     if isinstance(dialect, D.BigQuery):
         dialect = D.BigQuery(region=bigquery_region)
@@ -319,17 +606,11 @@ def introspect(
     out = Path(out_dir) if out_dir else (artifacts_dir / profile)
 
     report = IntrospectReport(profile=profile, db_type=db_type, out_dir=str(out), dry_run=dry_run)
-
-    pp = Path(progress_path) if progress_path else None
-    if pp is not None:
-        try:
-            pp.parent.mkdir(parents=True, exist_ok=True)
-            pp.write_text("", encoding="utf-8")  # fresh log per run
-        except Exception:
-            pp = None
+    runner = watch = _ConnectionWatch(runner)
 
     # 1. discover (schema, table) pairs
     pairs = _discover_tables(dialect, runner, tables, report)
+    watch.check()
     if not pairs:
         raise RuntimeError(
             "no tables discovered. If the catalog is locked down, pass an explicit "
@@ -337,28 +618,27 @@ def introspect(
         )
     _progress(pp, f"discovered {len(pairs)} tables — reading columns, grain, keys")
 
-    # 2. per-table columns + grain
-    built: list[Table] = []
-    _step = max(1, len(pairs) // 10)   # throttle the heartbeat to ~10 lines, not one per table
+    # 2. per-table columns + grain, a few tables at once
     budget = _CountBudget(_COUNT_BUDGET_S)
     reads = _ReadBudget(DISTINCT_READ_CAP)
     keys_unread: set[tuple] = set()   # (schema, table) whose unique keys couldn't be read
+    repeats_unread: set[tuple] = set()   # (schema, table) whose repeat check settled nothing
     samples: dict[tuple, tuple] = {}   # (schema, table) -> (sample, est_rows), for the placeholder scan
-    for i, (schema, table) in enumerate(pairs, 1):
-        t = _build_table(dialect, runner, schema, table, conn_name, report, budget, reads,
-                         keys_unread, samples)
-        built.append(t)
-        if i % _step == 0 or i == len(pairs):
-            _progress(pp, f"columns+grain {i}/{len(pairs)}")
-    if budget.skipped:
+    built = _read_tables(dialect, runner, pairs, conn_name, report, budget, reads, keys_unread, samples, pp,
+                         repeats_unread, check=watch.check)
+    unknown = [q for q, (_, kind) in report.counted_sizes.items() if kind == "unknown"]
+    if unknown:
+        spent = (f"; {budget.skipped} of them not counted because the run's {_COUNT_BUDGET_S:.0f}s for "
+                 "counts ran out (build those in a separate run to size them)") if budget.skipped else ""
         report.notes.append(
-            f"{budget.skipped} table(s) left unsized: exact row counts stopped after {_COUNT_BUDGET_S:.0f}s "
-            "in total; build those tables in a separate run to size them")
+            f"size unknown for {len(unknown)} table(s): the count failed, so each is treated as large "
+            f"(key checks and join probes skipped or sampled){spent}: {', '.join(unknown)}")
     if reads.skipped:
         report.notes.append(
             f"{reads.skipped} column(s) got no value list: the run's {DISTINCT_READ_CAP} DISTINCT reads were "
             "used up; build those tables in a separate run to list their values")
 
+    read_now = {table_key(t.name, t.schema_name) for t in built}   # profiled below; a refresh adds stored ones
     # Fail-fast on tables that yielded NO columns — a bogus allowlist entry (e.g. a malformed
     # --tables blob that mis-joined 52 names into one) describes nothing, and we must NOT persist
     # a garbage table. Drop them with a clear note; if that leaves nothing, raise rather than
@@ -396,6 +676,10 @@ def introspect(
     # sign-offs survive (#437). Runs on a dry run too, which is how a refresh is previewed.
     prev: Optional[Datasource] = None
     prev_rels: list[Relationship] = []
+    # The tables this run read (`schema.table`), or None when it read every table. A join or a
+    # candidate between two tables an earlier batch read was checked then, on the same data, so an
+    # append checks only pairs that touch one of these.
+    read: Optional[set[str]] = None
     unread: list[Table] = []   # merged tables whose keys were kept, not re-read
     probe_budget = _ProbeBudget()   # one cap across the refresh's recheck and the new joins
     skip_keys: set = set()
@@ -427,7 +711,8 @@ def introspect(
             keys_read = (t.schema_name, t.name) not in keys_unread
             if not keys_read:
                 report.notes.append(f"unique keys not re-read for {_qualified(old)}: kept the stored ones")
-            m, change = _merge_table(old, t, keys_read=keys_read)
+            repeat_read = (t.schema_name, t.name) not in repeats_unread
+            m, change = _merge_table(old, t, keys_read=keys_read, repeat_read=repeat_read)
             # The merge keeps the saved flags and identity; the placeholder scan needs this run's
             # personal-data findings, and the sample filed under the merged table's (schema, name).
             ok = (old.schema_name, old.name)
@@ -444,7 +729,7 @@ def introspect(
             merged.append(m)
             for area, copy in copies[(old.schema_name, old.name)]:
                 per_area[(area, (old.schema_name, old.name))] = (
-                    m if copy is old else _merge_table(copy, t, keys_read=keys_read)[0])
+                    m if copy is old else _merge_table(copy, t, keys_read=keys_read, repeat_read=repeat_read)[0])
             for r in change.get("retyped", []):
                 retyped[((m.schema_name or "").lower(), m.name.lower(), r.split(":")[0].lower())] = _qualified(m)
             if change:
@@ -491,6 +776,7 @@ def introspect(
                   for t in merged]
         conn_name = model_conn
         built = merged
+        read = {_qualified(t) for t in merged}
         batch_keys = {(t.schema_name, t.name) for t in built}
         for key, t in existing.items():
             if key not in batch_keys:        # keep prior tables (don't re-query)
@@ -519,34 +805,105 @@ def introspect(
     # just its own batch (covers every schema present).
     _progress(pp, f"building relationships ({len(built)} tables; FK + value-overlap probes)…")
     rel_pairs = [(t.schema_name, t.name) for t in built]
-    rels = _build_relationships(dialect, runner, rel_pairs, built, report, pp=pp)
+    checked: dict = {}   # joins checked on the data this run, by endpoints
+    declared: list[Relationship] = []   # declared keys an unenforcing engine leaves to the data
+    rels = _build_relationships(dialect, runner, rel_pairs, built, report, pp=pp, declared=declared,
+                                read=read, known=prev_rels)
     if prev_rels:
         # A database key over several columns replaces the engine's own split joins for it (#510).
         dropped, rels = _merge_split_joins(rels, prev_rels, report, sg)
         if dropped:
             prev = _without_joins(prev, dropped)
             prev_rels = [r for r in prev_rels if id(r) not in dropped]
-        # After the merge, so a split join about to be replaced isn't also listed as relabelled.
-        _recheck_engine_joins(dialect, runner, prev_rels, built, report, probe_budget, unread, sg)
         # keep prior edges; add only genuinely-new ones (dedup by endpoint+column)
         rels = [r for r in rels if not any(_same_join(r, p, sg) for p in prev_rels)]
-    _suggest_data_unique(dialect, runner, rels, built, report, probe_budget)
+        # A declared key the model already has is kept as stored, so the copy built this run is
+        # dropped: confirm the stored one instead, while it is still the engine's own unreviewed join.
+        declared = [next((p for p in prev_rels if _same_join(d, p, sg)), d) for d in declared]
+        declared = [d for d in declared if any(d is r for r in rels) or _left_for_the_data(d)]
+    # Every join checked on the data first: its counts also settle the uniqueness checks below. A join
+    # between two tables this run didn't read keeps the check stored for it (ACE-180).
+    stored = _stored_join_checks(out) if refreshing else {}
+    kept: list[tuple[Relationship, dict]] = []
+    to_check: list[Relationship] = []
+    for r in [*prev_rels, *rels]:
+        key = _join_check_key(r, sg)
+        if key in stored and r.review_state not in _UNSERVED and not _touches(r, built, read):
+            kept.append((r, stored[key]))
+        else:
+            to_check.append(r)
+    join_checks = _check_joins(dialect, runner, to_check, built, report, sg, checked, pp, declared)
+    _confirm_declared(declared, checked, sg)
+    if prev_rels:
+        # After the merge, so a split join about to be replaced isn't also listed as relabelled.
+        _recheck_engine_joins(dialect, runner, prev_rels, built, report, probe_budget, unread, sg, checked,
+                              read=read)
+    _suggest_data_unique(dialect, runner, rels, built, report, probe_budget, checked)
     if prev_rels:
         rels = list(prev_rels) + rels
+    for r, c in join_checks:   # after the relabelling, so each carries the label it ends with
+        report.join_checks.append({"join": _join_label(r, sg), "from_table": r.from_table, "to_table": r.to_table,
+                                   "from_schema": r.from_schema, "to_schema": r.to_schema,
+                                   "from_columns": c.fc, "to_columns": c.tc, "relationship": r.relationship,
+                                   "declared": r.confidence == "confirmed", **c.evidence()})
+    for r, entry in kept:
+        report.join_checks.append({**entry, "join": _join_label(r, sg), "relationship": r.relationship,
+                                   "declared": r.confidence == "confirmed"})
     # Placeholder values (#445), on the small and dimension tables this run read: a dimension is the
     # one side of a join, so this waits for the joins.
     _scan_placeholders(dialect, runner, [*built, *(per_area.values() if refreshing else ())], rels,
                        samples, reads, report, sg, fresh_personal=fresh_personal,
                        prior=set(existing) if refreshing else set())
+    if report.read_column_by_column:
+        report.notes.append(
+            f"{len(report.read_column_by_column)} table(s) read one column at a time: the combined read of "
+            f"their columns failed (first: {report.read_column_by_column[0]})")
+    to_profile = [t for t in built if table_key(t.name, t.schema_name) in read_now
+                  and t.review_state not in _UNSERVED]
+    _progress(pp, f"profiling {len(to_profile)} tables…")
+    step = max(1, len(to_profile) // 10)
+
+    def profiled(k: int) -> None:
+        if k % step == 0 or k == len(to_profile):
+            _progress(pp, f"profiled {k}/{len(to_profile)} tables")
+
+    # Personal in any copy of a table (two areas may each define it), or in this run's reading of a
+    # refreshed one: a merged column keeps its stored flags, and one that now holds phone numbers is
+    # personal even before anyone flags it.
+    personal_cols: dict[tuple, set[str]] = {k: set(v) for k, v in fresh_personal.items()}
+    for t in [*built, *(per_area.values() if refreshing else ())]:
+        personal_cols.setdefault((t.schema_name, t.name), set()).update(
+            c.name.lower() for c in t.columns if _never_read(c))
+
+    def personal(t: Table, c: Column) -> bool:
+        return _never_read(c) or c.name.lower() in personal_cols.get((t.schema_name, t.name), set())
+
+    report.profile_tables = PF.profile_tables(dialect, runner, to_profile, personal, samples, done=profiled,
+                                              watch=_watch(pp))
     _progress(pp, "join candidates: testing columns no join covers…")
-    _scan_join_candidates(dialect, runner, rels, built, report, sg)
+    prior = _stored_candidates(out) if refreshing else {}
+    _scan_join_candidates(dialect, runner, rels, built, report, sg, read=read,
+                          offered_columns=_offered_columns(prior, read), pp=pp)
+    if refreshing:
+        _merge_candidates(prior, report, read or set(), rels, built, sg)
+    _progress(pp, f"join candidates: {len(report.join_candidates)} found "
+                  f"({report.join_candidate_probes} probe(s) this run)")
+    # Every probe above swallows its own failure, which is right for one probe's bad statement and
+    # wrong for a connection lost mid-build: the model would be written without its joins.
+    watch.check()
     if refreshing:   # counted after the join merge and relabel, which are changes too
         report.notes.append(
             f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
             f"{len(built)} total")
     report.table_count = len(built)
     report.relationship_count = len(rels)
-    _progress(pp, f"done: {len(built)} tables, {len(rels)} relationships")
+    _progress(pp, f"done: {len(built)} tables, {len(rels)} joins written, "
+                  f"{len(report.join_candidates)} join candidates found")
+    # The flags came off only now: every read above (value lists, placeholders, the profile) still
+    # treated the columns as personal, so no personal value reached the model.
+    from . import build_settings
+    if build_settings.warehouse_enforces_personal_data(artifacts_dir):
+        _leave_personal_unflagged([*built, *(per_area.values() if refreshing else ())], prev, report)
 
     # 3b. now that joins are known, re-derive deep-table column_groups so FK (reference) columns
     # group under `references` instead of scattering through `misc` — references live on the
@@ -604,11 +961,13 @@ def introspect(
         _backup_legacy_model(out)
     if prev is not None and prev_for_areas is None and not dry_run:
         _remove_moved_table_files(org, out)
-    wr = build.write_tree(org, out, dry_run=dry_run)
+    wr = build.write_tree(_without_unknown_sizes(org, report), out, dry_run=dry_run)
     report.files_written = wr.files_written
     report.files_unchanged = len(wr.files_unchanged)
     if not dry_run:
         write_join_candidates(out, report)
+        write_profile(out, report, [t for sa in org.subject_areas for t in sa.tables_defined],
+                      append=prev is not None)
     return org, report
 
 
@@ -823,13 +1182,15 @@ def _areas_untouched(prev: Datasource, root: Path) -> bool:
     return True
 
 
-def _merge_table(old: Table, fresh: Table, *, keys_read: bool = True) -> tuple[Table, dict[str, list[str]]]:
+def _merge_table(old: Table, fresh: Table, *, keys_read: bool = True,
+                 repeat_read: bool = True) -> tuple[Table, dict[str, list[str]]]:
     """`old` with the structure `fresh` read from the database, and the curation kept.
 
     A column the database still has keeps every field but its type; a new one arrives as
     introspection built it; one the database no longer has stays, marked `stale`, so a description or
     sign-off is never silently lost and a person decides. `keys_read` False keeps `old`'s unique keys,
-    since a failed read is not the database dropping them. Returns the merged table and what changed."""
+    since a failed read is not the database dropping them; `repeat_read` False likewise keeps a stored
+    repeat caveat. Returns the merged table and what changed."""
     fresh_by = {c.name.lower(): c for c in fresh.columns}
     old_names = {c.name.lower() for c in old.columns}
     cols: list[Column] = []
@@ -861,6 +1222,20 @@ def _merge_table(old: Table, fresh: Table, *, keys_read: bool = True) -> tuple[T
                 group = "misc" if "misc" in groups else next(iter(groups))
             groups[group].append(f.name)
     cols, grain = _merged_key(old, fresh, cols, change)
+    caveats = list(old.caveats)
+    repeat = build.repeated_key(fresh)
+    if repeat or repeat_read:
+        # Measured now, so it replaces the stored one; a check that ran and found none removes it.
+        caveats = [c for c in caveats if not build.is_repeat_caveat(c)]
+    if repeat:
+        # The key alone is no longer one row per record. A composite grain holding it (a record and
+        # its stage) may still be, and is someone's statement: it stays.
+        key = repeat[0].lower()
+        caveats.append(build.repeat_caveat(*repeat))
+        if [g.lower() for g in grain] == [key]:
+            grain = []
+        if [c.name.lower() for c in cols if c.primary_key] == [key]:
+            cols = [c.model_copy(update={"primary_key": False}) if c.name.lower() == key else c for c in cols]
     restored_table = old.review_state == "stale"
     if restored_table:
         change.setdefault("table", []).append("back in the database")
@@ -869,6 +1244,7 @@ def _merge_table(old: Table, fresh: Table, *, keys_read: bool = True) -> tuple[T
         change.setdefault("unique keys", []).append(
             "; ".join(", ".join(k) for k in unique_keys) or "(none)")
     update = {"columns": cols, "column_groups": groups, "grain": grain, "unique_keys": unique_keys,
+              "caveats": caveats,
               "performance_hints": _merged_hints(old.performance_hints, fresh.performance_hints)}
     if restored_table:
         update["review_state"] = "approved"
@@ -897,7 +1273,7 @@ def _personal_list(c: Column) -> bool:
     """`c`'s list keys are personal values themselves. Checked on the list, not only the sample:
     a declared list of digit-only phone numbers survives an empty or unreadable sample."""
     keys = list(c.choice_field or {})
-    return (any(pii.personal_value(v) or pii.phone_key(c.name, c.type, v) for v in keys)
+    return (pii.value_list_blocked(c.name, keys) or any(pii.phone_key(c.name, c.type, v) for v in keys)
             or pii.value_suspect_caveat(c.name, c.type, keys) is not None)
 
 
@@ -1065,6 +1441,7 @@ def discover_inventory(
     tables: Optional[list[str]] = None,
     schemas: Optional[list[str]] = None,
     bigquery_region: str = "region-us",
+    row_estimates: bool = False,
 ) -> dict:
     """Cheap first-pass discovery for the prune UI: every (schema, table) and its
     columns — and NOTHING expensive. No grain count-distincts, no FK-overlap probes,
@@ -1073,17 +1450,22 @@ def discover_inventory(
 
     `schemas` (optional) restricts discovery to those schemas (the user's 1.3 schema
     pick) so a 50-schema warehouse isn't fully enumerated just to prune.
+    `row_estimates` adds each table's `rows` from ONE catalog-statistics read where the dialect
+    keeps them (the table picker shows it, #654); never a count, and a table, or a dialect, with
+    no usable estimate simply has no `rows`.
 
     Returns a JSON-serializable inventory:
         {profile, db_type, schemas:[...], table_count, column_mode,
-         tables:[{schema, table, columns:[{name, type}]}, ...]}
+         tables:[{schema, table, columns:[{name, type}], rows?}, ...]}
     """
     dialect = D.get_dialect(db_type)
     if isinstance(dialect, D.BigQuery):
         dialect = D.BigQuery(region=bigquery_region)
 
     report = IntrospectReport(profile=profile, db_type=db_type, out_dir="", dry_run=True)
+    runner = watch = _ConnectionWatch(runner)
     pairs = _discover_tables(dialect, runner, tables, report)
+    watch.check()   # a dead connection reads as an empty catalog: say so, not "locked down"
     if schemas:
         keep = {s for s in schemas}
         pairs = [(s, t) for s, t in pairs if s in keep]
@@ -1121,6 +1503,9 @@ def discover_inventory(
             if not used_bulk:
                 column_mode = cmode
         inv_tables.append({"schema": schema, "table": table, "columns": cols})
+    watch.check()
+    if row_estimates and schemas:
+        _add_row_estimates(dialect, runner, schemas, inv_tables)
 
     return {
         "profile": profile,
@@ -1132,6 +1517,30 @@ def discover_inventory(
     }
 
 
+def _add_row_estimates(dialect: D.Dialect, runner: Runner, schemas: list[str],
+                       tables: list[dict]) -> None:
+    """Set `rows` on each table the catalog keeps a positive estimate for. A refused read, or a 0
+    / -1 (an unanalysed table or a view on Postgres), leaves the size unknown rather than empty.
+    Where the dialect has a second estimate read, it runs once, only when the first left some table
+    unsized, and only fills those."""
+    _apply_row_estimates(runner, dialect.sql_row_estimates_bulk(schemas), tables)
+    if any("rows" not in t for t in tables):
+        _apply_row_estimates(runner, dialect.sql_row_estimates_bulk_fallback(schemas),
+                             [t for t in tables if "rows" not in t])
+
+
+def _apply_row_estimates(runner: Runner, q: Optional[str], tables: list[dict]) -> None:
+    rows = _try(runner, q) if q else None
+    by_tt = {(r.get("table_schema"), r.get("table_name")): r.get("estimated_rows") for r in rows or []}
+    for t in tables:
+        try:
+            n = int(float(by_tt.get((t["schema"], t["table"])) or 0))
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            t["rows"] = n
+
+
 # ---------------------------------------------------------------------------
 # Steps
 # ---------------------------------------------------------------------------
@@ -1140,6 +1549,26 @@ def discover_inventory(
 def _try(runner: Runner, sql: str) -> Optional[list[dict]]:
     try:
         return runner(sql)
+    except Exception:
+        return None
+
+
+def _catalog_read(runner: Runner, sql: str) -> Optional[list[dict]]:
+    """`_try` for discovery's own catalog reads, except that agami's guard refusing one is raised.
+
+    A database error here means the catalog is locked down, and None sends discovery to its
+    explicit-table-list advice. A refusal means agami blocked its own query, and read as None it
+    reported "no tables discovered" for a warehouse the login could read (#668)."""
+    try:
+        return runner(sql)
+    except ExecuteSqlFailure as e:
+        if e.refusal_rule:
+            raise RuntimeError(
+                f"agami's SQL guard refused the catalog read that lists tables (rule: "
+                f"{e.refusal_rule}), so none could be discovered. Refusal: {e}. To build anyway, "
+                "pass an explicit table list (schema.table) so discovery skips the catalog."
+            ) from e
+        return None
     except Exception:
         return None
 
@@ -1187,14 +1616,14 @@ def _discover_tables(
         return out
 
     # catalog mode: schemas -> tables
-    schemas = _try(runner, dialect.sql_schemas())
+    schemas = _catalog_read(runner, dialect.sql_schemas())
     if schemas is not None:
         report.mode_per_capability["tables"] = "catalog"
         report.schemas = _filter_supabase_system_schemas(
             [r["schema_name"] for r in schemas], report)
         pairs: list[tuple[Optional[str], str]] = []
         for s in report.schemas:
-            trows = _try(runner, dialect.sql_tables(s)) or []
+            trows = _catalog_read(runner, dialect.sql_tables(s)) or []
             for r in trows:
                 pairs.append((r.get("schema_name", s), r["table_name"]))
         return pairs
@@ -1207,32 +1636,126 @@ def _discover_tables(
     return []
 
 
+def _read_tables(
+    dialect: D.Dialect, runner: Runner, pairs: list[tuple], conn_name: str, report: IntrospectReport,
+    budget: _CountBudget, reads: _ReadBudget, keys_unread: set, samples: dict,
+    pp: Optional[Path] = None, repeats_unread: Optional[set] = None,
+    check: Optional[Callable[[], None]] = None,
+) -> list[Table]:
+    """Read every table's columns, keys and sample, up to `PF.WORKERS` tables at once (#677: one at a
+    time, a wide build spent 30 s to 3 min per view waiting on the warehouse).
+
+    Each table is built against a report of its own, and those are folded into `report` in `pairs`
+    order once all are read, so the model and the report come out the same whatever order the tables
+    finish in. The two run-wide budgets are shared and locked: the counts' time budget, and the
+    DISTINCT reads, which tables claim in `pairs` order (`_TableReads`). PF.WORKERS is 1 for a sign-in
+    that may prompt, which reads one at a time. One table failing, or Ctrl-C, cancels the tables still
+    queued; those already running finish their statements. `check` runs after each table: a
+    connection failure fails every table alike, so it raises at the first and cancels the rest."""
+    step = max(1, len(pairs) // 10)   # throttle the log to ~10 lines, not one per table
+    turn = threading.Condition()
+    next_up = [0]
+
+    def one(order: int, pair: tuple) -> tuple[Table, IntrospectReport, set, dict, set]:
+        schema, table = pair
+        own = IntrospectReport(profile=report.profile, db_type=report.db_type, out_dir=report.out_dir,
+                               dry_run=report.dry_run)
+        own_unread: set = set()
+        own_samples: dict = {}
+        own_repeats: set = set()
+        my_reads = _TableReads(reads, order, turn, next_up)
+        try:
+            with _waiting_on(pp, f"reading columns and keys of {table}"):
+                t = _build_table(dialect, runner, schema, table, conn_name, own, budget, my_reads,
+                                 own_unread, own_samples, own_repeats)
+        finally:
+            my_reads.release()
+        return t, own, own_unread, own_samples, own_repeats
+
+    pool = ThreadPoolExecutor(max_workers=max(1, PF.WORKERS))
+    try:
+        futures = [pool.submit(one, k, p) for k, p in enumerate(pairs)]
+        for i, f in enumerate(as_completed(futures), 1):
+            f.result()   # a table that failed stops the build now, not after every other table
+            if check is not None:
+                check()
+            if i % step == 0 or i == len(pairs):
+                _progress(pp, f"columns+grain {i}/{len(pairs)}")
+        results = [f.result() for f in futures]
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
+    built: list[Table] = []
+    for t, own, own_unread, own_samples, own_repeats in results:
+        _fold_report(report, own)
+        keys_unread |= own_unread
+        samples.update(own_samples)
+        if repeats_unread is not None:
+            repeats_unread |= own_repeats
+        built.append(t)
+    return built
+
+
+def _fold_report(into: IntrospectReport, part: IntrospectReport) -> None:
+    """Add one table's findings to the run's report, as if the table had been built against it:
+    lists and counts add up, the first table to set a capability's mode keeps it, a keyed entry is
+    the latest table's."""
+    for f in fields(part):
+        mine, theirs = getattr(into, f.name), getattr(part, f.name)
+        if isinstance(theirs, list):
+            mine.extend(theirs)
+        elif f.name == "mode_per_capability":
+            for k, v in theirs.items():
+                mine.setdefault(k, v)
+        elif isinstance(theirs, dict):
+            mine.update(theirs)
+        elif isinstance(theirs, bool):
+            setattr(into, f.name, mine or theirs)
+        elif isinstance(theirs, int):
+            setattr(into, f.name, mine + theirs)
+
+
 def _build_table(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
     conn_name: str, report: IntrospectReport, budget: Optional[_CountBudget] = None,
-    reads: Optional[_ReadBudget] = None, keys_unread: Optional[set] = None,
-    samples: Optional[dict] = None,
+    reads: "Optional[_ReadBudget | _TableReads]" = None, keys_unread: Optional[set] = None,
+    samples: Optional[dict] = None, repeats_unread: Optional[set] = None,
 ) -> Table:
     # columns: catalog first, probe fallback
     probe_sample: list = []
-    cols, mode = _columns(dialect, runner, schema, table, probe_sample=probe_sample)
+    uncomparable: list[str] = []
+    cols, mode = _columns(dialect, runner, schema, table, probe_sample=probe_sample, uncomparable=uncomparable)
     report.mode_per_capability.setdefault("columns", mode)
+    if uncomparable:
+        report.uncomparable[(schema, table)] = uncomparable
 
     # Estimate row count ONCE up front (a catalog stat — instant, zero scan). Reused for
     # the grain-probe size guard below AND for performance_hints, so we never fetch twice.
-    est_rows = _estimate_rows(dialect, runner, schema, table, budget)
+    # Called with exactly these arguments, so a patched stand-in that returns a plain int still fits.
+    est = _estimate_rows(dialect, runner, schema, table, budget)
+    size_kind = getattr(est, "kind", None)
+    est_rows = None if est is None else int(est)
+    if isinstance(est, _Counted):
+        report.counted_sizes[_qualified_name(schema, table)] = (est_rows, size_kind)
 
     # grain: catalog PKs, else uniqueness probe (skipped on very large tables — see _grain)
-    grain, gmode = _grain(dialect, runner, schema, table, cols, est_rows=est_rows)
+    grain, gmode = _grain(dialect, runner, schema, table, cols, est_rows=est_rows, report=report)
     report.mode_per_capability.setdefault("grain", gmode)
     if gmode == "probe_skipped_large":
         report.notes.append(
-            f"{table}: skipped grain probe (~{est_rows:,} rows > "
+            f"{table}: skipped grain probe ({_size_words(est_rows, size_kind)}; the probe stops at "
             f"{_GRAIN_PROBE_MAX_ROWS:,}) — left grain empty rather than full-scanning "
             f"each id column. A composite/absent grain is expected for a fact table this "
             f"size; set it by hand if you know the key."
         )
-    unique_keys = _unique_keys(dialect, runner, schema, table, cols, grain, est_rows=est_rows)
+    checked = (None, 1.0) if grain else _repeat_check(dialect, runner, schema, table, cols, est_rows=est_rows)
+    if checked is None and repeats_unread is not None:
+        repeats_unread.add((schema, table))
+    repeat = checked if checked and checked[1] > 1 else None
+    if repeat:
+        report.notes.append(f"{table}: {build.repeat_caveat(*repeat)}")
+    unique_keys = _unique_keys(dialect, runner, schema, table, cols, grain, est_rows=est_rows, report=report)
     if unique_keys is None:
         # Unknown, not none: a refresh keeps the stored keys rather than read this as their removal.
         unique_keys = []
@@ -1296,16 +1819,79 @@ def _build_table(
         column_groups=column_groups,
         column_group_descriptions=column_group_descriptions,
         performance_hints=perf,
+        caveats=[build.repeat_caveat(*repeat)] if repeat else [],
         columns=cols,
     )
 
 
+# The bounds of the repeat check on a table above the grain probe's size guard: the records of a
+# recent window of its first date column, or else this many rows.
+_REPEAT_WINDOW_DAYS = 90
+_REPEAT_SAMPLE_ROWS = 1_000_000
+_VIEW_AFFIX = re.compile(r"^(v|vw|view)_|_(v|vw|view)$", re.IGNORECASE)
+
+
+def _today() -> date:
+    return date.today()
+
+
+def _record_key(table: str, cols: list[Column]) -> Optional[str]:
+    """The column that names the record a table is about: `id`, or the table's own name with `_id` /
+    `_key` / `_number`. A view's `v_`/`_view` affix is dropped first. Never a column named for
+    another record, which repeats by design: `customer_id` on `orders`, or `order_id` on
+    `order_items`, where counting rows is right."""
+    base = _VIEW_AFFIX.sub("", table.lower())
+    stems = [base, base[:-1] if base.endswith("s") else base]
+    wanted = ["id", "sys_id"] + [f"{s}_{x}" for s in stems if s for x in ("id", "key", "number")]
+    by_lower = {c.name.lower(): c for c in cols if c.type in ("integer", "string")}
+    return next((by_lower[w].name for w in wanted if w in by_lower), None)
+
+
+def _repeat_check(
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
+    *, est_rows: Optional[int] = None,
+) -> Optional[tuple[str, float]]:
+    """(key, factor) from one aggregate statement, COUNT(*) against COUNT(DISTINCT key): a factor
+    above 1 when the table holds each record on several rows, 1.0 when each record is one row. None
+    when nothing was settled: no record key, a failed read, or nothing read.
+
+    A table above the grain probe's guard is never read in full: a recent window of its first date
+    column, else (or when the window is empty) a bounded sample. Both can understate the factor: the
+    sample has no ORDER BY, so a record whose rows are scattered may have only some of them in it, and
+    a window cuts off a record's rows dated before it. A window with any rows ends the check, however
+    few. On BigQuery the LIMIT bounds the rows returned, not the bytes billed."""
+    key = _record_key(table, cols)
+    if key is None:
+        return None
+    q, k = dialect.qualified(schema, table), dialect.quote_ident(key)
+    head = f"SELECT COUNT(*) AS total, COUNT(DISTINCT {k}) AS distinct_count FROM "
+    statements = [head + q]
+    if est_rows is not None and est_rows >= _GRAIN_PROBE_MAX_ROWS:
+        dated = next((c.name for c in cols if c.type in ("date", "timestamp")), None)
+        since = (_today() - timedelta(days=_REPEAT_WINDOW_DAYS)).isoformat()
+        sample = head + f"({dialect.limited(f'SELECT {k} FROM {q}', _REPEAT_SAMPLE_ROWS)}) s"
+        # The window misses when the data stopped before it; the sample then reads what there is.
+        statements = ([f"{head}{q} WHERE {dialect.quote_ident(dated)} >= {dialect.date_literal(since)}"]
+                      if dated else []) + [sample]
+    for sql in statements:
+        res = _try(runner, sql)
+        try:
+            total = int(float(res[0]["total"])) if res else 0
+            distinct = int(float(res[0]["distinct_count"])) if res else 0
+        except (KeyError, TypeError, ValueError):
+            return None
+        if total and distinct:
+            return key, max(1.0, round(total / distinct, 1))
+    return None
+
+
 def _columns(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
-    *, probe_sample: Optional[list] = None,
+    *, probe_sample: Optional[list] = None, uncomparable: Optional[list] = None,
 ) -> tuple[list[Column], str]:
     """The columns and how they were read. In probe mode the probe's sample rows are put in
-    `probe_sample`, so enrichment reuses them instead of reading the table again."""
+    `probe_sample`, so enrichment reuses them instead of reading the table again. The columns of a type
+    the engine cannot compare are put in `uncomparable`, so they are never read inside a combined read."""
     sql = dialect.sql_columns(schema, table)
     # `_try` answers None for a FAILED read and [] for a table with no columns. One failure is
     # retried: on a wide build over a VPN or tunnel a single dropped connection otherwise fell through
@@ -1321,6 +1907,8 @@ def _columns(
             scale_i = int(scale) if scale not in (None, "", "NULL") else None
             ctype = dialect.map_type(r.get("data_type", ""), numeric_scale=scale_i)
             cols.append(Column(name=r["column_name"], type=ctype, description=""))
+            if uncomparable is not None and not dialect.comparable(r.get("data_type")):
+                uncomparable.append(r["column_name"])
         return cols, "catalog"
     # probe: header for names, sample for types
     pcols, sample = _probe_columns(dialect, runner, schema, table)
@@ -1361,49 +1949,158 @@ _COUNT_BUDGET_S = 600.0
 class _CountBudget:
     seconds_left: float
     skipped: int = 0
+    # Tables are read a few at a time (`_read_tables`), so the budget is shared between workers.
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def start(self) -> bool:
+        """Whether a count may run; counts the table as skipped when the time is used up."""
+        with self.lock:
+            if self.seconds_left <= 0:
+                self.skipped += 1
+                return False
+            return True
+
+    def spend(self, seconds: float) -> None:
+        with self.lock:
+            self.seconds_left -= seconds
 
 
 @dataclass
 class _ReadBudget:
     left: int
     skipped: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def take(self) -> bool:
+        """One DISTINCT read, if any are left; counts a skipped column when none are."""
+        return self.claim(1) == 1
+
+    def claim(self, n: int) -> int:
+        """Up to `n` reads, as many as are left; the rest are counted as skipped columns."""
+        with self.lock:
+            got = max(0, min(n, self.left))
+            self.left -= got
+            self.skipped += n - got
+            return got
+
+
+class _TableReads:
+    """One table's turn at the run's DISTINCT reads. Tables read side by side would otherwise race for
+    the last reads when the cap runs out, and which columns got a value list would depend on which
+    table got there first; here table k claims only after tables 0..k-1 have, as one at a time would."""
+
+    def __init__(self, shared: _ReadBudget, order: int, turn: threading.Condition, next_up: list[int]) -> None:
+        self.shared, self.order, self.turn, self.next_up = shared, order, turn, next_up
+        self.done = False
+
+    def claim(self, n: int) -> int:
+        if self.done:
+            return self.shared.claim(n)
+        with self.turn:
+            self.turn.wait_for(lambda: self.next_up[0] >= self.order)
+        got = self.shared.claim(n)
+        self.release()
+        return got
+
+    def take(self) -> bool:
+        return self.claim(1) == 1
+
+    def release(self) -> None:
+        """Pass the turn on, claimed or not: a table that never reached its value lists, or failed,
+        must not hold up the tables after it."""
+        if self.done:
+            return
+        self.done = True
+        with self.turn:
+            self.next_up[0] = max(self.next_up[0], self.order + 1)
+            self.turn.notify_all()
+
+
+class _Counted(int):
+    """A row count the build took itself because the catalog had none, with how it came out: `kind`
+    is None for an exact count under the cap, `at_least` past it, `unknown` when the count failed.
+    An int, so every caller (and a stand-in that returns a plain int) reads it as a size."""
+
+    kind: Optional[str]
+
+    def __new__(cls, rows: int, kind: Optional[str] = None) -> "_Counted":
+        obj = super().__new__(cls, rows)
+        obj.kind = kind
+        return obj
 
 
 def _estimate_rows(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
     budget: Optional[_CountBudget] = None,
 ) -> Optional[int]:
-    """Row count from the catalog statistics (pg_class.reltuples, etc.) — instant, no scan — and,
-    when the catalog has no usable figure, an exact count instead (#451).
+    """The table's row count: the catalog statistics (pg_class.reltuples, etc.) — instant, no scan —
+    and, when the catalog has no usable figure, one count capped at `_SIZE_COUNT_CAP` rows (#451),
+    returned as a `_Counted`.
 
     A view has no statistics on any engine: Redshift's `svv_table_info` lists only tables, and
-    Postgres reports `reltuples` 0 or -1 (by version) for a view or a table it has never analysed. Read as-is,
-    a fact view with millions of rows came back unknown (or as empty), so it never reached `large_tables` and
-    never got the `recommended_filters` the scan-risk check names. The count is a read-only query,
-    bounded by the same statement limit as every introspection read; if it is refused or runs out of
-    time the size stays unknown, as before. None also when the dialect deliberately offers no
-    estimate query at all."""
+    Postgres reports `reltuples` 0 or -1 (by version) for a view or a table it has never analysed. An
+    exact count of a 100M-row view runs out of time, and an unknown size read as small to every cost
+    guard (overlap, grain, key and value reads), so the biggest views got full scans. The capped count
+    answers the only question a guard asks, under the cap or not; past the cap the size is the cap + 1,
+    a lower bound, and a count that fails or that the run's count budget has no time left for reads as
+    that too, never small. None when the dialect offers no estimate or no count at all (#459): such an
+    object stays unsized, as before."""
     q = dialect.sql_row_estimate(schema, table)
     if not q:
         return None
     est = _rows_from(_try(runner, q))
     if est is not None and est > 0:
         return est
-    count_q = dialect.sql_row_count(schema, table)
-    if count_q and count_q != q:
-        # A distinct count was tried, so its answer replaces the catalog's: when it fails, the size
-        # is unknown, never the catalog's 0 (an unanalysed table with rows would read as empty).
-        if budget is not None and budget.seconds_left <= 0:
-            budget.skipped += 1
-            return None
+    if est is not None and est >= 0 and q == dialect.sql_row_count(schema, table):
+        return est   # the estimate query was itself the exact count (no catalog statistics here)
+    # The catalog's 0 is not taken either: an unanalysed table with rows would read as empty.
+    count_q = dialect.sql_row_count_capped(schema, table, _SIZE_COUNT_CAP)
+    if not count_q:
+        return None
+    rows: Optional[int] = None
+    if budget is None or budget.start():
         started = time.monotonic()
         try:
-            return _rows_from(_try(runner, count_q))
+            rows = _rows_from(_try(runner, count_q))
         finally:
             if budget is not None:
-                budget.seconds_left -= time.monotonic() - started
-    # The estimate query was itself the exact count (no catalog statistics on this engine).
-    return est if est is not None and est >= 0 else None
+                budget.spend(time.monotonic() - started)
+    if rows is None:
+        return _Counted(_SIZE_COUNT_CAP + 1, "unknown")
+    return _Counted(_SIZE_COUNT_CAP + 1, "at_least") if rows > _SIZE_COUNT_CAP else _Counted(rows)
+
+
+def _without_unknown_sizes(org: Datasource, report: IntrospectReport) -> Datasource:
+    """The model as written: a table whose capped count failed keeps no size. The build read it as
+    large (`ROW_COUNT_CAP + 1`) so every guard stayed conservative, but a failed count says nothing
+    about the size, and written it would show a small view as "at least 5,000,000 rows". A count past
+    the cap is a real lower bound and is kept. No new key: the kind stays in this run's report."""
+    unknown = {q.lower() for q, (_, kind) in report.counted_sizes.items() if kind == "unknown"}
+    if not unknown:
+        return org
+    out = org.model_copy(deep=True)
+    for sa in out.subject_areas:
+        for t in sa.tables_defined:
+            ph = t.performance_hints
+            if (ph is not None and ph.estimated_row_count == _SIZE_COUNT_CAP + 1
+                    and _qualified_name(t.schema_name, t.name).lower() in unknown):
+                t.performance_hints = ph.model_copy(
+                    update={"estimated_row_count": None, "estimated_row_count_at": None})
+    return out
+
+
+def _qualified_name(schema: Optional[str], table: str) -> str:
+    return f"{schema}.{table}" if schema else table
+
+
+def _size_words(rows: Optional[int], kind: Optional[str], *, about: bool = True) -> str:
+    """A table's size as the report says it: `about 1,234 rows`, `at least 5,000,000 rows (counted
+    up to the limit)`, or `size unknown` when even the capped count failed."""
+    if kind == "unknown":
+        return "size unknown (the count failed; treated as large)"
+    if kind == "at_least":
+        return f"at least {_SIZE_COUNT_CAP:,} rows (counted up to the limit)"
+    return f"{'about ' if about else ''}{rows or 0:,} rows"
 
 
 def _rows_from(rows: Optional[list[dict]]) -> Optional[int]:
@@ -1417,7 +2114,7 @@ def _rows_from(rows: Optional[list[dict]]) -> Optional[int]:
 
 def _grain(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
-    *, est_rows: Optional[int] = None,
+    *, est_rows: Optional[int] = None, report: Optional[IntrospectReport] = None,
 ) -> tuple[list[str], str]:
     pks = _try(runner, dialect.sql_primary_keys(schema, table))
     if pks:
@@ -1431,8 +2128,12 @@ def _grain(
     # probe: a single id-ish column that is unique + non-null
     candidates = [c.name for c in cols if c.name.lower() == "id" or c.name.lower().endswith("_id")]
     candidates = candidates or [c.name for c in cols[:3]]
-    for cand in candidates:
-        res = _try(runner, dialect.count_distinct_sql(schema, table, cand))
+    # The first candidate alone, then the rest together: it is usually `id`, and unique, which ends it.
+    def reads() -> Iterator[tuple[str, Optional[list[dict]]]]:
+        yield from _count_reads(dialect, runner, schema, table, candidates[:1], report)
+        yield from _count_reads(dialect, runner, schema, table, candidates[1:], report)
+
+    for cand, res in reads():
         if not res:
             continue
         row = res[0]
@@ -1449,7 +2150,7 @@ def _grain(
 
 def _unique_keys(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
-    grain: list[str], *, est_rows: Optional[int] = None,
+    grain: list[str], *, est_rows: Optional[int] = None, report: Optional[IntrospectReport] = None,
 ) -> Optional[list[list[str]]]:
     """The table's unique keys other than its grain, in the column spelling `cols` uses, or None
     when a catalog read or a data check failed and the keys are unknown.
@@ -1487,15 +2188,152 @@ def _unique_keys(
     if est_rows is not None and est_rows >= _GRAIN_PROBE_MAX_ROWS:
         return []
     kept = []
-    for key in keys:
-        if len(key) != 1:
-            continue
-        res = _try(runner, dialect.count_distinct_sql(schema, table, key[0]))
+    singles = [key for key in keys if len(key) == 1]
+    for key, (_, res) in zip(singles, _count_reads(dialect, runner, schema, table, [k[0] for k in singles], report)):
         if res is None:
             return None
         if _all_distinct(res) is not None:
             kept.append(key)
     return kept
+
+
+def _row_cap() -> int:
+    """The result row cap `execute_sql.py` applies (`AGAMI_SQL_MAX_ROWS`, 1000 when unset or unusable)."""
+    raw = os.environ.get("AGAMI_SQL_MAX_ROWS", "").strip()
+    return int(raw) if raw.isdecimal() and int(raw) > 0 else 1000
+
+
+def _combined_size(rows_each: int) -> int:
+    """How many columns a combined read takes: COMBINED_READ_COLUMNS, fewer where the row cap would
+    refuse that many columns' rows (a refused statement costs a round trip and then reads them one by
+    one anyway)."""
+    if rows_each <= 1:
+        return COMBINED_READ_COLUMNS
+    return max(1, min(COMBINED_READ_COLUMNS, _row_cap() // rows_each))
+
+
+def _read_column_by_column(report: Optional[IntrospectReport], table: str) -> None:
+    if report is not None and table not in report.read_column_by_column:
+        report.read_column_by_column.append(table)
+
+
+def _combined(
+    runner: Runner, sql: str, report: Optional[IntrospectReport], schema: Optional[str], table: str,
+) -> Optional[list[dict]]:
+    """A combined read's rows, or None when it failed. One that ran out of time marks the table, and
+    the table's later reads go a column at a time without trying again: each would wait as long."""
+    if report is not None and (schema, table) in report.combined_too_slow:
+        return None
+    try:
+        return runner(sql)
+    except Exception as exc:
+        if report is not None and PF.too_slow(exc):
+            report.combined_too_slow.append((schema, table))
+        return None
+
+
+def _per_column_reads(
+    runner: Runner, schema: Optional[str], table: str, columns: list[str], rows_each: int,
+    many: Callable[[list[int]], str], one: Callable[[int], str],
+    split: Callable[[Optional[list[dict]], int], Optional[list]], report: Optional[IntrospectReport],
+) -> list:
+    """Each column's result (None for a failed read), in `columns` order, read several columns to a
+    statement (`_combined_size`). `many` builds the combined statement for some of `columns`' positions,
+    `one` a column's own read, and `split` cuts a combined result into the reads it holds, or answers
+    None when it isn't one. A combined read that fails is read a column at a time, so one column of an
+    odd type costs only that statement; a column the catalog types as one the engine cannot compare
+    (`Dialect.comparable`) is read alone from the start."""
+    alone = set((report.uncomparable.get((schema, table), ()) if report is not None else ()))
+    out: list = [None] * len(columns)
+    together = [i for i, c in enumerate(columns) if c not in alone]
+    for i in (i for i, c in enumerate(columns) if c in alone):
+        out[i] = _try(runner, one(i))
+    size = _combined_size(rows_each)
+    for k in range(0, len(together), size):
+        chunk = together[k:k + size]
+        got = None
+        if len(chunk) > 1:
+            got = split(_combined(runner, many(chunk), report, schema, table), len(chunk))
+            if got is None:
+                _read_column_by_column(report, table)
+        for pos, i in enumerate(chunk):
+            out[i] = got[pos] if got is not None else _try(runner, one(i))
+    return out
+
+
+def _count_reads(
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, columns: list[str],
+    report: Optional[IntrospectReport] = None,
+) -> list[tuple[str, Optional[list[dict]]]]:
+    """Each column with its `count_distinct_sql` result (None for a failed read), as `_per_column_reads`."""
+    got = _per_column_reads(
+        runner, schema, table, columns, 1,
+        lambda idx: dialect.count_distinct_many_sql(schema, table, [columns[i] for i in idx]),
+        lambda i: dialect.count_distinct_sql(schema, table, columns[i]),
+        lambda rows, n: None if (cut := _split_counts(rows, n)) is None else [[r] for r in cut], report)
+    return list(zip(columns, got))
+
+
+def _split_counts(rows: Optional[list[dict]], n: int) -> Optional[list[dict]]:
+    """Each column's `count_distinct_sql` row out of a `count_distinct_many_sql` result, or None when
+    the result is not one."""
+    if not rows or len(rows) != 1:
+        return None
+    row = rows[0]
+    try:
+        total = int(float(row.get("total")))
+        out = []
+        for i in range(n):
+            filled = int(float(row.get(f"filled{i}")))
+            out.append({"total": total, "distinct_count": int(float(row.get(f"distinct_count{i}"))),
+                        "null_count": total - filled})
+    except (TypeError, ValueError):
+        return None
+    return out
+
+
+def _value_reads(
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, columns: list[str], n: int,
+    report: Optional[IntrospectReport] = None,
+) -> list[Optional[list[dict]]]:
+    """Each column's `distinct_sql` result (None for a failed read), as `_per_column_reads`."""
+    return _per_column_reads(
+        runner, schema, table, columns, n,
+        lambda idx: dialect.distinct_many_sql(schema, table, [columns[i] for i in idx], n),
+        lambda i: dialect.distinct_sql(schema, table, columns[i], n), _split_tagged, report)
+
+
+def _split_tagged(
+    rows: Optional[list[dict]], n: int, names: tuple[str, ...] = ("v",), shared: tuple[str, ...] = (),
+) -> Optional[list[list[dict]]]:
+    """Each arm's rows out of a tagged UNION ALL (`dialects.tagged_union`), in the order they came and
+    keyed as its own read keys them; None when the result is not one (a failed read, a row with no tag
+    or one out of range)."""
+    if rows is None:
+        return None
+    out: list[list[dict]] = [[] for _ in range(n)]
+    for r in rows:
+        try:
+            i = int(float(r.get("c")))
+        except (TypeError, ValueError):
+            return None
+        if not 0 <= i < n:
+            return None
+        out[i].append({**{k: r.get(f"{k}{i}") for k in names}, **{k: r.get(k) for k in shared}})
+    return out
+
+
+def _placeholder_reads(
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, columns: list[Column],
+    report: Optional[IntrospectReport] = None,
+) -> list[Optional[list[dict]]]:
+    """Each column's `placeholder_scan_sql` result (None for a failed read), as `_per_column_reads`."""
+    return _per_column_reads(
+        runner, schema, table, [c.name for c in columns], _PLACEHOLDER_TOP,
+        lambda idx: dialect.placeholder_scan_many_sql(
+            schema, table, [(columns[i].name, columns[i].type) for i in idx], _PLACEHOLDER_TOP),
+        lambda i: dialect.placeholder_scan_sql(schema, table, columns[i].name, columns[i].type, _PLACEHOLDER_TOP),
+        lambda rows, n: _split_tagged(rows, n, ("v", "lo", "hi"), ("n", "total")), report)
 
 
 def _distinct_rows(
@@ -1539,15 +2377,21 @@ class _ProbeBudget:
 
 def _suggest_data_unique(
     dialect: D.Dialect, runner: Runner, rels: list[Relationship], tables: list[Table],
-    report: IntrospectReport, budget: Optional[_ProbeBudget] = None,
+    report: IntrospectReport, budget: Optional[_ProbeBudget] = None, checked: Optional[dict] = None,
 ) -> None:
     """Check each join's many side on the data when no key settles it, and flag a join whose
     values turn out unique for review. The label is left as it is: data that is unique today is not
-    a promise, so a person confirms the join is one-to-one (#511)."""
+    a promise, so a person confirms the join is one-to-one (#511). A join this run checked on the
+    whole key already has the counts, so it costs no statement."""
     budget = budget if budget is not None else _ProbeBudget()
     for r in rels:
         hit = _many_side(r, tables)
         if hit is None:
+            continue
+        known = _unique_from_check(r, checked or {})
+        if known is not False:
+            if known is not None:
+                _flag_one_to_one(r, hit[0], hit[1], known)
             continue
         if budget.left <= 0:
             if not budget.noted:
@@ -1560,6 +2404,22 @@ def _suggest_data_unique(
         rows = _distinct_rows(dialect, runner, table.schema_name, table.name, column)
         if rows is not None:
             _flag_one_to_one(r, table, column, rows)
+
+
+def _unique_from_check(r: Relationship, checked: dict) -> "int | None | bool":
+    """What this run's data check of `r` says about its many side: the filled rows when every value is
+    distinct, None when some repeat, or False when the check didn't read that side whole."""
+    c = checked.get(_check_key(r.from_schema, r.from_table, [r.from_column], r.to_schema, r.to_table,
+                               [r.to_column]))
+    if c is None or not c.ran:
+        return False
+    if r.relationship == "many_to_one":   # the many side is the one the check starts from
+        if c.read != "whole":
+            return False
+        return c.rows_keyed if 0 < c.rows_keyed == c.values else None
+    if c.target_read != "whole":   # only the matched keys were looked up
+        return False
+    return c.to_rows if 0 < c.to_rows == c.to_keys else None
 
 
 def _many_side(r: Relationship, tables: list[Table]) -> Optional[tuple[Table, str]]:
@@ -1603,7 +2463,8 @@ def _key_reason(t: Table, cols: list[str]) -> str:
 def _recheck_engine_joins(
     dialect: D.Dialect, runner: Runner, rels: list[Relationship], tables: list[Table],
     report: IntrospectReport, budget: Optional[_ProbeBudget] = None,
-    keys_unread: Optional[list[Table]] = None, sg: Optional[str] = None,
+    keys_unread: Optional[list[Table]] = None, sg: Optional[str] = None, checked: Optional[dict] = None,
+    read: Optional[set[str]] = None,
 ) -> None:
     """On a refresh, label each join the engine approved itself from the database's keys as they
     are now, and list every one whose label that changes. A join a person signed off or edited is
@@ -1631,8 +2492,10 @@ def _recheck_engine_joins(
             "joins corrected from the database's constraints", []).append(
             f"{label}: {r.relationship} → {card} ({why})")
         r.relationship = card
-    engine = [r for r in rels if _engine_approved(r)]
-    _suggest_data_unique(dialect, runner, engine, tables, report, budget)
+    # The relabelling above costs no statement; the uniqueness probes do, and a join between two
+    # tables this run didn't read was probed when they were.
+    engine = [r for r in rels if _engine_approved(r) and _touches(r, tables, read)]
+    _suggest_data_unique(dialect, runner, engine, tables, report, budget, checked)
     for r in engine:
         if not _engine_approved(r):
             ft = _endpoint(tables, r.from_table, r.from_schema)
@@ -1644,8 +2507,12 @@ def _recheck_engine_joins(
 def _build_relationships(
     dialect: D.Dialect, runner: Runner, pairs: list[tuple[Optional[str], str]],
     tables: list[Table], report: IntrospectReport,
-    pp: Optional[Path] = None,
+    pp: Optional[Path] = None, declared: Optional[list] = None,
+    read: Optional[set[str]] = None, known: Sequence[Relationship] = (),
 ) -> list[Relationship]:
+    """The model's joins. `declared` collects the declared keys an unenforcing engine leaves to be
+    confirmed on the data, once every join has been checked. On an append, `read` (the tables this run
+    read) and `known` (the joins the model has) keep the value probes to pairs not probed before."""
     # catalog FKs per schema
     schemas = {s for s, _ in pairs if s}
     catalog_fks: list[dict] = []
@@ -1679,15 +2546,11 @@ def _build_relationships(
         tables_by_name.setdefault(t.name, []).append(t)
 
     rels: list[Relationship] = []
-    overlap_probes = 0   # budget guard for declared-FK overlap confirmation (see FK_OVERLAP_PROBE_CAP)
     outside_model = 0
     if catalog_ok and catalog_fks:
         report.mode_per_capability["relationships"] = "catalog"
-        fk_keys = _fk_groups(catalog_fks)
-        _fk_step = max(1, len(fk_keys) // 10)   # ~10 heartbeat lines over the (slow) FK pass
-        for _fi, (key_rows, grouped) in enumerate(fk_keys, 1):
-            if _fi % _fk_step == 0 or _fi == len(fk_keys):
-                _progress(pp, f"relationships: declared FK {_fi}/{len(fk_keys)}")
+        ungrouped = False
+        for key_rows, grouped in _fk_groups(catalog_fks):
             fk = key_rows[0]
             ft, tt = fk.get("from_table"), fk.get("to_table")
             fc = [r.get("from_column") for r in key_rows]
@@ -1704,30 +2567,15 @@ def _build_relationships(
             # DBs (Postgres/MySQL); otherwise resolve it from the table list (same-schema first).
             from_schema = fk.get("from_schema") or _schema_of(ft, tables_by_name)
             to_schema = fk.get("to_schema") or _schema_of(tt, tables_by_name, prefer=from_schema, report=report)
-            cross = bool(from_schema and to_schema and from_schema != to_schema)
             fobj = _pick_target(tables_by_name.get(ft, []), prefer=from_schema)
             tobj = _pick_target(tables_by_name.get(tt, []), prefer=to_schema)
+            cross = bool(from_schema and to_schema and from_schema != to_schema)
             card = build.infer_cardinality(fobj, tobj, fc, tc)   # every column of a composite key
-            # declared-but-unenforced FKs (Redshift/Databricks/Trino) -> confirm by overlap.
-            # The catalog's FK is a *declaration*, not a guarantee, so probe the data: if the
-            # child values actually live in the parent key, treat it like an enforced FK
-            # (confirmed + auto-approved) instead of dumping it in the review queue. Only FKs we
-            # can't confirm against the data stay inferred/unreviewed for a human glance. This is
-            # what keeps inheritance-heavy schemas (ServiceNow on Redshift) from flooding review.
             confidence = "confirmed" if dialect.fk_enforced else "inferred"
-            overlap_confirmed = False
-            if not dialect.fk_enforced and overlap_probes < FK_OVERLAP_PROBE_CAP:
-                # Skip the scan on huge FROM tables (the slow case on Redshift fact tables) —
-                # leave the declared FK inferred/unreviewed rather than full-scan to confirm it.
-                if fobj is not None and tobj is not None and not _too_big_to_probe(fobj):
-                    overlap_probes += 1
-                    one = len(fc) == 1   # a single column keeps the probe it always had
-                    if _overlaps(dialect, runner, fobj, fc[0] if one else fc, tobj, tc[0] if one else tc):
-                        confidence = "confirmed"
-                        overlap_confirmed = True
             # A key whose rows came without a constraint name can't be told from separate keys,
             # and used alone each column of a composite one repeats rows: never trusted (#510).
-            trusted = (dialect.fk_enforced or overlap_confirmed) and grouped
+            trusted = dialect.fk_enforced and grouped
+            ungrouped = ungrouped or not grouped
             # trusted joins are sound structure -> auto-approve with a system sign-off (don't
             # flood the review queue); unconfirmed ones need a glance.
             # EXCEPTION: a join that spans two schemas is an architectural claim — the model now
@@ -1736,8 +2584,6 @@ def _build_relationships(
             if trusted and not cross:
                 kw: dict = {"review_state": "approved", "signed_off_by": "agami_introspect",
                             "signed_off_role": "system", "signed_off_at": _NOW}
-                if overlap_confirmed:
-                    desc = "declared FK, confirmed by value-overlap probe"
             else:
                 kw = {"review_state": "unreviewed"}
             if not grouped:
@@ -1747,16 +2593,20 @@ def _build_relationships(
                 report.notes.append(f"cross-schema relationship: {from_schema}.{ft} → {to_schema}.{tt} (declared FK)")
             ends = ({"from_column": fc[0], "to_column": tc[0]} if len(fc) == 1
                     else {"on": _composite_on(dialect, ft, fc, tt, tc)})
-            rels.append(Relationship(
+            rel = Relationship(
                 from_table=ft, to_table=tt, **ends,
                 from_schema=from_schema, to_schema=to_schema,
                 relationship=card, join_type="LEFT", confidence=confidence, description=desc, **kw,
-            ))
-        if overlap_probes >= FK_OVERLAP_PROBE_CAP:
-            report.notes.append(
-                f"declared-FK overlap confirmation capped at {FK_OVERLAP_PROBE_CAP} probes — "
-                "remaining declared FKs left unreviewed for sign-off on /agami-model")
-        if any(not grouped for _, grouped in fk_keys):
+            )
+            # Declared but not enforced (Redshift/Databricks/Trino): the catalog's FK is a
+            # declaration, not a guarantee, so the run's check of every join confirms it on the data
+            # (`_confirm_declared`), and one the data bears out is approved like an enforced key
+            # instead of landing in the review queue. This is what keeps inheritance-heavy schemas
+            # on an unenforcing warehouse from flooding review.
+            if not dialect.fk_enforced and grouped and not cross and declared is not None:
+                declared.append(rel)
+            rels.append(rel)
+        if ungrouped:
             report.notes.append(
                 "the catalog didn't say which foreign-key columns belong to one key, so joins with "
                 "several columns between the same two tables were kept apart and left for review")
@@ -1772,7 +2622,7 @@ def _build_relationships(
         report.notes.append(
             "no declared foreign keys were visible in the catalog — relationships are inferred "
             "from column names and values; review them before relying on them")
-        rels.extend(_probe_relationships(dialect, runner, tables, report))
+        rels.extend(_probe_relationships(dialect, runner, tables, report, read=read, known=known))
 
     # Tier 2 — name-based reference promotion. A `<x>_id` column whose target table is
     # identifiable by name becomes an inferred/unreviewed join even WITHOUT value overlap
@@ -1998,7 +2848,22 @@ def _pick_target(cands: list[Table], prefer: Optional[str]) -> Optional[Table]:
 
 def _probe_relationships(
     dialect: D.Dialect, runner: Runner, tables: list[Table], report: IntrospectReport,
+    read: Optional[set[str]] = None, known: Sequence[Relationship] = (),
 ) -> list[Relationship]:
+    """Joins inferred from names and confirmed by shared values. With `read` (an append), only pairs
+    that touch a table this run read are probed, and a column an existing join already reads from,
+    on a table this run didn't read, is left as it is: both were probed in the batch that read them."""
+    sg = _sqlglot_name(dialect)
+    covered = {(table_key(r.from_table, r.from_schema), fc.lower())
+               for r in known for fc, _tc in _column_pairs(r, sg) or []}
+
+    def skip(t: Table, c, tgt: Table) -> bool:
+        if read is None or _qualified(t) in read:
+            return False
+        tk = table_key(t.name, t.schema_name)
+        return (_qualified(tgt) not in read
+                or bool({(tk, c.name.lower()), (("", tk[1]), c.name.lower())} & covered))
+
     tables_by_name: dict[str, list[Table]] = {}
     for t in tables:
         tables_by_name.setdefault(t.name, []).append(t)
@@ -2043,7 +2908,7 @@ def _probe_relationships(
                     if tgt_name == t.name:
                         continue
                     tgt = _pick_target(tables_by_name.get(tgt_name, []), prefer=t.schema_name)
-                    if tgt is None or len(tgt.grain) != 1 or tgt.grain[0].lower() != low:
+                    if tgt is None or len(tgt.grain) != 1 or tgt.grain[0].lower() != low or skip(t, c, tgt):
                         continue
                     shared = _overlap_count(dialect, runner, t, c.name, tgt, tgt.grain[0])
                     if shared >= _MIN_SHARED_KEY_VALUES:
@@ -2067,7 +2932,7 @@ def _probe_relationships(
                 tn = tgt_name.lower()
                 if stem and (stem in tn or tn in stem or tn.rstrip("s") == stem.rstrip("s")):
                     tgt = _pick_target(tables_by_name.get(tgt_name, []), prefer=t.schema_name)
-                    if tgt is None or len(tgt.grain) != 1:
+                    if tgt is None or len(tgt.grain) != 1 or skip(t, c, tgt):
                         continue
                     if _overlaps(dialect, runner, t, c.name, tgt, tgt.grain[0]):
                         _add(t, c, tgt_name, tgt, "name+type match")
@@ -2123,42 +2988,43 @@ def _choose_key_target(column: str, cands: list[tuple[str, Table, int]]) -> Opti
     return top[0] if len(top) == 1 else None
 
 
+def _rows_of_table(t: Table) -> Optional[int]:
+    perf = getattr(t, "performance_hints", None)
+    return getattr(perf, "estimated_row_count", None) if perf else None
+
+
 def _too_big_to_probe(t: Table) -> bool:
     """True when a table's estimated row count is above the overlap-probe guard — scanning it to
     confirm a join would crawl, so we skip the scan and leave the join unverified."""
-    perf = getattr(t, "performance_hints", None)
-    rows = getattr(perf, "estimated_row_count", None) if perf else None
+    rows = _rows_of_table(t)
     return rows is not None and rows > _OVERLAP_PROBE_MAX_ROWS
 
 
-def overlap_sql(dialect: D.Dialect, ft: Table, fc: str | list[str], tt: Table, tc: str | list[str]) -> str:
+def overlap_sql(dialect: D.Dialect, ft: Table, fc: str, tt: Table, tc: str,
+                from_rows: Optional[int] = None, spread: bool = True) -> str:
     """The overlap probe as one statement: 50 sampled distinct values of `ft.fc`, counted against
     `tt.tc`. Split out of `_overlaps` so a caller that must not run SQL itself, the reconcile skill's
     join check, which hands every probe to the execution tier, emits exactly the probe introspection
     already trusts rather than a second spelling of it.
 
     The sample is bounded through `Dialect.limited`, so the 50-row cap now holds on TOP and FETCH
-    engines too; it used to apply only where the row-limit keyword was `LIMIT`.
-
-    A key over several columns (lists) samples their value combinations and matches all of them."""
+    engines too; it used to apply only where the row-limit keyword was `LIMIT`. `from_rows` draws the
+    values from that many of `ft`'s rows instead of all of them: a DISTINCT over a table above the
+    overlap guard reads every row before its LIMIT applies. `spread` samples them across the table where
+    the engine can; off, they are its first rows."""
     fq_from = dialect.qualified(ft.schema_name, ft.name)
     fq_to = dialect.qualified(tt.schema_name, tt.name)
-    if isinstance(fc, str) and isinstance(tc, str):
-        col_f = dialect.quote_ident(fc)
-        col_t = dialect.quote_ident(tc)
-        sample = dialect.limited(f"SELECT DISTINCT {col_f} AS v FROM {fq_from} WHERE {col_f} IS NOT NULL", 50)
-        return (
-            f"SELECT COUNT(*) AS matched FROM ({sample}) src "
-            f"WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE t.{col_t} = src.v)"
-        )
-    fcs = [fc] if isinstance(fc, str) else fc
-    tcs = [tc] if isinstance(tc, str) else tc
-    cols_f = [dialect.quote_ident(c) for c in fcs]
-    picked = ", ".join(f"{c} AS v{i}" for i, c in enumerate(cols_f))
-    present = " AND ".join(f"{c} IS NOT NULL" for c in cols_f)
-    match = " AND ".join(f"t.{dialect.quote_ident(c)} = src.v{i}" for i, c in enumerate(tcs))
-    sample = dialect.limited(f"SELECT DISTINCT {picked} FROM {fq_from} WHERE {present}", 50)
-    return f"SELECT COUNT(*) AS matched FROM ({sample}) src WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE {match})"
+    col_f = dialect.quote_ident(fc)
+    col_t = dialect.quote_ident(tc)
+    if from_rows:
+        rows, _ = dialect.sampled_rows(f"SELECT {col_f} FROM {fq_from}", from_rows,
+                                       _rows_of_table(ft) if spread else None)
+        fq_from = f"({rows}) rows_read"
+    sample = dialect.limited(f"SELECT DISTINCT {col_f} AS v FROM {fq_from} WHERE {col_f} IS NOT NULL", 50)
+    return (
+        f"SELECT COUNT(*) AS matched FROM ({sample}) src "
+        f"WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE t.{col_t} = src.v)"
+    )
 
 
 def dropped_rows_sql(dialect: D.Dialect, left: Table, lc: str, right: Table, rc: str) -> str:
@@ -2180,10 +3046,16 @@ def dropped_rows_sql(dialect: D.Dialect, left: Table, lc: str, right: Table, rc:
     )
 
 
-def _overlap_count(dialect: D.Dialect, runner: Runner, ft: Table, fc: str | list[str], tt: Table,
-                   tc: str | list[str]) -> int:
-    """How many of the sampled from-column values exist in the target key (0 when the probe fails)."""
-    res = _try(runner, overlap_sql(dialect, ft, fc, tt, tc))
+def _overlap_count(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: Table, tc: str) -> int:
+    """How many of the sampled from-column values exist in the target key (0 when the probe fails).
+    Over the overlap guard the values come from a bounded read of the table, the way a join check
+    reads one (`profile.JOIN_SAMPLE_ROWS`); under it, from the whole table, as always."""
+    bound = PF.JOIN_SAMPLE_ROWS if _too_big_to_probe(ft) else None
+    res = _try(runner, overlap_sql(dialect, ft, fc, tt, tc, from_rows=bound))
+    if res is None and bound:
+        # A sampling clause some engines refuse on a view (Postgres's TABLESAMPLE): the first rows
+        # instead, as a join check falls back, rather than lose a join the whole scan used to find.
+        res = _try(runner, overlap_sql(dialect, ft, fc, tt, tc, from_rows=bound, spread=False))
     if not res:
         return 0
     try:
@@ -2192,33 +3064,9 @@ def _overlap_count(dialect: D.Dialect, runner: Runner, ft: Table, fc: str | list
         return 0
 
 
-def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str | list[str], tt: Table, tc: str | list[str]) -> bool:
+def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: Table, tc: str) -> bool:
     """Sample from-column values and check they exist in the target key."""
     return _overlap_count(dialect, runner, ft, fc, tt, tc) > 0
-
-
-def overlap_rate_sql(dialect: D.Dialect, ft: Table, fc: str, tt: Table, tc: str,
-                     sample: int = _CANDIDATE_SAMPLE) -> str:
-    """How many of a bounded sample of `ft.fc`'s distinct values are found in `tt.tc`, beside the
-    sample's size: `overlap_sql` with the denominator a match rate needs. Read-only and bounded."""
-    fq_from = dialect.qualified(ft.schema_name, ft.name)
-    fq_to = dialect.qualified(tt.schema_name, tt.name)
-    col_f, col_t = dialect.quote_ident(fc), dialect.quote_ident(tc)
-    picked = dialect.limited(f"SELECT DISTINCT {col_f} AS v FROM {fq_from} WHERE {col_f} IS NOT NULL", sample)
-    return (f"SELECT (SELECT COUNT(*) FROM ({picked}) s) AS sampled, COUNT(*) AS matched FROM ({picked}) src "
-            f"WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE t.{col_t} = src.v)")
-
-
-def _overlap_rate(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: Table,
-                  tc: str) -> Optional[tuple[int, int]]:
-    """(matched, sampled), or None when the probe fails or returns nothing readable."""
-    res = _try(runner, overlap_rate_sql(dialect, ft, fc, tt, tc))
-    if not res:
-        return None
-    try:
-        return int(float(res[0].get("matched") or 0)), int(float(res[0].get("sampled") or 0))
-    except (ValueError, TypeError):
-        return None
 
 
 def _single_keys(t: Table) -> list[str]:
@@ -2246,12 +3094,32 @@ def _name_hint(col: str, target: Table) -> bool:
 _UNSERVED = ("rejected", "stale")   # review states the loader never serves
 
 
-def _candidate_pairs(rels: list[Relationship], tables: list[Table],
-                     dialect: Optional[str]) -> Iterator[tuple[int, Table, Column, Table, str]]:
+def _own_key(t: Table, column: str) -> bool:
+    """The column is the table's whole key on its own (its one-column grain)."""
+    return len(t.grain) == 1 and t.grain[0].lower() == column.lower()
+
+
+def _named_for(column: str, target: Table) -> bool:
+    """The column's name, less a key suffix, names the target table: `customer_id` -> `customers`,
+    `acct_no` -> `accounts` (an abbreviation: its letters in order, from the first)."""
+    low = column.lower()
+    stem = next((low[: -len(s)] for s in _KEY_SUFFIXES if low.endswith(s) and len(low) > len(s)), None)
+    tn = target.name.lower()
+    if not stem:
+        return False
+    if stem in tn or tn.rstrip("s") == stem.rstrip("s"):
+        return True
+    rest = iter(tn)
+    return stem[0] == tn[0] and all(ch in rest for ch in stem)
+
+
+def _candidate_pairs(rels: list[Relationship], tables: list[Table], dialect: Optional[str],
+                     read: Optional[set[str]] = None) -> Iterator[tuple[int, Table, Column, Table, str]]:
     """Every (priority, table, column, target, key) the wider scan tests: a column no join reads from,
-    against another table's one-column key, when the name matches the key's or the type does.
-    Yielded lazily in priority order (name matches first, then by name), so stopping at the probe
-    cap also stops the enumeration."""
+    against another table's one-column key, when the name matches the key's or the type does. With
+    `read` (an append), only pairs touching a table this run read: the rest were tested when theirs was.
+    Yielded lazily in priority order (name matches first, then by name), so the scan draws only as
+    many as it tests; listing the rest when the cap stops it costs no statement."""
     covered = {(table_key(r.from_table, r.from_schema), fc.lower())
                for r in rels for fc, _tc in _column_pairs(r, dialect) or []}
     served = sorted((t for t in tables if t.review_state not in _UNSERVED),
@@ -2262,6 +3130,13 @@ def _candidate_pairs(rels: list[Relationship], tables: list[Table],
                    if kc is not None and kc.review_state not in _UNSERVED and kc.type in _KEY_TYPES
                    and not _personal_column(kc)),
                   key=lambda x: (x[0].schema_name or "", x[0].name, x[1]))
+    # A name that is the key of several tables is each one's own key (a per-table record id), so on a
+    # table whose key is unknown (too large for the uniqueness probe) that column is its key too, not
+    # a reference: one batch spent its whole cap pairing such ids with each other (ACE-180).
+    per_name: dict[str, int] = {}
+    for u in served:
+        if len(u.grain) == 1:
+            per_name[u.grain[0].lower()] = per_name.get(u.grain[0].lower(), 0) + 1
     columns = []
     for t in served:
         tk = table_key(t.name, t.schema_name)
@@ -2275,11 +3150,17 @@ def _candidate_pairs(rels: list[Relationship], tables: list[Table],
             # value list) or a member of a composite key (`line_no`), which a name must back instead.
             measure = (c.aggregation in ("additive", "averageable") or c.date_format
                        or _looks_time_named(c.name) or _NOT_A_REFERENCE_RE.search(c.name))
-            columns.append((t, c, measure, bool(c.choice_field or c.primary_key)))
+            shared = len(t.grain) != 1 and per_name.get(c.name.lower(), 0) > 1
+            columns.append((t, c, measure, bool(c.choice_field or c.primary_key), _own_key(t, c.name), shared))
     for level in (0, 1, 2):
-        for t, c, measure, needs_name in columns:
+        for t, c, measure, needs_name, own, shared in columns:
             for u, k, kc in keys:
-                if u is t:
+                # A table's own key never points at another table's own key: two record ids match
+                # only by chance, and between same-named ids that is every pair of tables. A shared
+                # name on a table of unknown key is a reference only when it names the target table.
+                if u is t or (_own_key(u, k) and (own or (shared and not _named_for(c.name, u)))):
+                    continue
+                if read is not None and _qualified(t) not in read and _qualified(u) not in read:
                     continue
                 if _name_related(c.name, u, k):
                     prio = 0
@@ -2295,16 +3176,10 @@ def _qualified_column(t: Table, column: str) -> str:
     return f"{t.schema_name}.{t.name}.{column}" if t.schema_name else f"{t.name}.{column}"
 
 
-def _candidate(t: Table, c: Column, u: Table, k: str, hit: Optional[tuple[int, int]],
-               found_by: str) -> dict:
-    """One candidate as the report and join_candidates.json carry it: a ready `add` op and its evidence."""
-    if hit is None:
-        summary = "the probe could not compare the two columns"
-    else:
-        matched, sampled = hit
-        rate = matched / sampled if sampled else 0.0
-        summary = (f"{rate:.1%} of sampled {t.name}.{c.name} values found in {u.name}.{k} "
-                   f"({matched} of {sampled} distinct values)")
+def _candidate(t: Table, c: Column, u: Table, k: str, check: PF.JoinCheck, found_by: str) -> dict:
+    """One candidate as the report and join_candidates.json carry it: a ready `add` op and its evidence.
+    The op's description says only how it was found: the counts change with every load, so they stay
+    in the evidence and out of the model."""
     op = {"op": "add", "kind": "relationship", "from_table": t.name, "from_column": c.name,
           "to_table": u.name, "to_column": k,
           "relationship": build.infer_cardinality(t, u, [c.name], [k])}
@@ -2312,63 +3187,295 @@ def _candidate(t: Table, c: Column, u: Table, k: str, hit: Optional[tuple[int, i
         op["from_schema"] = t.schema_name
     if u.schema_name:
         op["to_schema"] = u.schema_name
-    op["description"] = f"found by introspection: {summary}"
-    evidence = {"found_by": found_by, "summary": summary}
-    if hit is not None:
-        evidence.update(matched=hit[0], sampled=hit[1],
-                        match_rate=round(hit[0] / hit[1], 4) if hit[1] else 0.0)
+    op["description"] = f"found by introspection: its values match {u.name}.{k}"
+    evidence = {"found_by": found_by, **check.evidence()}
+    if check.rate is not None:   # rows, like the rate: on a whole read `values` counts the distinct keys
+        evidence.update(matched=check.rows_matched, sampled=check.rows_keyed)
     return {"id": f"{_qualified_column(t, c.name)}->{_qualified_column(u, k)}", "op": op,
             "evidence": evidence}
 
 
 def _scan_join_candidates(dialect: D.Dialect, runner: Runner, rels: list[Relationship],
                           tables: list[Table], report: IntrospectReport,
-                          sqlglot_dialect: Optional[str] = None) -> None:
+                          sqlglot_dialect: Optional[str] = None, read: Optional[set[str]] = None,
+                          offered_columns: Optional[set[tuple]] = None,
+                          pp: Optional[Path] = None) -> None:
     """Test columns no join covers against other tables' keys and report what the data bears out (#512).
 
     Nothing is written to the model: a candidate is listed in the report and join_candidates.json for
-    a person to accept with one `sm curate` call. Every probe is a bounded, read-only sample, at most
-    JOIN_CANDIDATE_PROBE_CAP per run, and a FROM table too large to scan is skipped."""
+    a person to accept with one `sm curate` call. Every check is a bounded, read-only aggregate (the
+    whole column on a table under the size guard, a sample above it), at most
+    JOIN_CANDIDATE_PROBE_CAP per run, run several to a statement in priority order. On an append, only
+    pairs touching a table this run read (`read`) are tested, and a column an earlier run already
+    offered a join for (`offered_columns`) is not tested again."""
     # Its own count beside the uniqueness probes' `_ProbeBudget`, so neither cap eats into the other.
     left = JOIN_CANDIDATE_PROBE_CAP
-    found: set[tuple] = set()   # columns already offered: one join per column is enough to review
+    found: set[tuple] = set(offered_columns or ())   # columns offered: one join per column is enough
     offered: set[tuple] = set()   # (from, to) column pairs, so a pair isn't offered again reversed
-    too_big: set[str] = set()
-    for prio, t, c, u, k in _candidate_pairs(rels, tables, sqlglot_dialect):
-        col, key = (t.schema_name, t.name, c.name), (u.schema_name, u.name, k)
-        if col in found or (key, col) in offered:
-            continue
-        if _too_big_to_probe(t):
-            too_big.add(_qualified(t))
-            continue
-        if left <= 0:
-            report.join_candidate_cap_hit = True
-            report.notes.append(f"join candidates: stopped after {JOIN_CANDIDATE_PROBE_CAP} probes; "
-                                "columns past the cap were not tested")
+    too_big: dict[str, set[str]] = {}   # why a pair wasn't tested -> the columns
+    pairs = _candidate_pairs(rels, tables, sqlglot_dialect, read)
+    step = PF.CHECKS_PER_STATEMENT * PF.WORKERS
+    while True:
+        # One round of checks at a time, so a column offered in this round isn't checked again later.
+        round_: list[tuple] = []
+        for prio, t, c, u, k in pairs:
+            col, key = (t.schema_name, t.name, c.name), (u.schema_name, u.name, k)
+            if col in found or (key, col) in offered:
+                continue
+            why = PF.checkable(dialect, t, u, [c.name])
+            if why:
+                too_big.setdefault(why, set()).add(f"{_qualified(t)}.{c.name}")
+                continue
+            if left <= 0:
+                report.join_candidate_cap_hit = True
+                report.notes.append(f"join candidates: stopped after {JOIN_CANDIDATE_PROBE_CAP} probes; "
+                                    "columns past the cap were not tested")
+                # The rest of the pairs cost no statement to list: name every table they start from.
+                unchecked = {_qualified(t)} | {_qualified(t2) for _, t2, c2, u2, _ in pairs
+                                               if (t2.schema_name, t2.name, c2.name) not in found
+                                               and not PF.checkable(dialect, t2, u2, [c2.name])}
+                report.join_candidate_unchecked = sorted(unchecked)
+                break
+            left -= 1
+            round_.append((prio, t, c, u, col, key, PF.JoinCheck(t, [c.name], u, [k])))
+            if len(round_) >= step:
+                break
+        if not round_:
             break
-        left -= 1
-        report.join_candidate_probes += 1
-        hit = _overlap_rate(dialect, runner, t, c.name, u, k)
-        cand = _candidate(t, c, u, k, hit, "name" if prio == 0 else "type")
-        if hit is not None and hit[1] and hit[0] / hit[1] >= _CANDIDATE_MIN_MATCH:
-            found.add(col)
-            offered.add((col, key))
-            report.join_candidates.append(cand)
-        elif prio == 0 or (hit is not None and hit[0]):
-            # A type-only pair with no value in common is noise, not a near miss.
-            report.join_candidates_low.append(cand)
-    if too_big:
-        report.notes.append(f"join candidates: skipped {len(too_big)} table(s) over "
-                            f"{_OVERLAP_PROBE_MAX_ROWS:,} rows: {', '.join(sorted(too_big)[:8])}")
+        PF.run_checks(dialect, runner, [r[-1] for r in round_], watch=_watch(pp))
+        report.join_candidate_probes += len(round_)
+        for prio, t, c, u, col, key, check in round_:
+            if col in found:
+                continue
+            cand = _candidate(t, c, u, check.tc[0], check, "name" if prio == 0 else "type")
+            if check.borne_out:
+                found.add(col)
+                offered.add((col, key))
+                report.join_candidates.append(cand)
+            elif prio == 0 or check.values_matched or check.rows_matched:
+                # A type-only pair with no value in common is noise, not a near miss.
+                report.join_candidates_low.append(cand)
+        if report.join_candidate_cap_hit:
+            break
+    for why, cols in too_big.items():
+        report.notes.append(f"join candidates: {len(cols)} column(s) not tested ({why}): "
+                            + ", ".join(sorted(cols)[:8]))
+
+
+def _check_key(fs: Optional[str], ft: str, fc: list[str], ts: Optional[str], tt: str, tc: list[str]) -> tuple:
+    return ((fs or "").lower(), ft.lower(), tuple(c.lower() for c in fc),
+            (ts or "").lower(), tt.lower(), tuple(c.lower() for c in tc))
+
+
+def _check_joins(dialect: D.Dialect, runner: Runner, rels: list[Relationship], tables: list[Table],
+                 report: IntrospectReport, sg: Optional[str], checked: dict,
+                 pp: Optional[Path] = None, first: Optional[list] = None) -> list[tuple[Relationship, PF.JoinCheck]]:
+    """Check every join of the model on the data, at most `PF.JOIN_CHECK_CAP` per run; each join
+    with its check, for `report.join_checks`. `first` (declared keys waiting to be confirmed) take
+    the budget before the rest.
+
+    Nothing about a join changes here: the figures are for the person reviewing the build and for
+    the profile, and stay out of the model because they change with every load."""
+    todo: list[tuple[Relationship, PF.JoinCheck]] = []
+    skipped: dict[str, int] = {}
+    capped = 0
+    ahead = {id(r) for r in first or []}
+    for r in sorted(rels, key=lambda r: id(r) not in ahead):
+        if r.review_state in _UNSERVED:
+            continue
+        # The key columns alone: a join that also filters (`AND h.current_flag = 'Y'`) would be
+        # checked against rows it never joins, so it is reported unchecked instead.
+        pairs = _key_pairs(r, sg)
+        if not pairs:
+            if _column_pairs(r, sg):
+                skipped["its join has a condition beyond its key columns"] = (
+                    skipped.get("its join has a condition beyond its key columns", 0) + 1)
+            continue
+        fc, tc = [f for f, _ in pairs], [t for _, t in pairs]
+        key = _check_key(r.from_schema, r.from_table, fc, r.to_schema, r.to_table, tc)
+        if key in checked:
+            todo.append((r, checked[key]))
+            continue
+        ft = _endpoint(tables, r.from_table, r.from_schema)
+        tt = _endpoint(tables, r.to_table, r.to_schema)
+        why = "a table it joins isn't in the model" if ft is None or tt is None else PF.checkable(dialect, ft, tt, fc)
+        if why:
+            skipped[why] = skipped.get(why, 0) + 1
+            continue
+        if len(checked) >= PF.JOIN_CHECK_CAP:
+            capped += 1
+            continue
+        checked[key] = PF.JoinCheck(ft, fc, tt, tc, target_is_one=r.relationship in ("many_to_one", "one_to_one"))
+        todo.append((r, checked[key]))
+    fresh = [c for _, c in todo if not c.read]
+    if fresh:
+        _progress(pp, f"joins: checking {len(fresh)} on the data")
+        PF.run_checks(dialect, runner, fresh, done=_counted(pp, "joins checked", len(fresh)),
+                      watch=_watch(pp))
+    for why, n in skipped.items():
+        report.notes.append(f"{n} join(s) not checked on the data: {why}")
+    if capped:
+        report.notes.append(f"{capped} join(s) not checked on the data: capped at {PF.JOIN_CHECK_CAP} "
+                            "checks per run; declared keys among them stay unreviewed for sign-off")
+    return todo
+
+
+def _left_for_the_data(r: Relationship) -> bool:
+    """A stored join the engine left unreviewed for the data to confirm, untouched by a person since:
+    nobody signed it, rejected it or wrote a description of their own."""
+    return (r.review_state == "unreviewed" and r.signed_off_by is None and r.confidence == "inferred"
+            and (not (r.description or "").strip() or _DATA_UNIQUE_NOTE in r.description))
+
+
+def served_join_keys(org: Datasource, sg: Optional[str] = None) -> set[tuple]:
+    """`_check_key` of every join the model serves, with both ends' tables and key columns served by
+    some copy of the table: the joins a saved check may still be shown for."""
+    tables: dict[tuple, set[str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            if t.review_state not in _UNSERVED:
+                tables.setdefault(((t.schema_name or "").lower(), t.name.lower()), set()).update(
+                    c.name.lower() for c in t.columns if c.review_state not in _UNSERVED)
+    rels = [r for sa in org.subject_areas for r in sa.relationships] + list(org.cross_subject_area_relationships)
+    out = set()
+    for r in rels:
+        pairs = _key_pairs(r, sg)
+        if r.review_state in _UNSERVED or not pairs:
+            continue
+        fc, tc = [f for f, _ in pairs], [t for _, t in pairs]
+        key = _check_key(r.from_schema, r.from_table, fc, r.to_schema, r.to_table, tc)
+        ends = (tables.get((key[0], key[1])), tables.get((key[3], key[4])))
+        if ends[0] is not None and ends[1] is not None and set(key[2]) <= ends[0] and set(key[5]) <= ends[1]:
+            out.add(key)
+    return out
+
+
+def _confirm_declared(declared: list[Relationship], checked: dict, sg: Optional[str]) -> None:
+    """Approve the declared keys an unenforcing engine left for the data to confirm, where it did:
+    at least `PF.JOIN_MIN_MATCH` of the rows read find their partner. The rest stay for review."""
+    for r in declared:
+        pairs = _key_pairs(r, sg) or []
+        c = checked.get(_check_key(r.from_schema, r.from_table, [f for f, _ in pairs], r.to_schema,
+                                   r.to_table, [t for _, t in pairs])) if pairs else None
+        if c is not None and c.borne_out:
+            r.confidence = "confirmed"
+            r.review_state, r.signed_off_by, r.signed_off_role, r.signed_off_at = (
+                "approved", "agami_introspect", "system", _NOW)
+            r.description = "declared FK, confirmed on the data"
 
 
 def _accept_command(out: str) -> str:
     return f"sm curate {out} --ops-file {Path(out) / '.introspect' / JOIN_CANDIDATES_FILE} --candidate <id>"
 
 
+def _read_introspect_file(out: Path, name: str) -> dict:
+    """A JSON file under `<model>/.introspect/`, or {} when it is missing or unreadable."""
+    import json
+
+    try:
+        doc = json.loads((out / ".introspect" / name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _join_check_key(r: Relationship, sg: Optional[str]) -> Optional[tuple]:
+    pairs = _key_pairs(r, sg)
+    if not pairs:
+        return None
+    return _check_key(r.from_schema, r.from_table, [f for f, _ in pairs], r.to_schema, r.to_table,
+                      [t for _, t in pairs])
+
+
+def _stored_join_checks(out: Path) -> dict[tuple, dict]:
+    """The join checks the last run stored in profile.json that ran, by `_check_key`."""
+    out_: dict[tuple, dict] = {}
+    for e in _read_introspect_file(out, PROFILE_FILE).get("joins") or []:
+        try:
+            if e.get("read", "not_run") != "not_run":
+                out_[_check_key(e.get("from_schema"), e["from_table"], e["from_columns"],
+                                e.get("to_schema"), e["to_table"], e["to_columns"])] = e
+        except (KeyError, TypeError, AttributeError):
+            continue
+    return out_
+
+
+def _touches(r: Relationship, tables: list[Table], read: Optional[set[str]]) -> bool:
+    """The join has an end on a table this run read (every join does when `read` is None). An end
+    that names no single modelled table counts as read, so the join's own check decides about it."""
+    if read is None:
+        return True
+    ends = (_endpoint(tables, r.from_table, r.from_schema), _endpoint(tables, r.to_table, r.to_schema))
+    return any(t is None or _qualified(t) in read for t in ends)
+
+
+def _stored_candidates(out: Path) -> dict:
+    return _read_introspect_file(out, JOIN_CANDIDATES_FILE)
+
+
+def _listed(doc: dict, name: str) -> list:
+    v = doc.get(name)
+    return v if isinstance(v, list) else []
+
+
+def _op_tables(op: dict) -> set[str]:
+    """The two tables a candidate's op joins, spelled as `_qualified` spells them."""
+    return {f"{op.get(f'{e}_schema')}.{op.get(f'{e}_table')}" if op.get(f"{e}_schema") else str(op.get(f"{e}_table"))
+            for e in ("from", "to")}
+
+
+def _offered_columns(doc: dict, read: Optional[set[str]]) -> set[tuple]:
+    """(schema, table, column) of each column a stored candidate offers a join from, except where
+    the candidate touches a table this run read: its data may have changed, so it is tested again."""
+    ops = [c.get("op") for c in _listed(doc, "candidates") if isinstance(c, dict)]
+    return {(op.get("from_schema"), op.get("from_table"), op.get("from_column")) for op in ops
+            if isinstance(op, dict) and not (read and _op_tables(op) & read)}
+
+
+def _merge_candidates(prior: dict, report: IntrospectReport, read: set[str], rels: list[Relationship],
+                      tables: list[Table], sg: Optional[str]) -> None:
+    """Fold the candidates earlier runs stored into this run's, so an append never loses one (ACE-180).
+
+    One entry per id (its two columns); an offered candidate beats a near miss, and between two of a
+    kind this run's evidence, read from the data as it is now, wins. A stored candidate is dropped
+    when the model no longer serves an end of it, a join now reads from its column (it was accepted),
+    or an end is a table this run read: that pair was tested again, and this run's result decides.
+    The tables a capped scan left untested stay listed until a run reads them again."""
+    covered = {(table_key(r.from_table, r.from_schema), fc.lower())
+               for r in rels for fc, _tc in _column_pairs(r, sg) or []}
+
+    def live(c: dict) -> bool:
+        op = c.get("op") if isinstance(c, dict) else None
+        if not isinstance(op, dict) or "id" not in c or _op_tables(op) & read:
+            return False
+        for side in ("from", "to"):
+            t = _endpoint(tables, op.get(f"{side}_table", ""), op.get(f"{side}_schema"))
+            col = next((x for x in t.columns if x.name == op.get(f"{side}_column")), None) if t else None
+            if (t is None or col is None or t.review_state in _UNSERVED or col.review_state in _UNSERVED
+                    or _personal_column(col)):
+                return False
+        tk = table_key(op["from_table"], op.get("from_schema"))
+        return not {(tk, op["from_column"].lower()), (("", tk[1]), op["from_column"].lower())} & covered
+
+    # One per id: an offered candidate outranks a near miss, then this run's evidence a stored one.
+    # A stored pair on a table this run read is dropped above, so the two seldom meet; a damaged file can.
+    best: dict[str, tuple[int, int, dict]] = {}   # id -> (offered?, this run?, candidate)
+    for now, offered, cands in ((0, 1, _listed(prior, "candidates")), (0, 0, _listed(prior, "low_overlap")),
+                                (1, 1, report.join_candidates), (1, 0, report.join_candidates_low)):
+        for c in cands or []:
+            if now or live(c):
+                rank = (offered, now)
+                if c["id"] not in best or rank > best[c["id"]][:2]:
+                    best[c["id"]] = (*rank, c)
+    report.join_candidates = [c for o, _, c in best.values() if o]
+    report.join_candidates_low = [c for o, _, c in best.values() if not o]
+    kept = {t for t in _listed(prior, "unchecked_tables") if isinstance(t, str) and t not in read}
+    report.join_candidate_unchecked = sorted(kept | set(report.join_candidate_unchecked))
+
+
 def write_join_candidates(out: Path, report: IntrospectReport) -> Optional[Path]:
-    """Write the run's join candidates to `<model>/.introspect/join_candidates.json`, replacing the last
-    run's so the file never lists a join this run didn't test. Best-effort, like the progress log."""
+    """Write the join candidates to `<model>/.introspect/join_candidates.json`: this run's, and on an
+    append those earlier runs stored (`_merge_candidates`). Best-effort, like the progress log."""
     import json
 
     path = out / ".introspect" / JOIN_CANDIDATES_FILE
@@ -2377,12 +3484,43 @@ def write_join_candidates(out: Path, report: IntrospectReport) -> Optional[Path]
         "probes": report.join_candidate_probes,
         "probe_cap": JOIN_CANDIDATE_PROBE_CAP,
         "cap_hit": report.join_candidate_cap_hit,
+        "unchecked_tables": report.join_candidate_unchecked,
         "candidates": report.join_candidates,
         "low_overlap": report.join_candidates_low,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        return None
+    return path
+
+
+def write_profile(out: Path, report: IntrospectReport, model: list[Table], *, append: bool = False) -> Optional[Path]:
+    """Write `<model>/.introspect/profile.json`: the column profile and the join checks (#448).
+
+    The joins are this run's, every join of the model. On a batched build or a refresh (`append`) the
+    tables are merged into the last run's file, so it ends with every table read; otherwise the file
+    holds this run's tables only. Either way it is cut to what `model` serves now (`profile.scrub`):
+    the file sits beside a model that may be committed, so a table taken out of the model, or a
+    column now marked personal, leaves nothing behind. Best-effort, like the join candidates file.
+    Shape: docs/format-spec.md, section 8."""
+    import json
+
+    path = out / ".introspect" / PROFILE_FILE
+    tables: dict = {}
+    if append:
+        try:
+            tables = json.loads(path.read_text(encoding="utf-8")).get("tables", {})
+        except (OSError, ValueError, AttributeError):
+            tables = {}
+    tables.update(report.profile_tables)
+    tables = PF.scrub(tables, model, lambda t, c: _never_read(c))
+    doc = {"version": 1, "profiled_at": _NOW, "tables": dict(sorted(tables.items())),
+           "joins": report.join_checks}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc, indent=1, default=str) + "\n", encoding="utf-8")
     except OSError:
         return None
     return path
@@ -2502,15 +3640,15 @@ def _sample_covers_values(sample: list, est_rows: Optional[int]) -> bool:
 
 def _enrich_from_sample(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
-    *, est_rows: Optional[int] = None, reads: Optional[_ReadBudget] = None,
+    *, est_rows: Optional[int] = None, reads: "Optional[_ReadBudget | _TableReads]" = None,
     skip: frozenset[str] | set[str] = frozenset(), nocase: frozenset[str] | set[str] = frozenset(),
     report: Optional[IntrospectReport] = None, sample: Optional[list] = None,
 ) -> list:
     """ONE live sample → (a) date_format/timezone on date-candidate columns, and
     (b) on a small table, a `choice_field` skeleton `{value: ""}` on low-cardinality CODED columns
     the catalog declared nothing for (the LLM enrichment fills the labels), read with one bounded
-    DISTINCT per column — without it, a catalog DB's coded columns (e.g. a ServiceNow integer
-    `severity`) never get an enum skeleton, so the decode can only ever live in prose. `skip` names
+    DISTINCT per column, several columns to a statement (`_value_reads`) — without it, a catalog
+    DB's coded columns (e.g. a ServiceNow integer `severity`) never get an enum skeleton, so the decode can only ever live in prose. `skip` names
     (lowercased) the columns whose declared list was rejected: they get no list at all."""
     date_cands = [c for c in cols if c.type in ("date", "timestamp", "time")
                   or (c.type in ("integer", "decimal", "string") and _looks_time_named(c.name))]
@@ -2542,13 +3680,12 @@ def _enrich_from_sample(
     choice_cands = [c for c in choice_cands if not c.date_format and not _personal_column(c)]
     if not _sample_covers_values(sample, est_rows):
         choice_cands = []  # a big table: DISTINCT would scan it, and a partial list would mislead
-    for c in choice_cands:
-        if reads is not None:
-            if reads.left <= 0:
-                reads.skipped += 1
-                continue
-            reads.left -= 1
-        rows = _try(runner, dialect.distinct_sql(schema, table, c.name, ENUM_MAX_DISTINCT + 1))
+    if reads is not None:
+        # One claim for the table, in column order: when the cap runs out, the first columns keep theirs.
+        choice_cands = choice_cands[:reads.claim(len(choice_cands))]
+    values = _value_reads(dialect, runner, schema, table, [c.name for c in choice_cands], ENUM_MAX_DISTINCT + 1,
+                          report)
+    for c, rows in zip(choice_cands, values):
         if rows is None or len(rows) > ENUM_MAX_DISTINCT:
             continue  # more values than a list holds: none, rather than an incomplete one
         seen = sum(1 for row in sample if row.get(c.name) not in (None, ""))
@@ -2588,8 +3725,10 @@ def _placeholder_size_ok(sample: list, est_rows: Optional[int]) -> bool:
 
 
 def _never_read(c: Column) -> bool:
-    """A personal column: its values would be written into the model and the report."""
-    return _personal_column(c) or bool(c.choice_field and _personal_list(c))
+    """A personal column, or one that names a person (`opened_by`, `owner`) whatever the build
+    flagged: its values would be written into the model and the report."""
+    return (_personal_column(c) or pii.person_ref_name(c.name)
+            or bool(c.choice_field and _personal_list(c)))
 
 
 def _placeholder_kinds(c: Column, sample: list, join_cols: set[str]) -> set[str]:
@@ -2669,6 +3808,7 @@ def _scan_placeholders(
                 by_name.setdefault(c.name, []).append(c)
         personal = {n.lower() for n in (fresh_personal or {}).get(key, set())}
         personal |= {n.lower() for n, cs in by_name.items() if any(_never_read(c) for c in cs)}
+        todo: list[tuple[str, list[Column], set[str], Column]] = []
         for name, cs in by_name.items():
             if name.lower() in personal:
                 continue
@@ -2680,7 +3820,9 @@ def _scan_placeholders(
                 skipped += 1
                 continue
             reads.left -= 1
-            rows = _try(runner, dialect.placeholder_scan_sql(key[0], key[1], c.name, c.type, _PLACEHOLDER_TOP))
+            todo.append((name, cs, kinds, c))
+        results = _placeholder_reads(dialect, runner, key[0], key[1], [c for *_, c in todo], report)
+        for (name, cs, kinds, c), rows in zip(todo, results):
             if rows is None:
                 continue  # not read: what the column holds is unknown, so nothing is dropped either
             top = [(str(r.get("v")), int(float(r.get("n") or 0))) for r in rows if r.get("v") is not None]
@@ -2741,6 +3883,34 @@ def _merged_placeholders(old: list[Placeholder], findings: list[P.Finding]) -> l
     return out
 
 
+def _leave_personal_unflagged(tables: list[Table], prev: Optional[Datasource], report: IntrospectReport) -> None:
+    """The organisation's warehouse controls who sees personal data (#675): clear the flags and
+    suspicions this build found, and say so in one line. A flag the stored model already carried is
+    kept: a person may have set it."""
+    kept = {((t.schema_name or "").lower(), t.name.lower(), c.name.lower())
+            for sa in (prev.subject_areas if prev is not None else []) for t in sa.tables_defined
+            for c in t.columns if c.sensitive}
+    cleared: set[tuple] = set()
+    for t in tables:
+        for c in t.columns:
+            key = ((t.schema_name or "").lower(), t.name.lower(), c.name.lower())
+            suspect = [cv for cv in c.caveats if cv in _VALUE_SUSPECT_CAVEATS]
+            if (c.sensitive and key not in kept) or suspect:
+                cleared.add(key)
+                c.caveats = [cv for cv in c.caveats if cv not in _VALUE_SUSPECT_CAVEATS]
+                if key not in kept:
+                    c.sensitive = False
+    found = set(report.suspected_columns)
+    report.suspected_columns = []
+    report.notes = [n for n in report.notes if ": flagged sensitive — " not in n]
+    report.sample_findings = [f for f in report.sample_findings
+                              if f[0] not in found and ": flagged sensitive — " not in f[0]]
+    report.sensitive_columns = sum(c.sensitive for t in tables for c in t.columns)
+    report.notes.append(
+        f"personal data: {len(cleared)} column(s) left unflagged — organization.yaml says the warehouse "
+        "enforces who sees personal data (personal_data: enforced_by_warehouse)")
+
+
 def _pii_from_sample(
     schema: Optional[str], table: str, cols: list[Column], sample: list[dict],
     report: Optional[IntrospectReport],
@@ -2759,6 +3929,9 @@ def _pii_from_sample(
             flag_note = f"{table}.{c.name}: flagged sensitive — JSON keys hold personal data ({', '.join(paths)})"
         elif c.type == "string" and not c.sensitive and pii.looks_like_emails(values):
             flag_note = f"{table}.{c.name}: flagged sensitive — its sampled values are email addresses"
+        elif (c.type == "string" and not c.sensitive and pii.person_ref_name(c.name)
+              and pii.looks_like_people(values)):
+            flag_note = f"{table}.{c.name}: flagged sensitive — its sampled values are people's names or login ids"
         if flag_note:
             if not c.sensitive:
                 c.sensitive = True
@@ -2800,6 +3973,8 @@ def _data_choice_candidate(c: Column) -> bool:
 def _set_choice(
     c: Column, choice: dict[str, str], *, case_insensitive: bool = False, accents: bool = False,
 ) -> None:
+    if pii.value_list_blocked(c.name, choice, sensitive=c.sensitive, caveats=c.caveats):
+        return  # its keys would be personal values written into the model
     c.choice_field = choice
     notes = [_lookalike_caveat(list(choice))]
     if case_insensitive:

@@ -42,6 +42,9 @@ _ALLOWED = {
     # The one-time GitHub-star ask opens github.com only after the person picks "Yes, open GitHub now"
     # on a card. It is a link the person asked to follow, not an agami page or a paste-back.
     ("agami-query", "github.com/AgamiAI/agami-core"),
+    # The build-progress page (#677) asks nothing and waits for nothing: it only shows a long build's
+    # progress, and the chat keeps a line per stage, so the build never depends on it opening.
+    ("agami-connect", 'open_in_browser" "<progress_url>"'),
 }
 
 

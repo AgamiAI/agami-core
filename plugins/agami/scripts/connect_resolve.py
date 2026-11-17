@@ -24,7 +24,7 @@ Output (the standard refactor contract):
                       "plugin_version": "0.9.18"|null, "agami_core": "0.9.18"|null,
                       "candidates_scored": [{..., "has_pip", "agami_core", "skipped", "reason"?}]},
       "tools": {"psql": "/path"|null, "sqlite3": ...},
-      "next": "ready" | "promote" | "bootstrap"
+      "next": "ready" | "build" | "promote" | "bootstrap"
     },
     "anomalies": [...],   # incl. library_older_than_plugin, agami_python_cannot_be_brought_current,
                           # env_profile_has_no_model (AGAMI_PROFILE names a database with no model)
@@ -32,8 +32,10 @@ Output (the standard refactor contract):
   }
 
 `next`:
-  - "ready"     — the active profile has a valid `[section]`; continue to introspect /
-                  existing-model check.
+  - "ready"     — the active profile has a valid `[section]` AND a model
+                  (`<profile>/datasource.yaml`); the returning-person start card.
+  - "build"     — a valid `[section]` but no model yet (the build never ran or never finished) →
+                  straight into the build (Phase 1); there is nothing to ask yet.
   - "promote"   — a filled-in `credentials.example` exists but no section yet → run the
                   promote step (0a.10).
   - "bootstrap" — neither → first-time credential bootstrap (Phase 0a).
@@ -345,7 +347,8 @@ def main(argv=None) -> int:
 
     # next-phase decision (mirrors preflight step 2)
     if creds["present"]:
-        nxt = "ready"
+        has_model = (agami_paths.profile_dir(profile, art) / "datasource.yaml").is_file()
+        nxt = "ready" if has_model else "build"
     elif example_present:
         nxt = "promote"
     else:
@@ -360,7 +363,7 @@ def main(argv=None) -> int:
 
     # On a first-time bootstrap the profile is genuinely unresolved (the "main" fallback is a placeholder
     # for the section lookup above, never a real choice) — emit null so the skill narrates "first-time
-    # setup" without inventing a name. A real [main] section (ready/promote) is never hidden.
+    # setup" without inventing a name. A real [main] section (ready/build/promote) is never hidden.
     emitted_profile = None if (profile_source == "default" and nxt == "bootstrap") else profile
 
     data = {

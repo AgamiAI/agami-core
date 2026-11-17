@@ -221,6 +221,50 @@ def _thing_table(table_name: str) -> bool:
     return any(_in_words(w, THING_TABLE_WORDS) for w in words)
 
 
+# The last word of a column that names a person's account: `assigned_user`, `caller_login`.
+_ACCOUNT_REF_WORDS = frozenset({"user", "login", "logon", "username", "userid", "loginid"})
+# The last word of a column that names a person by the part they played: `opened_by`, `owner`,
+# `account_manager`. Often a reference id instead, so only its values make it personal.
+_ROLE_REF_WORDS = frozenset({
+    "by", "caller", "owner", "manager", "requester", "requestor", "assignee", "approver", "reporter",
+    "submitter", "supervisor",
+})
+# `assigned_to`, `opened_for`: who a record was handed to or raised for. `valid_to` and `used_for` are not.
+_TO_VERBS = frozenset({"assigned", "reassigned", "delegated", "escalated", "routed", "forwarded"})
+_FOR_VERBS = frozenset({"opened", "requested", "created", "raised", "logged", "submitted", "filed"})
+
+
+# `last_login` is when, not who; `is_user` is a yes/no.
+_LOGIN_TIME_WORDS = frozenset({"last", "first", "latest", "recent"})
+# `end_user`, `power_user`: a kind of user, often a coded column, so only its values can make it personal.
+_USER_KIND_WORDS = frozenset({"end", "power", "super", "guest", "new", "active"})
+
+
+def _account_ref(words: list[str]) -> bool:
+    if len(words) > 1 and words[-1] in ("id", "name") and words[-2] in ("login", "logon"):
+        return True
+    if words[-1] in ("login", "logon") and len(words) > 1 and words[-2] in _LOGIN_TIME_WORDS:
+        return False
+    return words[-1] in _ACCOUNT_REF_WORDS
+
+
+def _role_ref(words: list[str]) -> bool:
+    if words[-1] in _ROLE_REF_WORDS or (words[0] == "caller" and words[-1] in ("caller", "name")):
+        return True
+    return len(words) > 1 and ((words[-1] == "to" and words[-2] in _TO_VERBS)
+                               or (words[-1] == "for" and words[-2] in _FOR_VERBS))
+
+
+def person_ref_name(name: str) -> bool:
+    """A column that names a person by reference: `assigned_user`, `caller_login`, `login_id`,
+    `opened_by`, `assigned_to`, `owner`. Its values decide (`looks_like_people`); a `user_id` key
+    or `user_count` is not one."""
+    words = tokens(name)
+    if not words or words[0] in ("is", "has", "by"):
+        return False
+    return _account_ref(words) or _role_ref(words)
+
+
 def suspected_pii(column_name: str, table_name: str | None = None) -> bool:
     """A BROADER 'might be PII' name rule than `detect_sensitive`, for the review tier: it also
     keeps every older substring hit (`mobile_sessions`, `ip_address`), so a column the strict
@@ -229,6 +273,12 @@ def suspected_pii(column_name: str, table_name: str | None = None) -> bool:
     A bare `name` on a table of things (`products.name`, `plans.name`) is left out when the table
     is given: listing it made people wade through product names to find the personal data."""
     if strong_pii_name(column_name) or STRONG_PII_RE.search(column_name) or _EXTRA_PII_RE.search(column_name):
+        return True
+    # `assigned_user`, `caller_login`; an audit `created_by` or an `owner` is often a reference id, so
+    # it waits for its values (`looks_like_people`) rather than listing every table's audit columns.
+    words = tokens(column_name)
+    if (words and words[0] not in ("is", "has", "by") and _account_ref(words)
+            and not (len(words) > 1 and words[-2] in _USER_KIND_WORDS)):
         return True
     if not WEAK_PII_RE.search(column_name):
         return False
@@ -280,6 +330,71 @@ def looks_like_emails(values: Iterable[Any]) -> bool:
     return _share(_present(values), _EMAIL_VALUE_RE.match)
 
 
+# `Jane Doe`, `Mary-Ann O'Neil`: two to four capitalised words of letters.
+_PERSON_NAME_VALUE_RE = re.compile(r"^[A-Z][A-Za-z'’-]+(?: [A-Z][A-Za-z'’.-]*){1,3}$")
+# `jdoe`, `raj.patel`, `m_oneil2`: a login id, one word that starts with a letter.
+_LOGIN_VALUE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*(?:[._-][A-Za-z0-9]+){0,3}$")
+# A long hex string is a reference id (a 32-character key), not a login.
+_HEX_ID_RE = re.compile(r"^[0-9a-fA-F]{16,}$")
+
+
+def _person_value(v: str) -> bool:
+    if _PERSON_NAME_VALUE_RE.match(v) or _EMAIL_VALUE_RE.match(v):
+        return True
+    return len(v) <= 64 and bool(_LOGIN_VALUE_RE.match(v)) and not _HEX_ID_RE.match(v)
+
+
+# Words a coded column is written in (Yes/No, Active/Inactive, a sort key, a status). A value made
+# only of these is a code, however person-shaped: `Created Date` is two capitalised words.
+_CODE_WORDS = frozenset({
+    "yes", "no", "y", "n", "true", "false", "t", "f", "on", "off", "none", "null", "unknown", "other",
+    "na", "a", "all", "any", "active", "inactive", "enabled", "disabled", "open", "opened", "closed",
+    "close", "new", "pending", "resolved", "cancelled", "canceled", "approved", "rejected", "draft",
+    "in", "progress", "hold", "waiting", "complete", "completed", "done", "assigned", "unassigned",
+    "high", "medium", "low", "critical", "moderate", "urgent", "normal", "priority", "severity",
+    "state", "status", "date", "time", "created", "updated", "modified", "due", "start", "end",
+    "name", "number", "type", "category", "asc", "desc", "ascending", "descending", "default",
+    "admin", "administrator", "system", "guest", "anonymous", "service", "self", "internal",
+    "external", "user", "group", "team", "manager", "owner", "daily", "weekly", "monthly", "yearly",
+    "email", "phone", "web", "portal", "chat", "walk", "up", "automatic", "auto", "manual",
+})
+_CODE_SPLIT_RE = re.compile(r"[\s_\-/]+")
+
+
+def _coded_value(v: str) -> bool:
+    words = [w for w in _CODE_SPLIT_RE.split(v.lower()) if w]
+    return bool(words) and all(w in _CODE_WORDS for w in words)
+
+
+def _people_values(vals: list[str]) -> bool:
+    """Most distinct values are a name or a login and not a code. Judged on the distinct values,
+    not the rows: a person is still a person on their fortieth ticket."""
+    distinct = set(vals)
+    people = sum(1 for v in distinct if _person_value(v) and not _coded_value(v))
+    return people > 0 and 2 * people >= len(distinct)
+
+
+def looks_like_people(values: Iterable[Any]) -> bool:
+    """People's names or login ids. Only asked of a column `person_ref_name` picked: by itself, a
+    one-word login looks like any short code, and two capitalised words like any label. How often a
+    value repeats says nothing: four people can open forty tickets."""
+    return _people_values(_present(values))
+
+
+def value_list_blocked(column_name: str, keys: Iterable[Any], *, sensitive: bool = False,
+                       caveats: Iterable[str] = ()) -> bool:
+    """A value list on this column would write personal data into the model. Asked by every writer
+    of a list, whatever the build flagged: `personal_data: enforced_by_warehouse` clears the flags,
+    and the model files are not the warehouse. A person-reference column keeps a list only when
+    every key is a code (`end_user`: Yes/No)."""
+    if sensitive or set(caveats) & set(VALUE_SUSPECT_CAVEATS):
+        return True
+    keys = _present(keys)
+    if any(personal_value(k) for k in keys):
+        return True
+    return person_ref_name(column_name) and not all(_coded_value(k) for k in keys)
+
+
 def _phone_like(v: str, digits_only_ok: bool) -> bool:
     if (not _PHONE_VALUE_RE.match(v) or _DATE_ONLY_RE.match(v) or _NUMBER_VALUE_RE.match(v)
             or _IPV4_VALUE_RE.match(v)):
@@ -292,15 +407,24 @@ def _phone_like(v: str, digits_only_ok: bool) -> bool:
     return True
 
 
+# Things a number identifies (`request_number`, `ticket_no`): the column's name says what its digits
+# are before their shape does, so a ten-digit request number is not a phone (#675).
+_RECORD_WORDS = frozenset({
+    "request", "ticket", "order", "incident", "case", "invoice", "task", "change", "problem", "record",
+    "reference", "ref", "serial", "transaction", "receipt", "claim", "policy", "shipment", "job", "item",
+})
+
+
 def _id_named(column_name: str) -> bool:
-    """`order_id`, `customerId`, `trackingCode`, `id_number`: an identifier, whose bare digits
-    are not a phone. Trailing number words are dropped, so `id_no` ends in `id`."""
+    """`order_id`, `customerId`, `trackingCode`, `id_number`, `request_number`: an identifier, whose
+    bare digits are not a phone. Trailing number words are dropped, so `id_no` ends in `id` and
+    `ticket_no` in `ticket`."""
     if _ID_NAME_RE.search(column_name or ""):
         return True
     words = tokens(column_name)
     while len(words) > 1 and words[-1] in _NUMBER_WORDS:
         words.pop()
-    return bool(words) and words[-1] in _ID_WORDS
+    return bool(words) and (words[-1] in _ID_WORDS or _in_words(words[-1], _RECORD_WORDS))
 
 
 def looks_like_phones(column_name: str, values: Iterable[Any]) -> bool:
@@ -443,6 +567,6 @@ def suspected_reason(name: str, caveats: Iterable[str], table_name: str | None =
 __all__ = [
     "STRONG_PII_RE", "WEAK_PII_RE", "PERSON_WORDS", "NON_PII_WORDS", "tokens", "person_name",
     "strong_pii_name", "legacy_strong", "detect_sensitive", "suspected_pii", "looks_like_emails",
-    "looks_like_phones", "looks_like_birth_dates", "value_suspect_caveat", "json_pii_paths",
+    "looks_like_phones", "looks_like_birth_dates", "person_ref_name", "looks_like_people", "value_list_blocked", "value_suspect_caveat", "json_pii_paths",
     "json_pii_caveat", "suspected_reason", "VALUE_SUSPECT_CAVEATS", "JSON_PII_CAVEAT_PREFIX",
 ]

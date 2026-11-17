@@ -1,7 +1,7 @@
 ---
 name: agami-connect
 description: "End-to-end database connection for agami: sets up credentials on first run (DB-type picker → writes <artifacts_dir>/local/credentials.example for the user to fill in), then introspects the live DB directly into the agami semantic model (subject areas, tables, columns, relationships with join cardinality, deep-table column groups, sensitive-column flags) under <artifacts_dir>/<profile>/. The structural model is built deterministically by the agami-core semantic_model package (catalog mode, or a probe-mode fallback when the catalog is locked down); the skill then layers LLM enrichment (descriptions, entities, metrics) and seeds EXPLAIN-validated NL→SQL examples. Every model write is gated by the semantic-model validator — no breaking model is ever persisted."
-when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami' / 'connect to my database' / 'introspect my database' / 'introspect the schema' / 'reload schema' / 'add a new database', wants to try agami WITHOUT a database ('I don't have a database', 'try the sample', 'use the sample data', 'demo data'), or after the user changes their schema and wants the model refreshed. Also auto-invoked by agami-query the first time it runs (when the semantic model is missing). This skill handles credential setup, introspection, enrichment, and seed-example validation — one entry point for everything before the user can query. The sample-database path (Phase 0s) needs no connection and lands a queryable model in under a minute."
+when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami' / 'connect to my database' / 'introspect my database' / 'introspect the schema' / 'reload schema' / 'add a new database', wants to try agami WITHOUT a database ('I don't have a database', 'try the sample', 'use the sample data', 'demo data'), or after the user changes their schema and wants the model refreshed. Also auto-invoked by agami-query the first time it runs (when the semantic model is missing). This skill handles credential setup, introspection, enrichment, and seed-example validation — one entry point for everything before the user can query. The sample-database path (Phase 0s) needs no connection and copies in a ready, queryable model."
 argument-hint: "[sample | reintrospect | profile NAME]"
 ---
 
@@ -24,12 +24,13 @@ For every decision card and result table: [`shared/question-cards.md`](../../sha
 - **Combine acknowledge + next question** — don't waste turns on "Got it!"
 - **Use AskUserQuestion for every Yes/No/Skip** — never inline-bullet options. Where AskUserQuestion is unavailable, ask the same as a short numbered list ([`shared/question-cards.md`](../../shared/question-cards.md) rule 7). Use `(Recommended)` only when there's a genuine recommendation. For fact-of-environment questions ("which database type?", "which schemas?"), don't mark any option Recommended — the user picks what they have.
 - **Every multiSelect needs an explicit "none / continue" option** — `AskUserQuestion` cannot be submitted with zero boxes checked, so any multiSelect where "pick nothing" is a valid answer MUST offer a selectable "Nothing — continue" (or "Keep everything") option. Never phrase the prompt as "leave all unchecked" — that's unsubmittable and traps the user.
+- **Ask the business, decide the plumbing** ([`shared/question-cards.md`](../../shared/question-cards.md#9-a-card-asks-what-the-data-means-to-the-business-never-plumbing) rule 9): a card asks only what the data means to the business, in plain words with an example. Batches, `--append`, `--no-safety`, mapping thresholds and the like are yours to decide, conservatively, and to report in one line. A card never names a file or table without saying what it is. Before signing answers that came back the same down a whole column of a page or sheet, confirm in one line ([rule 10](../../shared/question-cards.md#10-answers-filled-down-are-confirmed-before-they-are-signed)).
 - **Keep the user oriented** — print one-line progress markers between phases (`✓ Introspected 12 tables`, `✓ Validator passed`, `✓ Generated 10 examples`).
 - **Plain voice — state what happened, never how impressive it is.** Progress markers, todo labels, and narration describe the action and the result; they do NOT editorialize. Banned: "wow moment", "magic", "watch this", "the exciting part", "you'll love this", exclamation hype. The reader is a data professional — a query running correctly speaks for itself. Say *"Running the first query"*, not *"Now the wow moment"*.
 
 ## Progress tracking — the onboarding steps, shown the whole way
 
-This is a multi-phase skill that often takes 5–15 minutes, with cards in between. **The very first action on every invocation is to show the onboarding steps as a task list, and to keep it current**, so the person always knows where they are and what's left. Use the task-list tool the host gives you (`TodoWrite`, `TaskCreate`, or the app's own task list, such as the one shown under your message in the Desktop app); where there is none, a short numbered list in your first message, repeated with the current step marked whenever a step finishes.
+This is a multi-phase skill, with cards in between. **The very first action on every invocation is to show the onboarding steps as a task list, and to keep it current**, so the person always knows where they are and what's left. Use the task-list tool the host gives you (`TodoWrite`, `TaskCreate`, or the app's own task list, such as the one shown under your message in the Desktop app); where there is none, a short numbered list in your first message, repeated with the current step marked whenever a step finishes.
 
 The same steps every run, in the person's words (no "introspect", "enrich" or "NL→SQL"):
 
@@ -39,13 +40,14 @@ The same steps every run, in the person's words (no "introspect", "enrich" or "N
 3. Pick the tables
 4. Read the tables and joins
 5. Describe columns and add metrics
-6. Sign off definitions and hide personal data
-7. Write and check example questions
-8. Check your reports
-9. Summary and first question
+6. Answer what the data can't settle
+7. Sign off definitions and hide personal data
+8. Write and check example questions
+9. Check your reports
+10. Summary and first question
 ```
 
-Leave out a step that won't run (8 when no reports were shared in 1.5; 3 with a model spec workbook, which names the tables); never add your own working steps to this list. **When a step finishes, add its numbers to its label**, so the list reads as a running summary: *"Read the tables and joins — 21 tables, 19 joins"*, *"Describe columns and add metrics — 93% described, 7 metrics"*, *"Sign off definitions — 5 of 7 signed"*, *"Write and check example questions — 10 of 11 ran"*. Take every number from the command output that step already posts in its progress line, never an estimate; a step with nothing to count keeps its plain label. **Mark each step in progress when it starts and done the moment it ends**, exactly one in progress at a time, and keep it in progress while a card for that step is waiting, so the list shows where the person is while they decide. The sample path uses its own short list (Phase 0s).
+Leave out a step that won't run (6 when "Ask me as you go" wasn't picked in 1.5; 9 when no reports were shared in 1.5; 3 with a model spec workbook, which names the tables); never add your own working steps to this list. **When a step finishes, add its numbers to its label**, so the list reads as a running summary: *"Read the tables and joins — 21 tables, 19 joins"*, *"Describe columns and add metrics — 93% described, 7 metrics"*, *"Sign off definitions — 5 of 7 signed"*, *"Write and check example questions — 10 of 11 ran"*. Take every number from the command output that step already posts in its progress line, never an estimate; a step with nothing to count keeps its plain label. **Mark each step in progress when it starts and done the moment it ends**, exactly one in progress at a time, and keep it in progress while a card for that step is waiting, so the list shows where the person is while they decide. The sample path uses its own short list (Phase 0s).
 
 **Don't seed it again if the list already holds these steps** (the skill is resuming after a hand-off, a password page or a file wait). When `$ARGUMENTS == reintrospect`, the list starts at step 3.
 
@@ -80,7 +82,7 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 ### Preflight steps
 
 0. **Sample-path short-circuit (check FIRST, before resolving any profile).** If the user explicitly asked for the sample — `$ARGUMENTS` is `sample`, or they said *"try the sample"* / *"I don't have a database"* / *"use the sample (or example) data"* / *"demo data"* — then bind `$PROFILE_NAME = agami-example`, `$DB_TYPE = sample`, and **go straight to [Phase 0s](#phase-0s-sample-database-bootstrap-no-connection)**. Do this **regardless of any existing `active_profile` or onboarded profiles** — the sample is a deliberate, explicit choice and must not be intercepted by another profile's credential/existing-model checks. (A returning person also gets "Try the sample data" on the start card in step 1a; this short-circuit covers the request that already says so.) If `agami-example` is already set up, Phase 0s sends them to the demo. Only fall through to step 1 when there's **no** sample signal.
-1. **Resolve the environment** — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_resolve.py [--db-type <t>] [--profile <p>]` prints `{data, anomalies}` (self-describing JSON): profile, artifacts_dir, the `[<profile>]` credentials section + chmod, the cached config, the **scored** `interpreter.python3` (the one with model deps + driver — use it everywhere; never a Python missing a dep), native `tools`, and a `next` decision. Branch on `data.next`: **`ready`** → the start card for a returning person (step 1a); a reload or re-introspect request skips the card and goes straight to Phase 1 with `reintrospect`; **`promote`** → run 0a.10 to promote the filled template, then continue; **`bootstrap`** → the first-run start card (step 1a), then Phase 0a. On a first-time bootstrap `data.profile` is **`null`** (`profile_source: "default"`) — there's no profile yet, so narrate it **without a name**: *"No credentials yet — first-time setup."* (Never say "profile `main`" — the user names their profile in 0a.3.) Only when `data.profile` is non-null (a `bootstrap` for an explicitly-named/env profile) may you name it. Surface `anomalies` (e.g. `credentials_world_readable` → offer `chmod 600`; `library_older_than_plugin` → offer `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install`, or the `AGAMI_PYTHON` fix it names; `agami_python_cannot_be_brought_current` → the `$AGAMI_PYTHON` the user set has no pip and an old or missing agami-core, so say so; `env_profile_has_no_model` → `AGAMI_PROFILE` names a database with no model while others have one: say its `detail` in one line before the start card, and offer the databases it lists rather than a new connection under that name, unless the person asked to connect one). `interpreter.chosen_because` says why that Python was picked, and a candidate passed over carries a `reason`; never substitute a `missing_fields` value — surface "missing field X for profile Y" and stop.
+1. **Resolve the environment** — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_resolve.py [--db-type <t>] [--profile <p>]` prints `{data, anomalies}` (self-describing JSON): profile, artifacts_dir, the `[<profile>]` credentials section + chmod, the cached config, the **scored** `interpreter.python3` (the one with model deps + driver — use it everywhere; never a Python missing a dep), native `tools`, and a `next` decision. Branch on `data.next`: **`ready`** → the start card for a returning person (step 1a); a reload or re-introspect request skips the card and goes straight to Phase 1 with `reintrospect`; **`build`** → the database's credentials are saved but it has no model yet (the build never ran or never finished): there is nothing to ask yet, so show no start card and never offer "Ask a question"; say in one line *"`<database>` is connected but not built yet, so I'll build it now."* and go straight to Phase 1 (a fresh build, not `reintrospect`), unless the request already names another action (the sample, or connecting a different database); **`promote`** → run 0a.10 to promote the filled template, then continue; **`bootstrap`** → the first-run start card (step 1a), then Phase 0a. On a first-time bootstrap `data.profile` is **`null`** (`profile_source: "default"`) — there's no profile yet, so narrate it **without a name**: *"No credentials yet — first-time setup."* (Never say "profile `main`" — the user names their profile in 0a.3.) Only when `data.profile` is non-null (a `bootstrap` for an explicitly-named/env profile) may you name it. Surface `anomalies` (e.g. `credentials_world_readable` → offer `chmod 600`; `library_older_than_plugin` → offer `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install`, or the `AGAMI_PYTHON` fix it names; `agami_python_cannot_be_brought_current` → the `$AGAMI_PYTHON` the user set has no pip and an old or missing agami-core, so say so; `env_profile_has_no_model` → `AGAMI_PROFILE` names a database with no model while others have one: say its `detail` in one line before the start card, and offer the databases it lists rather than a new connection under that name, unless the person asked to connect one). `interpreter.chosen_because` says why that Python was picked, and a candidate passed over carries a `reason`; never substitute a `missing_fields` value — surface "missing field X for profile Y" and stop.
 1a. **The start card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)). One AskUserQuestion, one question, header `Start`. Skip it when the request already names the action: `$ARGUMENTS` is `reintrospect` or `profile NAME`, the person asked to reload or re-introspect, to add a new database (go to Phase 0a), or `agami-query` invoked this skill because a model is missing (go to Phase 0a).
    - **First run** (`data.next` is `bootstrap`, nothing connected yet). Question: *"How do you want to start?"* No option is marked Recommended: whether there is a database to connect is a fact about the person's setup.
 
@@ -89,7 +91,9 @@ If you reach for a command that doesn't fit, stop and re-read this section.
      | `Connect a database` | Your own database; the password never goes through the chat | Phase 0a |
      | `Try the sample data` | A small demo store, no connection needed | Phase 0s |
 
-   - **Returning** (`data.next` is `ready`: a database is already connected). Question: *"What would you like to do?"*
+   - **Connected but not built** (`data.next` is `build`). No start card: go straight into the build (step 1). A database with no model has nothing to ask, so `Ask a question` is never offered for it.
+
+   - **Returning** (`data.next` is `ready`: a database is already connected and built). Question: *"What would you like to do?"*
 
      | label | description | then |
      |---|---|---|
@@ -100,7 +104,7 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 
      **An empty database gets no recommendation to ask it.** When every table in the active database's `sm model-tree` has `rows` of 0, the first option is `Ask a question` without "(Recommended)", its description says *"<database> has no rows, so answers will be empty"*, and `Connect another database` is marked **(Recommended)** instead.
 
-     Route "Other" text by what it asks for. An action goes to that action: re-introspect, reload or refresh the schema → `Reload the schema`; add a schema that lives in the same database → `Reload the schema` with the schema selection in 1.3 widened to the old and new schemas (see the note under 1.1: same database, another schema is a re-introspect, never a new database); review or sign off the model, edit descriptions, exclude tables → [agami-model](../agami-model/SKILL.md); add or connect a different database → `Connect another database`. Only a question goes to agami-query. When the text could be either (a schema name alone, say), ask which with a card rather than guess.
+     Route "Other" text by what it asks for. An action goes to that action: re-introspect, reload or refresh the schema → `Reload the schema`; add a schema that lives in the same database → `Reload the schema` with the schema selection in 1.3 widened to the old and new schemas (see the note under 1.1: same database, another schema is a re-introspect, never a new database); review or sign off the model, edit descriptions, exclude tables → [agami-model](../agami-model/SKILL.md); add or connect a different database → `Connect another database`; answer the open questions, or what the data can't settle → [2g](#2g--ask-what-the-data-cant-settle) on the active database. Only a question goes to agami-query. When the text could be either (a schema name alone, say), ask which with a card rather than guess.
 
      This card replaces the 1.1 menu for a returning person; don't ask 1.1 again after it.
 
@@ -116,8 +120,38 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 
 **Two paths, chosen by the operating system** (`uname -s`: `Darwin` is macOS; `MINGW*` / `MSYS*` / `CYGWIN*`, or `$OS` = `Windows_NT`, is Windows):
 
-- **macOS and Windows: the password page.** 0a.1 → 0a.2 → **0a.4c** (connection fields card) → 0a.3 (the name, offering the database's own name) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.4k** (the password page) → Phase 1. No file to edit and nothing to paste. The page needs the interpreter, agami-core (with `keyring`) and the artifacts folder in place, which is why 0a.5–0a.8 run before it.
-- **Linux and anything else, and Databricks on every system** (its secret is a `token`, and the page stores a `password`): the file. 0a.1 → 0a.2 → 0a.3 → **0a.4** (`credentials.example`) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.9** (a card waits for the filled-in file) → 0a.10 → Phase 1.
+- **macOS and Windows: the password page.** **0a.0** → 0a.1 → 0a.2 → **0a.4c** (connection fields card) → 0a.3 (the name, offering the database's own name) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.4k** (the password page) → Phase 1. No file to edit and nothing to paste. The page needs the interpreter, agami-core (with `keyring`) and the artifacts folder in place, which is why 0a.5–0a.8 run before it.
+- **Linux and anything else, and Databricks on every system** (its secret is a `token`, and the page stores a `password`): the file. **0a.0** → 0a.1 → 0a.2 → 0a.3 → **0a.4** (`credentials.example`) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.9** (a card waits for the filled-in file) → 0a.10 → Phase 1.
+
+### 0a.0 — Before you start: what to have ready, then the organisation and the source system
+
+**First, before the database-type card**, say in one short message what helps to have to hand, so nobody is asked mid-build for something they could have fetched up front. None of it is required:
+
+> *Before we connect, it helps to have these to hand (none is required):*
+> 1. *What your organisation does, in a sentence or two.*
+> 2. *What system the data comes from (a product such as ServiceNow or Salesforce, or your own application), and anything about the database: when your fiscal year starts, what currency amounts are in, whether the warehouse already controls who sees personal data.*
+> 3. *Definitions of the tables and columns: a data dictionary, a spec workbook, a dbt or LookML project.*
+> 4. *Definitions of your metrics and business terms.*
+> 5. *The questions people ask. They become checked examples, and how many of them agami answers correctly is how you can tell the model is right.*
+
+Then ask 1 and 2 as their own first questions, on one card (two questions; leave the Company one out when it was already authored, as 1.4 A says):
+
+- **The Company question** is 1.4 A's `Company` card, asked here instead of after the connection. 1.4 A says what to write, and it is written once the folder exists (below).
+- **The Source question**, header `Source`: *"What system does this data come from? Add anything about the database too, e.g. "ServiceNow; fiscal year starts in July; amounts in USD". Type it in Other."* Options: **Our own application** (built in-house, no product dictionary) and **Not sure** (agami reads the database and works it out). No option is marked Recommended: it is a fact about their setup.
+
+**Both answers are hints, never copied verbatim into the model.** They steer the descriptions written in Phase 2 (a domain prior, like the narrative) and switch on product-specific help; no description, glossary entry or rule is the person's sentence pasted in.
+
+**Hold the answers; write nothing yet.** At this point there is no artifacts folder (0a.6 picks it) and no interpreter (0a.5 finds it), so `sm` can't run. Bind them now and write each where the list below says: the company and the personal-data setting **right after 0a.8**, when the folder and the interpreter exist; the fiscal year **after 1.7**, when `datasource.yaml` exists. Bind the Source answer:
+
+- **A named product** → `$SOURCE_SYSTEM`. When agami has a metadata preset for it (ServiceNow: `servicenow`), 2a.0 passes `--preset servicenow` to `sm enrich-metadata`, which reads the product's dictionary and choice tables straight from the database without modelling them. So **never add the preset's source tables (`sys_dictionary`, `sys_choice`, or a warehouse copy under another name) to 1.6's kept set**: 2a.0's `enrich-metadata --preset <name>` reads them directly, and kept they are modelled as ordinary tables. And 1.5's published-product-schema path is already on. Say it in one line: *"ServiceNow: I'll read its own data dictionary for the column meanings."*
+- **A fiscal year start, stated plainly** → `$FISCAL_START_MONTH` (1 to 12). After 1.7 write it with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-fiscal-year "$ROOT" --month <n>`, the same write 1.4 D makes, and skip 1.4 D's card. Anything vaguer ("our year is odd") is not a month: 1.4 D asks it.
+- **A currency, stated plainly** → `$CURRENCY_HINT`, a hint only: nothing is written now. 2d offers it as the currency for the money columns `sm suggest-units` finds (`sm set-units --currency <ISO code>`), and the person still agrees to that plan there.
+- **The warehouse already controls who sees personal data** (column- or row-level security, "our warehouse handles PII") → after 0a.8, before the build: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-personal-data "<artifacts_dir>" enforced_by_warehouse`. It is a build-only setting, kept in `<artifacts_dir>/local/.config` and never deployed. The build then flags nothing personal and Phase 4 skips the personal-data question. Say it in one line. `set-personal-data "<artifacts_dir>" flagged_by_agami` undoes it (a reload flags again).
+- **Our own application** / **Not sure** → nothing is written; the build works from the database.
+
+Items 3 to 5 are handed over on 1.5's context card (its `Definitions or a semantic layer` and `Questions people ask` options); the questions people ask go to `<artifacts_dir>/local/tmp/agami-asked-questions.txt` and become checked examples in Phase 5, as they do today. Don't ask for them here.
+
+**When Phase 0a is skipped** (the credentials already exist), ask this step at the start of 1.4 instead, on a first onboard of that database. Not on `reintrospect`.
 
 ### 0a.1 — Set up `<artifacts_dir>/local/`
 ```bash
@@ -403,6 +437,8 @@ Detect the OS once so the options are platform-native — `uname -s` (`Darwin` =
 ### 0a.8 — Seed `<artifacts_dir>/USER_MEMORY.md` if missing
 Create the parent (`mkdir -p && chmod 755`) and write the default seed (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md)), `chmod 644`. Don't overwrite. Migrate a v1.1 `<artifacts_dir>/local/USER_MEMORY.md` if present.
 
+**Then write what 0a.0 held** (the folder and the interpreter exist now): the company (1.4 A's two writes) and, when it was given, the personal-data setting (`sm set-personal-data`). The fiscal year waits for 1.7.
+
 ### 0a.9 — Hand-off, then a card that waits for the file
 
 Show the summary, then the card. Don't ask the person to type a phrase.
@@ -418,9 +454,6 @@ introspect → enrich → seed flow.
 
 Tip: agami only runs read-only queries, so a read-only database user is all it needs
 (and safest). Want the exact GRANT SQL for your database? Just ask.
-
-Heads-up: a cold cloud warehouse (Snowflake especially) makes introspect the slow
-step — ~5–15 min for a sizable account. Postgres / MySQL are seconds.
 ```
 Then **AskUserQuestion**, one question, header `Credentials`: *"Tell me when the file is filled in and saved."*
 
@@ -480,7 +513,7 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
    ```bash
    "$PY" "${CLAUDE_PLUGIN_ROOT}/samples/store/build_sample.py" --out "<artifacts_dir>/local/samples/store.db"
    ```
-   Uses the `sqlite3` CLI if present, else the stdlib builder. ~seconds; prints the size.
+   Uses the `sqlite3` CLI if present, else the stdlib builder; prints the size.
 4. **Write the `[agami-example]` credential by reusing the deterministic promoter** — don't hand-roll the INI. Write a `credentials.example` whose `[agami-example]` section has the **resolved absolute** path from step 3, then promote it:
    ```ini
    [agami-example]
@@ -498,10 +531,10 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
    | option | branch |
    |---|---|
    | `Just let me query it (Recommended)` | **6A — copy** |
-   | `Build the model from scratch so I can see it work` | **6B — rebuild live (~5–10 min)** |
+   | `Build the model from scratch so I can see it work` | **6B — rebuild live** |
 
-   - **6A (copy, < 1 min):** `mkdir -p "<artifacts_dir>/agami-example"` then `cp -R "${CLAUDE_PLUGIN_ROOT}/samples/store/model/." "<artifacts_dir>/agami-example/"`. **Validate it loads here**: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" validate "<artifacts_dir>/agami-example"`. If it fails, surface the errors and stop — never leave a half-wired profile. Then **mint the deployment `org_id`** (a *copy* carries no id — introspect mints inline, a copy bypasses it): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" ensure-org-id "<artifacts_dir>/agami-example"` — idempotent, writes a locally-minted uuid into `datasource.yaml` so the sample deployment has a portable identity like any other. Then **stamp a model_version** (a *copy* doesn't go through introspect/curate, so nothing auto-stamps it): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" snapshot "<artifacts_dir>/agami-example"` — best-effort, so the answer receipt shows a version rather than `null`. (We stamp at copy time instead of committing a static `.snapshots/` so it always matches the model's actual content; 6B gets one automatically from introspect.)
-   - **6B (rebuild live — "watch it build"):** ignore the committed `model/` and run the **normal Phases 1→2** against the `agami-example` profile (`--db-type sqlite`) — the same introspect → enrich → seed pipeline a real onboarding uses, just pointed at the sample SQLite file. It takes a few minutes (the non-default option). **Don't mention tokens, cost, or billing** — surface time (~5–10 min), not scary money words.
+   - **6A (copy):** `mkdir -p "<artifacts_dir>/agami-example"` then `cp -R "${CLAUDE_PLUGIN_ROOT}/samples/store/model/." "<artifacts_dir>/agami-example/"`. **Validate it loads here**: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" validate "<artifacts_dir>/agami-example"`. If it fails, surface the errors and stop — never leave a half-wired profile. Then **mint the deployment `org_id`** (a *copy* carries no id — introspect mints inline, a copy bypasses it): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" ensure-org-id "<artifacts_dir>/agami-example"` — idempotent, writes a locally-minted uuid into `datasource.yaml` so the sample deployment has a portable identity like any other. Then **stamp a model_version** (a *copy* doesn't go through introspect/curate, so nothing auto-stamps it): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" snapshot "<artifacts_dir>/agami-example"` — best-effort, so the answer receipt shows a version rather than `null`. (We stamp at copy time instead of committing a static `.snapshots/` so it always matches the model's actual content; 6B gets one automatically from introspect.)
+   - **6B (rebuild live — "watch it build"):** ignore the committed `model/` and run the **normal Phases 1→2** against the `agami-example` profile (`--db-type sqlite`) — the same introspect → enrich → seed pipeline a real onboarding uses, just pointed at the sample SQLite file. It is the non-default option. **Don't mention tokens, cost, billing or a duration**: report progress from the engine's counts as it goes.
      - **Sample carve-outs — the dataset is small + curated, so DON'T prompt (build silently over ALL tables):** skip the [Phase 1.6](#16--discover--prune-the-table-list-cheap-first-pass) **table** card, skip the **org-description** prompt (Phase 2f / 0a), and skip the **doc/metrics intake** (Phase 1's "do you have a data dictionary / dbt repo?"). These prompts exist for a real unknown DB; for the sample they're noise. Introspect + enrich every sample table without asking.
      - **Clear the pre-seed gate before seeding (the silent build has no human to sign off).** Enrichment lands the sample's metrics/entities `unreviewed`, so `seed-examples` would refuse with `preseed_review_pending`. Because the sample is curated and trusted, **auto-approve the queue as a system signer** right before seeding — the silent path clears its own gate:
        ```bash
@@ -530,20 +563,43 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
 
 ## Phase 1: Introspect → semantic model
 
-### 1.0 — Set expectations before kicking off
+### 1.0 — Say what will happen, then report real progress
 
-Introspection can take a while against cloud DBs. Tell the user **before** the first probe. Honest estimates — **don't lowball** (a user told "5 min" who waits 4 thinks "almost there"; one told "1 min" thinks "stuck").
+Tell the user **before** the first probe what the build does, never how long it will take: no time
+estimate in any form, because how long it takes depends on the network, the warehouse and the data,
+and a guess is wrong by ten times as often as it is right. Say the steps instead: *"I'll read each
+table's columns and keys, check every join against the data, and profile what the columns hold."*
+When a step is slow for a known reason, say the reason (*"each statement goes over the network to
+the warehouse"*), not a duration.
 
-| db_type | Typical | Why |
-|---|---|---|
-| sqlite / duckdb | < 5s | local file |
-| postgres / mysql (local) | 5–15s | fast catalog |
-| postgres / mysql (cloud) | 15–60s | network RTT per query + FK overlap checks |
-| **redshift / databricks / trino** | **~30s for ≤20 tables; 10–30+ min for 50+** | unenforced FKs → the relationship phase confirms joins by value-overlap, one scan per candidate over the network, and big fact tables dominate. **Scale your estimate with table count and warn explicitly.** |
-| **snowflake** | **5–15 min** | cold-warehouse spin-up dominates; per-table queries, sample scans, EXPLAIN validation. A 100-table account measured ~12 min. |
-| sqlserver / oracle | 30s–5 min | network + per-table catalog |
+Then **report progress from the engine's real counts** as it goes (background + tail, per 1.7):
+`columns+grain 30/52`, `joins: checking 78 on the data`, `joins checked 140/300`, `profiled 20/42 tables`.
+Each log line starts with its UTC time (`2026-11-17T10:04:00Z columns+grain 30/52`); quote the message
+after it. Quote the counts the progress log printed; never estimate, round up or extrapolate one. For
+`reintrospect`, say it reads every table again.
 
-**Set a HONEST estimate — understating it is what makes a working run read as "stuck."** For a large schema (50+ tables) on Redshift/Databricks/Trino, say so up front: e.g. *"This is ~50 tables on Redshift — the relationship phase confirms joins by value-overlap, so expect **10–30 minutes**. I'll stream progress and report when it lands."* Then **stream the heartbeat** (background + tail, per 1.7) so the user sees `columns+grain 30/52` and `relationships: declared FK 80/187` rather than silence. For `reintrospect`, prepend "Re-introspecting (about as long as initial setup)."
+**Open the progress page when the build will take more than a few minutes** — 15 or more tables on a
+database reached over the network, or any batched build (1.7 option 1). Builds read up to 4 tables at
+once, but only one at a time when the profile's sign-in may prompt (any Snowflake `authenticator`
+other than a password, key pair or token). Start it in the background
+(`run_in_background`) before the first introspect call, wait for its one line (the Monitor tool, never
+a foreground sleep); its `url` is `<progress_url>`:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" progress_page.py "<artifacts_dir>/<profile>/.introspect/progress.log" --minutes 240
+# → {"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 14400}
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/open_in_browser" "<progress_url>"
+```
+
+*"[Build progress](<progress_url>) shows each stage, its count and how long it has run."* The page reads the
+log every few seconds: batch n of N, tables read of total, the stages still to come by name, the
+current stage's count, the time elapsed, and *"Waiting on the database for 12 min: checking joins of
+orders"* when the log has gone quiet. It never estimates the time left. **Keep posting one line in
+the chat per stage change** as well (the page may not open in a remote or web session): `Reading
+columns and keys`, `Finding relationships`, `Checking joins on the data`, `Profiling columns`,
+`Testing join candidates`, done. When the log says `waiting on the database for <N> min: <what>`,
+pass that on in one line: it means a statement is slow, not that the build has stopped. Stop the
+page (TaskStop) when Phase 1 is done.
 
 ### 1.1 — Existing-model check
 
@@ -609,9 +665,9 @@ Example to say BEFORE introspecting: *"Found 70 tables across 18 schemas. I'll m
 
 ### 1.4 — Datasource context (MANDATORY — ALWAYS ASK)
 
-Three cards, asked right after the connection works and before tables are listed: the company (once per deployment), what the person can share (1.5), and this database's one line. They are required state-gathering: "don't ask clarifying questions" does NOT cancel them, and the skill never decides skip for the person. Conventions: [`shared/question-cards.md`](../../shared/question-cards.md). The sample path skips all three (its model is ready-made).
+Four cards, asked right after the connection works and before tables are listed: the company (once per deployment; already asked in 0a.0 on the usual path), what the person can share (1.5), this database's one line, and when its fiscal year starts (skipped when 0a.0 already gave it). They are required state-gathering: "don't ask clarifying questions" does NOT cancel them, and the skill never decides skip for the person. Conventions: [`shared/question-cards.md`](../../shared/question-cards.md). The sample path skips all four (its model is ready-made).
 
-**A. Company card — ONCE, on the first onboard into this deployment.** Decide "already authored" by content, not by file existence: done only if the root `<artifacts_dir>/organization.md` exists **or** `<artifacts_dir>/organization.yaml` has a non-empty `name`/`description`. Otherwise AskUserQuestion, one question, header `Company`:
+**A. Company card — ONCE, on the first onboard into this deployment.** Normally already asked in 0a.0, at the very start; don't ask it twice in one run. Decide "already authored" by content, not by file existence: done only if the root `<artifacts_dir>/organization.md` exists **or** `<artifacts_dir>/organization.yaml` has a non-empty `name`/`description`. Otherwise AskUserQuestion, one question, header `Company`:
 
 > *"What's your company called, and what does it do? Type a sentence or two in Other, name first. It's shared by every database you connect here."*
 
@@ -636,6 +692,12 @@ Options: **Generate one for me (Recommended)** / **Skip**.
 
 If `datasource.yaml` already has a non-empty `description` (a re-onboard), show it and ask `Keep it (Recommended)` / `Replace it` instead. **Keep it** → `$DATASOURCE_DESCRIPTION = keep`; nothing is written. **Replace it** → ask the card above and bind from that answer. Without a narrative from this card, Phase 2f writes a short per-database starter from the enriched model.
 
+**D. Fiscal-year card — every onboard, unless `datasource.yaml` already has `fiscal_year_start_confirmed: true` or 0a.0's Source answer gave the month (`$FISCAL_START_MONTH`, written after 1.7 the same way).** The build never writes a fiscal start, January included: a January written by default was once never questioned for an organisation whose year starts in another month. AskUserQuestion, one question, header `Fiscal year`:
+
+> *"Which month does your fiscal year start in? Type another month in Other."*
+
+Options: **January** (the calendar year) / **April** / **July**; no option is Recommended, and "Other" takes any month. Bind the month (1 to 12) and write it right after 1.7: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-fiscal-year "$ROOT" --month <n>`. January is written like any other month: that is what records it as asked. Never write one the person didn't give; a skipped card leaves it unset, and 2g asks it again.
+
 `chmod 644` whatever you write — these are **non-secret model files** and must stay readable (e.g. by the deploy container / a teammate reading a checked-in copy); never `chmod 600` them (that's for `local/` secrets only). See [`shared/organization-context-format.md`](../../shared/organization-context-format.md) for the content-routing rule (company-wide → root; per-database → the profile; per-column units → the structured model; personal → `USER_MEMORY.md`).
 
 ### 1.5 — Existing data model / semantic layer (MANDATORY — ALWAYS ASK)
@@ -646,10 +708,14 @@ The context card (1.4 B). Same "required state-gathering" rule. AskUserQuestion,
 
 | label | description | then |
 |---|---|---|
+| `Ask me as you go (Recommended)` | I'll answer what the data can't settle. Picked alone: build from the database and ask only that | Nothing now. After the descriptions, [2g](#2g--ask-what-the-data-cant-settle) asks on cards only what the data itself can't answer. |
 | `Definitions or a semantic layer` | A data dictionary, metrics list, ERD, spec workbook, or a dbt / LookML / Cube repo | A follow-up card: *"Type the file or folder path in Other, or attach the file to your next message."*, options **Skip this one** / **I'll attach it** (wait for the attachment). Then read it as the sections below say: a doc, a column dictionary, a model spec workbook, or a semantic-layer repo by what the path holds. |
-| `Questions people ask` | Real questions from your team; they become checked examples | A follow-up card: *"Type them in Other, one per line, or a file path."*, options **Skip this one** / **I'll attach a file**. Save them with the Write tool to `<artifacts_dir>/local/tmp/agami-asked-questions.txt`, one per line; Phase 5 writes SQL for each and checks them with the rest. |
+| `Questions people ask` | Real questions from your team; they become checked examples, and the measure of how right the model is | A follow-up card: *"Type them in Other, one per line, or a file path."*, options **Skip this one** / **I'll attach a file**. Save them with the Write tool to `<artifacts_dir>/local/tmp/agami-asked-questions.txt`, one per line; Phase 5 writes SQL for each and checks them with the rest. |
 | `Report SQL or dashboards` | SQL you trust, an export, or a screenshot; checked against the model after the build | A follow-up card: *"Type a path to a .sql or .csv file in Other, or attach a screenshot to your next message."*, options **Skip this one** / **I'll attach it**. Copy files or pasted SQL into `<artifacts_dir>/local/reconcile/inbox/` (SQL as `<ts>.sql`, a CSV as is; note a screenshot's path). Phase 6b hands them to `/agami-reconcile`. |
-| `Nothing to share` | Build from the database alone | Go to 1.6. Picked with another option: say it back and ask the card again. |
+
+`Ask me as you go` comes first because most people have no document to hand over, and a model built from the database alone guesses wherever the data has two readings: knowledge is asked for where the data shows a gap, not handed over up front. It goes with any of the others, and picked alone it is also the card's "nothing to hand over" answer, so the card can always be submitted. A person who wants neither documents nor questions types it in "Other" ("nothing", "don't ask me"): build from the database alone and leave 2g out.
+
+**This card is where the things 0a.0 listed are handed over.** Don't ask the source system again: when 0a.0's Source card named a product, the published-product-schema path below is already on.
 
 **"Other" on the context card** takes a named product ("it's ServiceNow", "this is our Salesforce") → the published-product-schema path below; or any of the above typed straight in (a path, questions, SQL), routed by what it is. A question about the options ("what's a semantic layer?") is answered first and the card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)).
 
@@ -680,27 +746,27 @@ Stash everything gathered (doc text + repo definitions) as `$DATA_MODEL_DOC_TEXT
 
 ### 1.6 — Discover & prune the table list (cheap first pass)
 
-**Before the full, expensive introspection, summarise the tables in the chat and ask which to keep** — so staging/backup/scratch tables and dated snapshots can be dropped. The full grain/FK/description work then runs on **only the kept tables**, which on a big DB (hundreds of staging/snapshot tables) is the difference between minutes and hours.
+**Before the full, expensive introspection, summarise the tables in the chat and ask which to keep** — so staging/backup/scratch tables and dated snapshots can be dropped. The full grain/FK/description work then runs on **only the kept tables**, which on a big DB (hundreds of staging/snapshot tables) cuts the work to the tables that matter.
 
-**Run the discover pass** — it lists tables + columns only (no grain, FK, or row-count probes, so it's fast even over a tunnel):
+**Run the discover pass** — it lists tables + columns only (no grain, FK or count probes, so it's fast even over a tunnel); `--row-estimates` adds each table's size from one read of the catalog's statistics where the database keeps them, for the table picker, and never counts rows:
 
 ```bash
 ts=$(date -u +%Y%m%d-%H%M%S)
 AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" discover \
   --profile <profile> --db-type <db_type> \
-  --artifacts "<artifacts_dir>" \
+  --artifacts "<artifacts_dir>" --row-estimates \
   [--schemas <selected_schemas…>]   # the 1.3 pick, if you narrowed schemas
 ```
 
-> **<a id="raised-cap"></a>Why the `AGAMI_SQL_MAX_ROWS` prefix — and why it must stay a prefix.** The executor **refuses** (never truncates) any result over the row cap, default 1000. That bound is sized for a *user query*, where a runaway is the thing it exists to stop. A **catalog read** blows past it on schema size alone — `information_schema.columns` for a 500-table catalog is tens of thousands of rows — and the engine **swallows that refusal silently**, degrading to one round-trip per table, or reporting "catalog enumeration denied" when the catalog was in fact readable. So the three commands that read catalog or dictionary tables — `discover` (1.6), `introspect` (1.7), `enrich-metadata` (2a.0) — run with a raised cap.
+> **<a id="raised-cap"></a>Why the `AGAMI_SQL_MAX_ROWS` prefix — and why it must stay a prefix.** The executor **refuses** (never truncates) any result over the row cap, default 1000. That bound is sized for a *user query*, where a runaway is the thing it exists to stop. A **catalog read** blows past it on schema size alone — `information_schema.columns` for a 500-table catalog is tens of thousands of rows — and the engine **swallows that refusal silently**, degrading to one round-trip per table, or reporting "catalog enumeration denied" when the catalog was in fact readable. So the two commands that read the catalog — `discover` (1.6) and `introspect` (1.7) — run with a raised cap. `enrich-metadata` (2a.0) takes **no** prefix: it counts each dictionary table it reads and sizes that read's cap itself (up to 5,000,000 rows), so there is no number to pick for it.
 >
 > - **Inline on the command, never `export`.** An exported value is still set when Phase 6 runs the demo *user* query, quietly raising the bound for exactly the caller it exists to hold. The inline form dies with the process.
 > - **Never on `seed-examples` (Phase 5).** That command validates SQL which later runs as a real user query; validating under a raised cap green-lights examples that get refused in production.
 > - **Tell the user you did it**, once, with the real numbers the commands print — and say their query-time cap is unchanged. See 2a.0 for the wording.
 
-It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json` and prints JSON with `table_count` and `inventory_path`. No page is written: everything about picking tables happens in the chat.
+It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json` and prints JSON with `table_count` and `inventory_path`. Discover writes no page: the table picker page is rendered only when the person picks **Pick from a list** ([1.6p](#16p--pick-from-a-list-the-table-picker-page)), and it saves its own answer; nothing waits on a pasted block.
 
-**Summarise it in the chat, then ask one card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)). No page opens and nothing waits on a pasted block.
+**Summarise it in the chat, then ask one card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)).
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>"
@@ -709,15 +775,17 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inven
 It prints `{tables, schemas, schemas_more, likely_noise, noise_all_copies, groups}`. Show:
 
 1. One sentence: *"<N> tables in <K> schemas; <M> look like staging or backups: `stg_*`, `*_bak`, `*_2023`."* (name the real patterns from `groups.noise_by_pattern`; leave the second clause out when `likely_noise` is empty).
-2. A markdown table, one row per entry of `schemas` (`Schema | Tables`), at most 15 rows, then the line *"and `schemas_more.schemas` more schemas (`schemas_more.tables` tables)"* when `schemas_more` is not null. Never list tables one by one.
+2. A markdown table, one row per entry of `schemas` (`Schema | Tables`), at most 15 rows, then the line *"and `schemas_more.schemas` more schemas (`schemas_more.tables` tables)"* when `schemas_more` is not null. Don't list tables one by one here: **Pick from a list** shows every one. With 10 tables or fewer, name them all in the sentence instead, so the card can be answered without the page.
 3. The first 5 names in `likely_noise` with their `why` and, when it has one, the table it copies (`copy_of`), then "and N more", so the person sees what "Drop staging and backups" would remove (a real table that only looks like a copy shows up here before they press it). If they ask for the whole list, show up to 15 rows and "and N more".
 
-Then call AskUserQuestion, one question (header `Tables`):
+Then call AskUserQuestion, one question (header `Tables`), *"Which tables should I model? Or type table names or patterns in Other, like orders, customers or all crm_*."*:
 
+- **Pick from a list**: every table on a page, grouped by schema with its rows and columns, to tick; the page saves the pick itself ([1.6p](#16p--pick-from-a-list-the-table-picker-page)). With more than 10 tables, mark it **(Recommended)** and put it first: it is the one way to choose tables one by one, and it starts with the likely copies already unticked when `noise_all_copies` is true, so it covers what **Drop staging and backups** would do.
 - **Keep everything**: model all `<N>` tables.
-- **Drop staging and backups**: skip the `<M>` likely-noise tables. Offer it only when `likely_noise` is not empty and does not cover every table. Mark it **(Recommended)** and put it first only when `noise_all_copies` is true (every flagged table has a same-named counterpart, so dropping them loses no data); otherwise list it after **Keep everything** without "(Recommended)", since a flagged table with no counterpart may be real data. With no noise, or when it covers every table, leave this option out; in the second case say that everything looks like staging or backups and ask what to keep.
+- **Drop staging and backups**: skip the `<M>` likely-noise tables. Offer it only when `likely_noise` is not empty and does not cover every table. With 10 tables or fewer, mark it **(Recommended)** and put it first only when `noise_all_copies` is true (every flagged table has a same-named counterpart, so dropping them loses no data); otherwise list it after **Keep everything** without "(Recommended)", since a flagged table with no counterpart may be real data. With no noise, or when it covers every table, leave this option out; in the second case say that everything looks like staging or backups and ask what to keep.
 - **Only some schemas**: pick which schemas to model. Leave it out when there is a single schema.
-- **Let me name them**: "Other" takes the table names. Names typed straight into "Other" count as this answer. If the option is picked with no names, ask a second card ("Which tables?", options "Keep everything" and "Drop staging and backups") whose "Other" takes the names.
+
+Names or patterns typed in "Other" are the **Let me name them** answer below; there is no option for it, since an option that asks for typing gets pressed with nothing typed ([rule 5](../../shared/question-cards.md#5-free-text-goes-in-other)).
 
 Add one line before the card: *"Ask to see any schema's tables or any table's columns, or type columns to leave out in Other (`schema.table.column`)."*
 
@@ -728,7 +796,8 @@ Act on the answer, writing the kept set to `<artifacts_dir>/local/tmp/agami-keep
 | Keep everything | Skip the file. Run 1.7 without `--tables-file`; columns typed in "Other" still go to `--exclude-columns` (below). |
 | Drop staging and backups | `inventory_summary.py --inventory "<inventory_path>" --keep drop_noise --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"` |
 | Only some schemas | **When the person shared questions or report SQL in 1.5, lead with the schemas they use**: run the summary again with `--used-by <each shared file>` (`agami-asked-questions.txt`, the files in `local/reconcile/inbox/`, a semantic-layer folder's SQL), and when `used_schemas` is not empty make the first option `The <k> schemas your SQL uses (Recommended)`, naming them in its description; tell the person in one line before the card how much of their material a pick would leave out when it drops one of those schemas. Then ask a follow-up AskUserQuestion, multiSelect. Up to 4 schemas: one option each. More: the options are `groups.schema_groups` (label, schema count and table count), and a picked group keeps all its schemas; "Other" takes schema names to add or to treat on their own. Name each group option's `schema_count` and `tables`. Add a "None of these" option only when that leaves fewer than 4 options; at 4, "Other" is the way out (a card holds 2 to 4 options). Then `--keep schemas:<a,b,c>`. |
-| Let me name them | Write the names (one per line, `schema.table` or a bare table name) with the Write tool to `<artifacts_dir>/local/tmp/agami-names.txt`, then `--keep names:<artifacts_dir>/local/tmp/agami-names.txt`. |
+| Pick from a list | [1.6p](#16p--pick-from-a-list-the-table-picker-page): the page, or the numbered list where a page can't open. It ends in the same `--keep` output, written to the same `agami-keep.txt`. |
+| Let me name them (names or patterns typed in Other) | Write what was typed, as typed, with the Write tool to `<artifacts_dir>/local/tmp/agami-pick.txt`, then `--keep pick:<artifacts_dir>/local/tmp/agami-pick.txt --shown 0` (this card shows no numbers, so a bare number names nothing). It reads table names (`schema.table` or a bare name), `all <schema>`, patterns with `*` (`all crm_*`, `sales.*`) and a leading `everything except`. A name that is both a schema and a table, or several tables that differ only in case, comes back `ambiguous`: ask which was meant. |
 
 `--keep` prints `{"tables_file", "kept"}`; say how many tables are kept and pass `--tables-file "<tables_file>"` to 1.7. **`{"error": "no tables kept"}` (exit 1, nothing written) means the choice left no tables: say so and ask the same card again.** **A name that matches no table, or a bare name that matches several, comes back as `{"unmatched": [...], "ambiguous": {...}}` with exit 1 and nothing written: tell the person which ones, and ask the same card again. Never guess.** Column exclusion is not asked here: personal-data columns are handled in review.
 
@@ -762,12 +831,49 @@ When a model spec workbook was attached in 1.5, convert it FIRST and skip the 1.
 
 It prints the counts it read (`subject_areas`, `tables`, `joins`, `joins_approved`, `joins_with_condition`, `metrics`, `sensitive_columns`, `rules`). **Quote those numbers verbatim — never count a sheet by reading it.** Exit 1 prints `errors` naming the missing sheet or column: show them and stop, the person fixes the workbook. Then run 1.7 with `--tables-file` set to `spec-tables.txt` as **ONE call — the single background call + progress tail (1.7 option 2), never `--append` batches**, however many tables the spec names. The spec is applied once, over the whole set, so read the whole set in one go.
 
+### 1.6p — Pick from a list: the table picker page
+
+The answer to 1.6's **Pick from a list**. A one-time page on `127.0.0.1` lists every table of the inventory, grouped by schema, with its row estimate and column count, a search box, select all / none per schema, and the likely staging and backup copies marked (unticked when `noise_all_copies` is true). Its **Save tables** button sends the pick to the helper waiting for it, the way the password page sends a password; nothing is pasted ([question-cards rule 6a](../../shared/question-cards.md#6a-a-page-that-saves-its-decisions)).
+
+1. **Where a page can't reach this computer, use the numbered list.** In a remote or SSH session (`SSH_CONNECTION` is set), say in one line that pages open on this computer, which their browser can't reach from here, and go to **The numbered list** below.
+2. **Render the page and start the helper in the background** (`run_in_background`), with a `<ts>` of the time plus a random part so two pages never share a file:
+
+   ```bash
+   ts=$(date -u +%Y%m%d-%H%M%S)-$RANDOM
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_table_picker.py --inventory "<inventory_path>" --save-to-helper \
+     --out "<artifacts_dir>/local/tmp/agami-tables-$ts.html"
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/tmp/agami-tables-$ts.html" \
+     --decisions "<artifacts_dir>/local/tmp/agami-page-$ts.json" --minutes 30
+   ```
+
+   Wait for the helper's first line as rule 6a step 3 says (the Monitor tool, never a foreground sleep): `{"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 1800}`. If no line comes, or the task exits, say so in one line with its last stderr line and go to **The numbered list**.
+3. **Post the link, then a card**: *"[Pick the tables](<url>). Tick the tables to keep, press Save tables, then come back here and press I've saved it. The link lasts 30 minutes."* Then one question (header `Table list`), *"Save your pick on the page, then come back here."*: **I've saved it** / **Back to the cards**. Handle both as rule 6a step 4 does: **I've saved it** with no final line yet says the page hasn't been saved and asks this card again; **Back to the cards** reads the helper's output first, offers to apply a pick it finds saved (rule 6a's `Saved page` question), and otherwise stops the helper with TaskStop and goes to **The numbered list** below: the page may never have opened (a cloud or web session can be remote without `SSH_CONNECTION`), and 1.6's card would only offer another page.
+4. **The helper's final line.** `{"status": "saved", "decisions": "<file>"}` → write the kept set through the same command every other answer uses, which checks the file before it writes anything (the page and database it was rendered for, no other keys, and only names the inventory holds):
+
+   ```bash
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" \
+     --keep page:"<decisions file>" --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"
+   ```
+
+   It prints `{"tables_file", "kept"}`: say *"Keeping <kept> of <N> tables."* (`<N>` is the summary's `tables`), delete the decisions file and the page, and run 1.7 with `--tables-file "<tables_file>"`. An `{"error"}` or `{"unmatched"}` (exit 1, nothing written) means the file isn't this inventory's pick: say so in one line and ask 1.6's `Tables` card again; never edit the file to make it pass. `{"status": "expired"}` → *"The page expired before it was saved; nothing changed."*, then 1.6's `Tables` card again.
+
+**The numbered list** (when a page can't open). Every table, numbered, in the chat:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --numbered
+```
+
+Show its `list` as it is, in a fenced text block: a line per schema, then one numbered line per table with its columns, its rows where known and a mark on a likely copy. This is the one place the chat lists tables one by one, because it is what the page would have shown. It lists the first 200 tables (`shown` is the last number in it, `more` how many it leaves out). Past 200 tables, say how many more there are, and that patterns and schema names reach every table; numbers stop at `shown`. Then one question (header `Table pick`), *"Which tables should I keep? Type numbers, ranges or patterns in Other, like 1-12, 15 or all crm_* or everything except audit_*."*: **Keep everything** / **Drop staging and backups** (on the same terms as on 1.6's card) / **Back to the tables card**.
+
+What is typed in "Other" goes, as typed, with the Write tool to `<artifacts_dir>/local/tmp/agami-pick.txt`, then `--keep pick:<artifacts_dir>/local/tmp/agami-pick.txt --shown <shown> --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"` (`<shown>` from `--numbered`), and the say-back is the same *"Keeping <kept> of <N> tables."* The numbers are the list's own. `{"unmatched": [...], "ambiguous": {...}}` (exit 1, nothing written): say which numbers or patterns matched nothing, or list the tables a name could mean, and ask this card again. A question typed there is answered first, then this card asked again ([rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). Columns typed as `schema.table.column` go to `--check-columns`, as on 1.6's card.
+
 ### 1.7 — Run the introspection engine (on the kept tables)
 
 This is the deterministic core — it replaces hand-authoring tables/columns/FK SQL/confidence formulas. From `plugins/agami/scripts/`:
 
 ```bash
-# write the kept allowlist to a file first (zsh-safe — no word-splitting to get wrong)
+# write the kept allowlist to a file first (zsh-safe — no word-splitting to get wrong);
+# never a preset's source tables (sys_dictionary, sys_choice): 2a.0 reads those directly
 printf '%s\n' incident problem change_request sys_user ... > "<artifacts_dir>/local/tmp/agami-keep.txt"
 AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect \
   --profile <profile> --db-type <db_type> \
@@ -780,38 +886,40 @@ AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect \
 
 `--tables-file` is the prune step's **kept set** (it also covers the no-catalog/probe-only case from 1.2). `--exclude-columns` marks the dropped columns excluded during the build — one validated write, no follow-up curate call. Omit both only when the user kept everything or skipped pruning. (If a table name is bogus / can't be described, the engine now drops it with a note and — if *nothing* describes — errors clearly instead of writing a partial model.)
 
-**On a large schema (50+ tables) over a tunnel this takes minutes and the command prints nothing until it returns — which reads as hung.** Two ways to keep it legible, in order of preference:
+**On a large schema (50+ tables) over a network connection the command prints nothing until it returns, which reads as hung.** Two ways to keep it legible, in order of preference:
 
-1. **Batched build (preferred for 30+ tables) — `--append`.** Split the kept allowlist into batches of ~10–15 tables and introspect **one batch per call**, each a quick *foreground* command that returns in tens of seconds. Every call MERGES into the existing model (prior tables are loaded from disk, never re-queried), so you end with the full union — and you report `batch 3/5 (+12 tables)` between calls, natural progress with **no background monitor to babysit**:
+1. **Batched build (preferred for 30+ tables) — `--append`.** Batching is your call, never a card (question-cards rule 9): say in one line how many batches you ran. Split the kept allowlist into batches of ~10–15 tables and introspect **one batch per call**, each a *foreground* command. Every call MERGES into the existing model (prior tables' columns and keys are loaded from disk, not read again; every join of the model is checked on the data again each call), so you end with the full union — and you report `batch 3/5 (+12 tables)` between calls, natural progress with **no background monitor to babysit**:
    ```bash
    split -l 12 "<artifacts_dir>/local/tmp/agami-keep.txt" "<artifacts_dir>/local/tmp/agami-batch-"      # batch files
-   for b in "<artifacts_dir>/local/tmp/agami-batch-"*; do
+   set -- "<artifacts_dir>/local/tmp/agami-batch-"*; n=0
+   for b in "$@"; do
+     n=$((n + 1))
      AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect \
        --profile <p> --db-type <t> \
-       --artifacts "<artifacts_dir>" --tables-file "$b" --append
+       --artifacts "<artifacts_dir>" --tables-file "$b" --append --batch "$n/$#"
    done
    ```
-   (`--append` on the first batch just creates the model — there's nothing to merge yet. The relationship pass runs each batch across the union, deduped, so the final batch yields the complete join graph.)
-2. **Single background call + tail.** If you'd rather one call: run it **in the background** (Bash `run_in_background: true`) and `tail` its progress log every ~15–20s, surfacing the latest line. The engine writes a flushed, **throttled** (~every 10%) per-phase log to `<artifacts_dir>/<profile>/.introspect/progress.log` (override with `--progress`): `discovered 52 tables …`, `columns+grain 30/52`, `relationships: declared FK 80/187`, `done`.
+   (`--append` on the first batch just creates the model — there's nothing to merge yet. The relationship pass runs each batch across the union, deduped, so the final batch yields the complete join graph. `--batch n/N` writes `batch n of N` as the log's first line, for the progress page.)
+2. **Single background call + tail.** If you'd rather one call: run it **in the background** (Bash `run_in_background: true`) and `tail` its progress log every ~15–20s, surfacing the latest line. The engine writes a flushed, **throttled** (~every 10%) per-phase log to `<artifacts_dir>/<profile>/.introspect/progress.log` (override with `--progress`), each line stamped in UTC: `discovered 52 tables …`, `columns+grain 30/52`, `joins: checking 78 on the data`, `joins checked 140/300`, `profiled 20/42 tables`, `done`. A step that writes nothing for a minute adds `waiting on the database for <N> min: <what>` (table names only), so a slow statement never reads as hung.
 
-(For a small DB introspect returns in seconds — no batching or backgrounding needed.)
+(For a handful of tables on a local database, one foreground call is enough. Columns and keys are read for up to 4 tables at once, 1 when the profile signs in through a browser, the same limit the join checks use.)
 
-It builds + **validates** + writes the model at `<artifacts_dir>/<profile>/`: storage connection, **proposed subject areas**, per-table columns + types (catalog or value-inferred), PK→`grain`, other unique keys→`unique_keys`, FK→`relationships` with **inferred cardinality** (`many_to_one`/`one_to_many`/`one_to_one`, one-to-one when the join is on a whole key on both sides; a join only the data shows is unique keeps its label and lands `unreviewed` with a "looks one-to-one, confirm" note), `column_groups` on deep tables (≥30 cols), `sensitive` flags on PII (by whole-word column name, email-valued columns, and personal keys inside JSON values, named in a column caveat), cross-area edges, and a report. Relationships from **unenforced-FK** dialects (Redshift/Databricks/Trino) and everything from probe mode are confirmed-by-overlap or `unreviewed`. The report prints the **capability mode per step** (catalog vs probe) — surface that to the user so they know what was read vs inferred.
+It builds + **validates** + writes the model at `<artifacts_dir>/<profile>/`: storage connection, **proposed subject areas**, per-table columns + types (catalog or value-inferred), PK→`grain`, other unique keys→`unique_keys`, FK→`relationships` with **inferred cardinality** (`many_to_one`/`one_to_many`/`one_to_one`, one-to-one when the join is on a whole key on both sides; a join only the data shows is unique keeps its label and lands `unreviewed` with a "looks one-to-one, confirm" note), `column_groups` on deep tables (≥30 cols), `sensitive` flags on PII (by whole-word column name, email-valued columns, and personal keys inside JSON values, named in a column caveat), cross-area edges, and a report. Relationships from **unenforced-FK** dialects (Redshift/Databricks/Trino) are confirmed when at least 95% of their values are found on the other side, else `unreviewed`; everything from probe mode is `unreviewed`. Every join is then checked on the data, and the report's `## joins checked on the data` section lists the ones worth a look (values with no partner, or a referenced key that repeats, which multiplies rows): mention those in the Phase 7 summary in plain words. The report prints the **capability mode per step** (catalog vs probe) — surface that to the user so they know what was read vs inferred.
 
-**Join candidates (tested, not written).** After the joins are built, introspection tests every column no join covers against each other table's one-column key (primary or unique) when the column's name matches the key or its type does — `orders.cust_ref` against `customers.id`, say (a column with a value list, or one column of a key over several, needs its name to point at the table) — and also when the database declares some foreign keys, for the columns they don't cover. Each test is one read-only `SELECT` over a sample of at most 1,000 of the column's distinct values; a run makes **at most 300** of them, and a table over 3,000,000 rows is not probed, so a billed warehouse sees a bounded number of small queries. A column flagged sensitive, or whose sampled values look personal, is never tested at either end, and the report and the file carry only names and counts. None of these joins is written to the model. The report's `## join candidates` section lists each with its match rate (`+ orders.cust_ref->customers.id: 100.0% of sampled orders.cust_ref values found in customers.id`), and the near misses with a `-`; it says so when the 300-probe cap stopped the scan. The same list is in `<artifacts_dir>/<profile>/.introspect/join_candidates.json`, each candidate a ready `add` op with its evidence. Show the user the candidates and ask which are real joins; add each one they confirm with one call (written `unreviewed`, for sign-off in `/agami-model`).
+**Join candidates (tested, not written).** After the joins are built, introspection tests every column no join covers against each other table's one-column key (primary or unique) when the column's name matches the key or its type does — `orders.cust_ref` against `customers.id`, say (a column with a value list, or one column of a key over several, needs its name to point at the table) — and also when the database declares some foreign keys, for the columns they don't cover. Each test is a read-only aggregate over the whole column when its table is under 500,000 rows, and over a sample of 5,000 rows otherwise (spread across the table where the engine samples whole pages or blocks, else the first rows read); a key into a table over 3,000,000 rows is looked up for the keys read rather than read whole. Several share one statement, and up to 4 statements run at once, so the build holds up to 4 database connections beside its own (1 when the profile signs in through a browser). A run makes **at most 300** of them, so a billed warehouse sees a bounded number of small queries. A column flagged sensitive, or whose sampled values look personal, is never tested at either end, and the report and the file carry only names and counts. None of these joins is written to the model. The report's `## join candidates` section lists each with its match rate (`+ orders.cust_ref->customers.id: all 3 values of orders.cust_ref are found in customers.id (whole table checked)`), and the near misses with a `-`; it says so when the 300-probe cap stopped the scan, and names the tables whose columns it left untested (build them again with `--append --tables` to test them). A table's own key is never tested against another table's own key. The same list is in `<artifacts_dir>/<profile>/.introspect/join_candidates.json`, each candidate a ready `add` op with its evidence. An `--append` batch tests only pairs that touch a table it reads, keeps the stored check of every join between two tables an earlier batch read, and adds its candidates to the file rather than replacing the earlier ones; the report's first lines give the candidates found beside the joins written. Show the user the candidates and ask which are real joins; add each one they confirm with one call (written `unreviewed`, for sign-off in `/agami-model`).
 
 **Show every join before asking about any of them.** A card that offered "Add all 16" and "Only 1–8" without the joins themselves left the person nothing to judge by. First a table in the chat, one row per candidate from `candidates`, highest match first, numbered so a range on the card points at rows the person can see ([question-cards rule 3](../../shared/question-cards.md#3-a-result-is-chat-output-before-the-card-that-acts-on-it)); a chat table may show the identifiers:
 
 ```
-| # | Join                                     | Match              |
-|---|------------------------------------------|--------------------|
-| 1 | leads.converted_contact_id → contacts.id | 100% (412 of 412)  |
-| 2 | orders.cust_ref → customers.id           | 97.5% (390 of 400) |
+| # | Join                                     | Match                          |
+|---|------------------------------------------|--------------------------------|
+| 1 | leads.converted_contact_id → contacts.id | all 412 values                 |
+| 2 | orders.cust_ref → customers.id           | 4,812 of 5,000 sampled (96%)   |
 ```
 
-The join is the candidate's `id` without its schemas, `->` drawn as `→`; the match is `evidence.match_rate` with `matched of sampled`. At most 15 rows, then *"and N more"*; say how many near misses (`low_overlap`) were left out, without listing them. Then the card:
+The join is the candidate's `id` without its schemas, `->` drawn as `→`. The match says which check it was, from `evidence.read`, with `matched`, `sampled` and `evidence.match_rate` (a share; show it as a percent). Both count rows: of the rows read that have the key filled in, how many find a partner. On `whole` (every row read) it is *"all <evidence.values> values"* when `matched` equals `sampled`, else *"<matched> of <sampled> rows (<match_rate>)"*. On `sample` or `first_rows` it is *"<matched> of <sampled> sampled (<match_rate>)"*. Show the percent rounded down, as the summary does, so a join short of the 95% rule never reads 95%. Never call a whole-table check a sample, or a sample "all". At most 15 rows, then *"and N more"*; say how many near misses (`low_overlap`) were left out, without listing them. Then the card:
 
-- **Up to 4 candidates:** one question per candidate (header `Join 1/3`), the question in plain words (*"Join Leads to Contacts by Converted contact ID?"*, [rule 3b](../../shared/question-cards.md#3b-things-are-named-in-plain-words)), options **Add it** (description: the match, *"100% of 412 sampled values match"*; preview: the join as in the table, then the `ON` condition, `leads.converted_contact_id = contacts.id`) and **Leave it out**.
+- **Up to 4 candidates:** one question per candidate (header `Join 1/3`), the question in plain words (*"Join Leads to Contacts by Converted contact ID?"*, [rule 3b](../../shared/question-cards.md#3b-things-are-named-in-plain-words)), options **Add it** (description: the match as in the table, *"All 412 values match"* or *"4,812 of 5,000 sampled rows match (96%)"*, then what `evidence.summary` says about rows with no partner, which an inner join drops; preview: the join as in the table, then the `ON` condition, `leads.converted_contact_id = contacts.id`) and **Leave it out**.
 - **More than 4:** one question, with group options, and **each option's `preview` lists every join that option adds**, one per line as in the table, so the person sees exactly what a press adds: **Add the <k> full matches (Recommended)** when some match 100% (the others stay out), **Choose one by one** (cards of up to 4 as above, each with **Add all remaining**), **Add none**. Never offer a numbered range ("1–8") as an option on its own: a range is only a label for joins its preview names.
 
 ```bash
@@ -878,17 +986,17 @@ Add **one finding** to a line when the step surfaced one, in the person's terms 
 **Many databases describe themselves.** Metadata-driven platforms ship their own data dictionary + value-label tables (ServiceNow `sys_dictionary` + `sys_choice`, SAP `DD03L`, Salesforce metadata…), and plenty of ordinary schemas have code→label lookup/dimension tables. When that metadata is present it is **authoritative** — strictly better than LLM guessing or fetching JS-walled vendor docs. Always try it first:
 
 ```bash
-AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" enrich-metadata "$ROOT" \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" enrich-metadata "$ROOT" \
   --profile <profile> --db-type <db_type>
 ```
 
-It auto-detects a preset (e.g. `servicenow`) or takes `--preset`, reads the dictionary/lookup tables, and applies — in validated curate batches — **column descriptions** (stamped `description_source: metadata`, authoritative), **`choice_field` labels**, and **reference/FK relationships** (the `caller_id → sys_user` edges that `<x>_id` name-matching can't find). On ServiceNow this alone closes most of the column-coverage, enum-decode, and join-graph gaps deterministically. It prints what it enriched. **Then** hand-enrich only what it didn't cover (2a–2c below). `--skip-references` if you want descriptions/choices only.
+When 0a.0's Source card named a product with a preset, pass it as `--preset <name>`. It auto-detects a preset (e.g. `servicenow`) or takes `--preset`, reads the dictionary/lookup tables straight from the database (they need not be in the model), and applies — in validated curate batches — **column descriptions** (stamped `description_source: metadata`, authoritative), **`choice_field` labels**, and **reference/FK relationships** (the `caller_id → sys_user` edges that `<x>_id` name-matching can't find). On ServiceNow this alone closes most of the column-coverage, enum-decode, and join-graph gaps deterministically. It prints what it enriched. **Then** hand-enrich only what it didn't cover (2a–2c below). `--skip-references` if you want descriptions/choices only.
 
-**The raised cap is not optional here — [why](#raised-cap).** A real `sys_dictionary` is tens of thousands of rows, so without the prefix this command doesn't degrade, it **dies**: the read is refused and the runner re-raises the refusal as `RuntimeError: {"refusal": … "rule": "resource_limit" …}`. Nothing is half-applied when that happens (the fetch is above the first `curate` write), so re-running with the prefix is clean. Two things when you run it: **never pipe it through `tail`** — that masks the exit code and a hard failure reads as success; and if the command still refuses even at 200,000, read the `fetched` counts, raise the prefix to clear the largest source table, and say so.
+**No row-cap prefix here — the command sizes its own reads.** A real platform dictionary can be hundreds of thousands of rows, past any number you would guess, so `enrich-metadata` counts each source table first and reads it under a cap of that count plus a margin, for that read alone. A source over 5,000,000 rows is not read: the command exits 1 with an `error` naming the table and its count — tell the user, and don't retry with a prefix (it would not change the outcome). **Never pipe it through `tail`** — that masks the exit code and a hard failure reads as success.
 
 **Then tell the user, once, using the numbers it printed** (`fetched` is a per-role row count, on both the success and the nothing-applicable paths):
 
-> *Read `<dictionary_rows>` dictionary rows and `<choice_rows>` choice rows. Catalog and dictionary reads run with a temporarily raised row cap (200,000) — a data dictionary is far larger than the 1,000-row default. **Your query-time cap is unchanged:** a normal question that would return more than 1,000 rows is still refused rather than quietly truncated.*
+> *Read `<dictionary_rows>` dictionary rows and `<choice_rows>` choice rows. Each dictionary read ran with a row cap sized to that table, for that read only — a data dictionary is far larger than the 1,000-row default. **Your query-time cap is unchanged:** a normal question that would return more than 1,000 rows is still refused rather than quietly truncated.*
 
 The second sentence is the load-bearing one. Without it a user reasonably concludes their safety bound was weakened.
 
@@ -900,9 +1008,9 @@ The format comes from the extension (`--format csv|json|tsv` overrides it). CSV 
 
 ### 2a — Descriptions (describe coded columns; leave only self-evident ones empty)
 
-For each table fetch up to 5 sample rows for evidence, naming the columns: `SELECT c1, c2, … FROM <t> LIMIT 5` with only the table's declared columns that are neither excluded nor flagged sensitive (Snowflake `SAMPLE` for >10M rows). A star is refused, so never write one. Run profiling reads through `"$PY" -m execute_sql --profile <profile> --build-profile --sql-file <file>` (the interpreter Phase 0a.5 resolved): it keeps every check except that it also allows `information_schema`'s structure views (and `pg_catalog`'s structure tables) and JSON/array functions such as `jsonb_each` or `json_each` over a declared column. Join with an explicit `ON`; `USING` and `NATURAL` joins are refused there. Don't use `--no-safety` for these. The database's first error line comes back under the fixed message, so a typo is visible. **Samples are never written to disk** — context only, then discarded. Also capture MIN/MAX of each time column → record under the table's `performance_hints` so Phase 5 anchors "last 30 days" to the data's real MAX, not `NOW()`.
+**The evidence for each table is the build's profile, not a handful of rows.** Read it with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" profile "$ROOT" --table <t> [<t> …]` (a few tables per call): per column how much of it is filled or blank text, its distinct count, MIN/MAX for numbers and dates, its most frequent values with their shares when it is coded (at most 25 values that repeat, none of them personal; never for a column named like a person's or party's name, a contact, tax or licence number), the stand-in values the build found, and `findings` (a column that is always empty, mostly blank or one constant value; dates after today on a column named for something that already happened; one date before another on nearly every row, the reverse of what their names say; a text column that mixes date formats); and each join's check on the data. The profile was read from the whole table under 500,000 rows and from a sample above it (`read` says which). A personal column carries counts only, and pay to a person (salary, pay rate, bonus) no range. Use a finding in the description in words that stay true after the next load (*"the date the claim was paid, which comes before it was submitted"* is not one; *"holds the invoice date, not the payment date"* is), never its figures. Only when a column's meaning still isn't clear from its name, its profile and the documents, read up to 5 rows of the columns in question, naming them: `SELECT c1, c2, … FROM <t> LIMIT 5` with only declared columns that are neither excluded nor flagged sensitive. A star is refused, so never write one. Run profiling reads through `"$PY" -m execute_sql --profile <profile> --build-profile --sql-file <file>` (the interpreter Phase 0a.5 resolved): it keeps every check except that it also allows `information_schema`'s structure views (and `pg_catalog`'s structure tables) and JSON/array functions such as `jsonb_each` or `json_each` over a declared column. Join with an explicit `ON`; `USING` and `NATURAL` joins are refused there. Don't use `--no-safety` for these. The database's first error line comes back under the fixed message, so a typo is visible. **Rows you read are never written to disk** — context only, then discarded. The profile's MIN/MAX of each date column is what Phase 5 anchors "last 30 days" to (the data's real MAX, not `NOW()`).
 
-Build a per-schema prompt with `$DATA_MODEL_DOC_TEXT` first (dominant prior), then `datasource.md`, then tables/columns/sample rows. **Always** emit a 1-line table `description`. For **columns**, classify each into one of three — don't default everything to empty:
+Build a per-schema prompt with `$DATA_MODEL_DOC_TEXT` first (dominant prior), then `datasource.md`, then tables/columns/profile. **Always** emit a 1-line table `description`. For **columns**, classify each into one of three — don't default everything to empty:
 
 | Kind | Examples | What to write |
 |---|---|---|
@@ -987,6 +1095,8 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add "$ROOT" --kind entity --area <area> 
 
 Metrics come from two sources, handled very differently. **Always prefer declared metrics** — schema-only inference is a shallow guess (it finds start→end durations, and flag rates when asked; it misses the domain KPIs a business actually tracks — refund rate, repeat-purchase rate, cohort retention, fulfillment SLA — because those aren't visible in column names).
 
+**A table whose caveats begin "Rows repeat about N times per <key>"** holds each record on several rows (introspection measured it; often a view joining a record to its stages). Any metric on it counts records with `COUNT(DISTINCT <key>)`, never `COUNT(*)`, and averages or sums per record, not per row; never write a grain of `<key>` alone for it. `suggest-metrics` proposes its distinct-record count (`<table>_distinct_<key>_count`) and no duration average on it.
+
 **(A) Declared metrics — extract in FULL, no cap.** If the user attached a semantic-layer repo or a metrics file in 1.5 (`$DATA_MODEL_DOC_TEXT`), those are the org's *real* definitions — pull **every** one, don't sample to 4:
 - **LookML** `measure {}` → metric: `type` + `sql` → `bindings`, `description` → `description` + `calculation`, `label` → `description` when there is no description (below), `label`+`view_label` → `other_names`.
 - **dbt** `metrics:` / `semantic_models[].measures` (MetricFlow) → name, `agg`+`expr` → `bindings`, `description` → `description` + `calculation`, `label` → `description` when there is no description (below), `label` → `other_names`.
@@ -1056,7 +1166,7 @@ From samples + the domain doc, add provider-portable cleaning where evidence sup
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-units "$ROOT" --currency INR        # prints {planned: [{area, table, column, label, unit}]}, writes nothing
 ```
 
-**Show that plan to the user** (each entry's `label` → unit, one line each) and apply only what they agree to: all of it with `--yes`, or a subset with the same `--currency`/`--unit` plus `--columns <table.col …>` (which writes exactly those columns, each with the unit the plan showed for it: a name that states its currency keeps that unit, the rest get `--currency`/`--unit`). A column whose name states its currency gets that unit in the plan; the rest get `--currency`. The write is one validated curate batch. The runtime + chart renderer format the symbol + grouping **deterministically** from `unit` (`semantic_model/units.py`) — no prose caveat to re-interpret. `Mixed` → skip (leave `unit` unset), one-liner. Non-currency units (`cents`/`percent`/`days`) → `--unit <name>`.
+When 0a.0's Source answer named a currency (`$CURRENCY_HINT`), it is the `--currency` the plan proposes. **Show that plan to the user** (each entry's `label` → unit, one line each) and apply only what they agree to: all of it with `--yes`, or a subset with the same `--currency`/`--unit` plus `--columns <table.col …>` (which writes exactly those columns, each with the unit the plan showed for it: a name that states its currency keeps that unit, the rest get `--currency`/`--unit`). A column whose name states its currency gets that unit in the plan; the rest get `--currency`. The write is one validated curate batch. The runtime + chart renderer format the symbol + grouping **deterministically** from `unit` (`semantic_model/units.py`) — no prose caveat to re-interpret. `Mixed` → skip (leave `unit` unset), one-liner. Non-currency units (`cents`/`percent`/`days`) → `--unit <name>`.
 
   **Unit grammar:** `<ISO code>[_<scale>][/<period>]`. Scale (values stored in thousands/millions/…): `thousands`, `millions`, `billions`, `lakhs`, `crores` — `USD_millions` renders 12.5 as `$12.5M`. Period (a rate): `hour`, `day`, `week`, `month`, `quarter`, `year` — `USD/day` renders 120 as `$120.00/day`; both combine (`USD_millions/year`). Use a scale only when the column or the user says the values are stored that way; never rescale data to fit one. Anything else (`kg`, `days`) is shown as a plain label.
 - **Date encodings (auto-sniffed — no question):** introspection already sets `date_format` (`epoch_s`/`ms`/`us`/`ns`, `yyyymmdd`, `iso8601`) + `timezone` on date-named columns whose sample values fit the shape, and `iso8601` on a text column with any name when at least 20 sampled values are present and every one is a real ISO date or timestamp (a single version string, impossible date or note rules it out), so epoch integers render as human dates (UTC) deterministically. You don't ask. **Do** glance at the result: if a time column was missed or mis-scaled (e.g. an epoch_ms tagged epoch_s), fix it with a `field:date_format`/`field:timezone` edit op in the same batch; mention any epoch columns found in the Phase 7 summary.
@@ -1110,6 +1220,74 @@ If the user **did** write a narrative in 1.4, leave it untouched. The glossary f
 
 **The company draft (from 1.4 A's "Draft it from the database").** Write two or three plain sentences on what the business does, inferred only from the subject areas and table descriptions you just wrote (never from general knowledge of a company name), and apply them as 1.4 A says (`sm set-org` plus `organization.md`), with the first line of `organization.md` reading *"Draft from the database; correct it in /agami-model."*. Phase 7 shows it for correction.
 
+### 2g — Ask what the data can't settle
+
+**Runs when 1.5's `Ask me as you go` was picked** (alone or with others), after 2a–2f, so the descriptions are written and the build knows what it couldn't read; also when a returning person asks for it ("ask me the open questions"). Otherwise leave it out, with its step in the list. The person is asked only what the data can't answer, in plain English, on cards; a document is asked for only for what only a person knows (1.5 did that). Say what happens first, in one line, with no duration: *"Checking a few things in the data that could be read two ways, one query per table."* Then:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" open-questions "$ROOT" --profile <profile>
+```
+
+It is read-only: each check is an aggregate over one table through `execute_sql`'s gates (one statement per table, one more for its dates, two for a fiscal-year check), and never a column flagged personal. A table whose estimated size is above introspection's guard is read on its recent rows only (listed under `windowed`, with the day it reads from); one with no date to narrow it by is not read, and is listed under `skipped` with every other table not checked and why. It prints `{questions, counts, failed, dropped, skipped, windowed, tables_probed, statements}`. Every `kind: ambiguity` question has been **checked on the data**: the command ran each reading (counted by each date, summed each amount, counted each status set) and kept the question only when the answers differ; the ones whose readings agree are under `dropped` with the reason, and are never asked. The other kinds are what the build already knows it couldn't read: `coded_values` (codes whose meanings enrichment left blank), `unknown_column` (a column marked unreadable in 2a) and `look_alike` (two tables named alike, `orders` and `orders_old`). `questions` holds every one: the `fiscal_start` question first when the fiscal start was never asked, then ambiguities, the widest-apart first; there is no cap, so ask them on cards 4 at a time, or on the page (below). Each question names the rows in plain words (from the model's entities) and uses the business word ("completed", "open", "last month"), never a table name or a word that names one reading; pass it as written.
+
+Post one progress line from its output: `✓ Checked <tables_probed> tables (<statements> queries): <counts.ambiguities> things the data reads two ways, <counts.coded_values> code lists and <counts.unknown_columns> columns I couldn't read.` **When `counts.failed` is not 0, say so on the next line, before anything else: *"<counts.failed> tables couldn't be checked: <reason>"*** (the `reason` of the entries in `failed`: the error's kind, such as a dropped connection). A check that failed settled nothing, so never say the data settled anything while `counts.failed` is not 0. **When `skipped` is not empty, say so on the next line too: *"Not checked: <table> (<reason>)"***, up to 5, then "and N more"; a table not checked settled nothing either. When `windowed` is not empty, add *"Large tables were checked on their recent rows: <table> since <since>"* in one line. When `questions` is empty and nothing failed, say *"The data settled everything I checked."* and go to Phase 3; when `questions` is empty and checks failed, offer to run it again once the connection works, and go on.
+
+**Cards or a page.** Ask one question (header `Answer how`), *"<N> things to answer. Answer them on a page, or here on cards?"*, where `<N>` is `len(questions)`: **Review on a page** (every item on one page that saves itself: the questions, the code lists and the unclear columns, with the build's guesses to confirm) / **Answer on cards** (all of them here, four at a time). With more than 8 items, mark **Review on a page (Recommended)** and put it first; with 8 or fewer, mark **Answer on cards (Recommended)** and put it first. In a remote or SSH session (`SSH_CONNECTION` is set) the page can't open, so leave this question out and go to the cards ([question-cards rule 6a](../../shared/question-cards.md#6a-a-page-that-saves-its-decisions), step 1). **Review on a page** → the page below (**Review on a page** (#676)); **Answer on cards** → the cards.
+
+**Show each page before its card** ([question-cards rule 3](../../shared/question-cards.md#3-a-result-is-chat-output-before-the-card-that-acts-on-it)): just before each card of up to 4 questions, a table `# | Question | What the data shows` with one row per question on that card, its `question` and its `evidence` (a code or column question has no evidence: leave the cell empty), so no card asks anything whose evidence wasn't shown first. Say once, before the first page, how many questions there are in all.
+
+**Then the cards: each question's `card`, passed to AskUserQuestion unchanged**, up to 4 questions per card, in order. The command builds every `card` within [question-cards.md](../../shared/question-cards.md)'s limits, so don't reword its question, rename its header, or add, drop or reorder an option: a live run that wrote its own cards dropped **Skip the rest** and invented a reading the data never showed. What the cards hold, so you can act on the answers: no option is marked Recommended (which date a word means is a fact only the person knows); every question ends with **Skip the rest**, so the list can be ended in one press, like *Approve all remaining* on the sign-off cards; an `ambiguity` offers its first two readings and **Ask each time** (a third reading, listed in that option's preview, is picked by typing its label in "Other"); a `look_alike` offers its two tables and **Both are in use**; `coded_values` and `unknown_column` take the meaning typed in "Other", with **Not sure**. Two are facts with one answer, so they offer values and no way of behaving: an `ambiguity` with `pattern: unit` (the same amount in two currencies or units) offers each unit and no **Ask each time**; a `fiscal_start` (no fiscal start was given in 1.4) offers months, any other typed in "Other".
+
+**Recording the answers: as the person's, with who and when.** Before the first write, take `reviewer_email` and `reviewer_role` from `<artifacts_dir>/local/.config`; when either is missing, ask Phase 4's identity card (its email and role questions, saved under the same keys), which Phase 4 then doesn't ask again. **Don't sign anything yet** on that card writes nothing: say the answers weren't recorded, that the same questions come back the next time this step runs, and go to Phase 3. `curate` refuses an ambiguity signed by anyone but the `reviewer_email` that `.config` records. After each card, write its answers in one `sm curate` batch with `--signer "<reviewer_email>" --role "<reviewer_role>"`: the curation log records each answer with the signer, the role and the time (`sm history "$ROOT"` shows them), and the model holds only what the person said, never your reading of the data in their name. **Only an answer the person gave on a card is written with `--signer`**, and only under an email they typed (on Phase 4's identity card, now or earlier) or that `.config` already holds: never one taken from git, the environment, the Claude login or memory, and never a meaning you worked out yourself. A code list you can decode from the data (country codes, say) is 2a's job: write it there with `source: ai` and no signer, then run `open-questions` again so it isn't asked; a live run that filled one in and signed it in an invented name is why this rule exists. Each question carries the op its answer completes; never write one by hand:
+
+| answer | op |
+|---|---|
+| a reading of an `ambiguity` | its `op` with `"default": "<that option's label>"` (the agent answers with it and offers the others) |
+| **Ask each time** | its `op` with `"behaviour": "ask"` (no default) |
+| a unit of a `pattern: unit` question | that option's `ops`: each column's `unit`, and a caveat on the table naming the one people report in (a fact; no ambiguity is declared) |
+| a month for `fiscal_start` | `sm set-fiscal-year "$ROOT" --month <1-12>` (January too), not a curate op |
+| a table of a `look_alike` | that entry's `ops` (a caveat on the other table, saying which holds the current data) |
+| meanings typed for `coded_values` | its `op`, with each named code's label filled into `value` (the codes not named keep their blank label) |
+| words typed for an `unknown_column` | its `op`, with the words as `value` (it is stamped `source: human`) |
+| **Both are in use**, **Not sure** | nothing |
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-answers.json" --signer "<reviewer_email>" --role "<reviewer_role>"
+```
+
+**Skip the rest** applies the card's other answers and asks nothing more; say how many were left, and that they come back the next time the schema is reloaded. **"Other" on an ambiguity** that names one of its options is that option; one that says the word isn't ambiguous here ("it's always the paid date") is that option too. A code typed for `coded_values` that isn't one of its `values`, or words you can't place, are re-asked, never guessed: say in one line what didn't match and ask the same card again; a question ("which one do the reports use?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). `curate`'s `skipped` (an ambiguity already declared, say) is said back in one line.
+
+When an answer changes a metric proposed in 2c (people mean the total with tax, and the metric sums the subtotal), say which metric in one line; it is fixed on its sign-off card in Phase 4, where "Other" takes the change. Then post: `✓ Recorded <k> answers as yours: <a> questions with two readings, <c> code lists, <d> column descriptions.`, every number from `curate`'s `applied`.
+
+**Review on a page** (#676). The same saving page as the other sign-offs ([question-cards rule 6a](../../shared/question-cards.md#6a-a-page-that-saves-its-decisions)): one row per item under a stable id, ordered by how much it changes answers. Its answers are recorded as the person's, so take `reviewer_email` / `reviewer_role` from `.config` first and, when either is missing, ask Phase 4's identity card before rendering (**Don't sign anything yet** there → the cards, which write nothing either). A `fiscal_start` question has no row on the page: when the list holds one, ask its `card` first and record it as the table above says. Then list every item and render and serve the page with the helper waiting for its save, giving the person the URL:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" open-questions "$ROOT" --profile <profile> --all > "<artifacts_dir>/local/tmp/agami-open-questions-<ts>.json"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_open_questions_page.py --items-file "<artifacts_dir>/local/tmp/agami-open-questions-<ts>.json" \
+  --profile <profile> --save-to-helper --artifacts-dir "<artifacts_dir>" --out "<artifacts_dir>/local/tmp/agami-questions-<ts>.html"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/tmp/agami-questions-<ts>.html" \
+  --decisions "<artifacts_dir>/local/tmp/agami-page-<ts>.json" --minutes 30
+```
+
+Run `serve_page.py` with `run_in_background` and wait as rule 6a says. `--all` runs the same checks, with no cards (but the fiscal start's), adds the build's own guesses (a code list it filled in alone, an opaque column it described alone, never one a person signed) and reads up to five sample values of each unclear column (never a column flagged personal). What each row offers:
+
+- **a question**: the question in business words and the evidence numbers, and a dropdown of its readings (agami answers with the one picked and offers the other), **Ask each time** and **Don't know** (a `pattern: unit` question offers its units and **Don't know** only, and writes the picked unit's `ops`); a look-alike pair offers its two tables, **Both are in use** and **Don't know**;
+- **a code list**: each code with the build's guess pre-filled (Yes/No flags, plain numbers and codes that already carry their label are left off), and **The meanings shown are right** / **Fix them** (the labels become editable) / **Don't know**;
+- **an unclear column**: its sample values and the build's guess, and **That's right** (only when there is a guess) / **Fix it** (the words typed) / **Hide this column** / **Don't know**.
+
+Blank is undecided, never a default: a row left blank writes nothing and comes back next time. The `Page` card is **I've saved it** / **Back to the cards**, and **Back to the cards** reads the helper's output before stopping it, then goes to the cards. `{"status": "expired"}` → *"The page expired before it was saved; nothing changed."*, then the `Answer how` card again.
+
+**What the page saved.** Never read it by hand: check it against the items file the page was rendered from, which writes the batch:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_open_questions_decisions.py --decisions-file "<artifacts_dir>/local/tmp/agami-page-<ts>.json" \
+  --items-file "<artifacts_dir>/local/tmp/agami-open-questions-<ts>.json" --expect-profile <profile> \
+  --artifacts-dir "<artifacts_dir>" --ops-out "<artifacts_dir>/local/tmp/agami-answers.json"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-answers.json" --signer "<reviewer_email>" --role "<reviewer_role>"
+```
+
+Each op is the one the item carries, as on the cards: a reading is its `op` with that `default`, **Ask each time** its `op` with `"behaviour": "ask"`, a table its `ops`, a confirmed code list its labels as they are, a fixed one the labels typed, a confirmed column its description marked `ai_validated`, a fixed one the words typed (`source: human`), and **Hide this column** an `exclude` op; **Don't know** and **Both are in use** write nothing. `{"ok": false, "error"}` (exit 2: another page or model, no saved identity, a malformed file): say the error in one line, apply nothing, and ask the `Answer how` card again. Each of `refused` (an id not on the page, a choice its row doesn't offer, a fix with no words) is said back and not applied. Then say in one line what was recorded and for whom, from `curate`'s `applied` and the parser's `counts`: *"Recorded 14 answers as yours (<reviewer_email>): 6 questions, 5 code lists, 3 columns (1 hidden). 31 left blank come back next time."*, list `curate`'s `skipped`, delete the decisions file, the page and `agami-open-questions-<ts>.json` (it holds sample values), and go to Phase 3.
+
 ---
 
 ## Phase 3: Review the subject-area split
@@ -1123,7 +1301,7 @@ I split <N> tables into <A> subject areas:
 <C> joins span areas (kept as cross-area relationships).
 ```
 
-Show the split as above (at most 15 areas; say how many more), then one **AskUserQuestion** (header `Areas`): `Looks good (Recommended)` / `Adjust`, with "Other" taking the change in the person's words ("move `refunds` to `payments`"). Skip silently for a single-area small DB. A change that names an area or table the model doesn't have is said back and the same card asked again; never guess which one they meant.
+Show the split as above (at most 15 areas; say how many more), then one **AskUserQuestion** (header `Areas`): `Looks good (Recommended)` / `Show me the areas` / `Adjust`, with "Other" taking the change in the person's words ("move `refunds` to `payments`"). The card can cover the list in the chat, so `Show me the areas` is always there: on it, print every area with all its tables (no 15-area cut), then ask the same card again. Skip silently for a single-area small DB. A change that names an area or table the model doesn't have is said back and the same card asked again; never guess which one they meant.
 
 If they adjust, move tables with the curate `move` op — never by editing the `subject_areas/` tree: `{"op":"move","kind":"table","area":"<from>","name":"<table>","to_area":"<to>"}` (add `"schema"` when two schemas share the table name; a `to_area` the model doesn't have yet is created). Its joins follow it — a join that now spans two areas becomes a cross-area join and the reverse — and metrics and entities move with it once every table they read is in the new area; the result's `notes` list what it moved and what stayed because it also reads another table. The whole batch is validated and undone on failure (sizing warns at 25 tables, errors at 30).
 
@@ -1169,21 +1347,21 @@ Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do 
 - **Approve all**: sign off every item as listed. Mark it **(Recommended)** and put it first only when the list is short and confident: every item fits in the table above (15 or fewer), none has `changes_since_approval`, and every metric has a `Definition`. Otherwise put **Review one by one** first and mark that one (Recommended).
 - **Review one by one**: up to 4 items per card (below).
 - **Skip for now**: nothing is signed; they still work, and answers that use one carry a warning until it is signed off.
-- **Show the full view**: the model explorer page with every definition and its SQL, served from localhost (below); then this card again.
+- **Review on a page**: the model explorer's Review tab, where the whole list is decided at once and saved from the page (below); then this card again with what is left.
 
 | Answer | Do |
 |---|---|
-| Approve all | The identity card first if needed (below), then one batch: `{"op":"approve","kind":"<kind>","area":"<area>","name":"<name>"}` per item (leave `area` out when the item's `area` is null, a cross-area metric), applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. |
+| Approve all | The identity card first if needed (below). With more than 15 items, list the ones the table above didn't show first and confirm ([question-cards rule 4](../../shared/question-cards.md#4-lists-longer-than-a-card-holds-are-summarised)). Then one batch: `{"op":"approve","kind":"<kind>","area":"<area>","name":"<name>","bulk":true}` per item (leave `area` out when the item's `area` is null, a cross-area metric), applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. |
 | Review one by one | The one-by-one cards below. |
 | Skip for now | Nothing is written. Go to 4b. |
-| Show the full view | The full view below, then this card again. |
+| Review on a page | The full view below, then this card again, recounted. |
 
 **One by one.** Up to 4 items per card, one question each. `header` is `Metric 3/9` or `Entity 3/9` (at most 12 characters; drop the word when the numbers are long). The question is only the decision, with the item's `plain_name` from `review-items`: *"Sign off Revenue?"*, *"Sign off Orders to Customers by Customer ID?"* (never the identifier, `ela_proficiency_rate`, which goes in the preview; [question-cards rule 3b](../../shared/question-cards.md#3b-things-are-named-in-plain-words)). The meaning and any real value go in the `Approve` option's description, kept apart from the title: *"Sum of paid order totals, refunds excluded. 2024-25: $4.2M"*. **The SQL goes in the `Approve` option's `preview`**, the monospace pane a card shows beside a focused option, laid out over lines with a short comment on each filter (`AND status = 'paid'  -- paid orders`), the table it reads, and, for an item that changed since its approval, what changed. Never put the SQL in the question: a card question is plain text and a long formula there is unreadable. Options:
 
 - **Approve**: sign it off as written.
 - **Reject**: drop it from the model (`{"op":"reject",…}`).
-- **Approve all remaining**: sign off this item and every item not yet shown. Every card carries it, so a long queue finishes in one press. Answers given on the same card to the other questions still stand.
-- **Show the full view**: the model explorer page, served from localhost; nothing about this item is decided, and the same card is asked again after the URL. On a card with several questions, offer it on the first question only.
+- **Approve all remaining**: sign off this item and every item not yet decided. The ones not yet shown are listed first and confirmed with one more question ([question-cards rule 4](../../shared/question-cards.md#4-lists-longer-than-a-card-holds-are-summarised)): a sign-off is never recorded for a definition the person hasn't seen. Each of its approve ops carries `"bulk": true`. Answers given on the same card to the other questions still stand.
+- **Review on a page**: the model explorer opened on this item's kind (the full view below), where the rest of the queue is decided at once and saved from the page. Offer it on every question of the card, not only the first. Answers given on the card's other questions are applied first; after the page, the next card holds only what is still undecided.
 
 After each card, apply its answers in one `sm curate` batch (approvals with `--signer`/`--role`), then ask the next card. Every approval goes through that one command with the person's identity; never mark an item approved any other way.
 
@@ -1200,26 +1378,26 @@ After each card, apply its answers in one `sm curate` batch (approvals with `--s
 
 The identity is typed by the person: **never infer it** from git config, the environment, the credentials, or the Claude login, and don't pre-fill a domain. An email that doesn't match `\S+@\S+\.\S+` is said back and the same card asked again. Merge the two keys into `<artifacts_dir>/local/.config` (keep every other key), then `chmod 600 <artifacts_dir>/local/.config`, so neither this run nor `/agami-model` asks again.
 
+**When `sm sensitive` prints `personal_data: enforced_by_warehouse`, skip this question.** The organisation set that its warehouse controls who sees personal data (`sm set-personal-data`), so the build flagged nothing; say so in one line, *"Personal data: your warehouse controls who sees it, so this build flagged none of it."*, and ask nothing about it. When `sm sensitive`'s `count` is above 0 (flags kept from before the setting, on a reload), add it: *"<count> columns flagged before stay flagged; change them in /agami-model."*
+
 **Personal-data columns (when `pii_count` or `suspected_count` > 0).** From the `sm sensitive` output above, `{count, columns:[{area, table, column, label}], suspected, suspected_count}`: `columns` are flagged personal, `suspected` look personal but weren't flagged (a phone-like or birth-date-like sample, a name like `ip_address`). Show both in one table, `Table | Columns`, marking each suspected column "(suspected)", e.g. `customers | email, phone, ip_address (suspected)` (a table in the chat may show identifiers; the card names them in words); at most 15 rows and *"and N more"*. Then one multiSelect question (header `Personal`), **"Hide these from queries"**: *"These columns look like personal data. Which should queries never read?"*
 
 Flagged and suspected columns are picked the same way:
 
 - 3 columns or fewer in all: one option per column, named by its `label`, **Email on Customers**, or **IP address on Customers (suspected)**; the identifier (`customers.email`) goes in the option's description.
-- More: grouped by table, one option per table with its count, the table and columns in words, **Customers (3: Email, Phone, IP address (suspected))**; picking a table hides every listed column in it, suspected ones included. With more than 3 tables, the options are **All <n> listed columns** and the 2 tables with the most listed columns.
-- Always last: **Keep them all queryable**.
+- More: grouped by table, one option per table with its count, the table and columns in words, **Customers (3: Email, Phone, IP address (suspected))**; picking a table hides every listed column in it, suspected ones included. With more than 3 tables, the options are **All <n> listed columns**, the table with the most listed columns, and **Review on a page** (the full view below, on its personal-data tab: every listed column on one page, each hidden, kept or marked there, saved from the page).
+- Always last: **Keep them queryable**, its description saying what stays: *"Flagged ones can still be counted and filtered, but a raw value is never shown. Suspected ones stay ordinary columns."* (The old label, *Keep them all queryable*, read as "ordinary columns" while the flags stayed on.)
 - "Other" takes `table.column` names to hide, flagged, suspected or any other column in the model.
 
-Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them all queryable** writes nothing. A name in "Other" that isn't a column in the model, or **Keep them all queryable** picked together with columns to hide, is said back and the same card asked again; never guess which column was meant.
+Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them queryable** writes nothing; say in one line what that leaves (flagged columns queryable, raw values never shown). A name in "Other" that isn't a column in the model, or **Keep them queryable** or **Review on a page** picked together with anything else, is said back and the same card asked again; never guess which column was meant.
 
-**Show the full view** (an option on the Sign-off and item cards, or asked for in words). The model explorer, with every metric, entity, join and column: render it the way `/agami-model preseed` does (`render_model_explorer.py … --initial-tab review --read-only`) and serve it from localhost, giving the person the URL:
+**Show the full view** (an option on the Sign-off and item cards and the personal-data question, labelled **Review on a page** there, or asked for in words). The model explorer, with every metric, entity, join and column, which saves its own decisions ([question-cards rule 6a](../../shared/question-cards.md#6a-a-page-that-saves-its-decisions)): render it the way `/agami-model preseed` does in its Phase 5 (`render_model_explorer.py … --initial-tab review --section <metrics|entities|joins> --save-to-helper`, or `--initial-tab pii` from the personal-data question) and serve it from localhost with the helper waiting for its save, giving the person the URL:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<explorer.html>" --minutes 30
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<explorer.html>" --decisions "<artifacts_dir>/local/tmp/agami-page-<ts>.json" --minutes 30
 ```
 
-Run it with `run_in_background` and read its first line, `{"url": …}`, for the URL to give the person.
-
-The page is read-only; decisions stay on the cards, so after the URL ask the card it was picked on again. A "Generate feedback for Claude" block from an older, editable page is still accepted: apply it as `/agami-model` does, then continue at 4b.
+Run it with `run_in_background` and wait as rule 6a says. When the page saves, apply its decisions file as `/agami-model` Phase 5b does (its parser, then `sm curate` with the saved `reviewer_email` / `reviewer_role`), say what changed in one line (its 5c), then ask the card it was picked on again with what is left, or go to 4b when nothing is. A "Generate feedback for Claude" block pasted from an older page is still accepted: apply it the same way, then continue at 4b.
 
 **4b — after the cards:** **recount the sign-offs** with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope preseed` (`review-items`, not `review-queue`, which takes no scope). If **0** → Phase 5 (the seed command runs clean). If **> 0**:
 
@@ -1234,7 +1412,7 @@ On `reintrospect` with nothing flagged sensitive and nothing unreviewed, skip si
 
 ## Phase 5: Seed prompt examples
 
-**Surface a progress warning first** (second-longest phase): "Generating NL→SQL seeds (a spread across your tables, metrics, entities, and joins — including cross-schema ones) and EXPLAIN-validating each against the live DB. Expect 1–3 min (longer on cloud / a multi-schema DB). I'll narrate per-example progress."
+**Say what happens first**: "Generating NL→SQL seeds (a spread across your tables, metrics, entities, and joins — including cross-schema ones) and EXPLAIN-validating each against the live DB. I'll report each example as it's checked."
 
 **5a — generate** (your job — the LLM step) candidate examples grounded in the model. Aim for **coverage and a good spread**, not a fixed count:
 
@@ -1270,7 +1448,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" seed-validate "$ROOT" --profile <profile
 
 Without `--area` it runs every area's seeds (each through `execute_sql` scoped to its own area, with the same per-statement limits) and prints one object: `areas` (`{area, examples, errored}` each), `items` (the items above, each labelled `area`) and `totals` (`areas`, `examples`, `errored`). Repeat `--area` to run only those areas. One `--area` prints the bare items array, as before. An area the model doesn't have is refused with `error: unknown_area` and the `valid_areas`.
 
-(Heads-up before you run it: on a large warehouse this executes every seed for real — some may be full-scan aggregates that take a few minutes and cost warehouse compute. It's a one-time onboarding step; surface a one-liner so the wait is expected, and run it in the background if it's slow.)
+(Heads-up before you run it: on a large warehouse this executes every seed for real — some may be full-scan aggregates that cost warehouse compute. It's a one-time onboarding step; say so in one line, and run it in the background on a large warehouse.)
 
 **Show what ran, then one card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)). No page opens on this path, and no reply block is waited for. Post one progress line from `totals` (or the bare array's length and its items with an `error`): *"✓ Ran <examples> examples: <examples − errored> returned rows, <errored> failed."* Then a markdown table from the items, failing ones first, at most 15 rows, then *"Showing 15 of <n>; <n−15> more."* when there are more:
 
@@ -1283,37 +1461,55 @@ Without `--area` it runs every area's seeds (each through `execute_sql` scoped t
 
 Then call AskUserQuestion, one question (header `Examples`), *"What should I do with these examples?"*:
 
-- **Keep all that ran (Recommended)**: sign off every example that returned rows. Drop the (Recommended) and put **Review one by one** first when a result that ran looks wrong (6a).
+- **Mark them on a page (Recommended)**: the examples page, every result with its SQL, where each example is kept, dropped, fixed or noted, and saved from the page (below).
 - **Review one by one**: every example, 4 per card, the failing ones first.
-- **Drop the failing ones**: mark every failed example rejected. Leave it out when none failed.
-- **Show the full view**: the examples-validation page, every result with its SQL, served from localhost (below); then this card again.
+- **Add my own**: the person's own examples, below.
+- **Keep all**: sign off every example that returned rows. Never recommended: that a statement ran proves it executes, not that it is right (a live run had two of 38 that ran cleanly and were wrong).
+
+The order is fixed. Put **Review one by one** first and recommend it instead of the page only when the page can't open (question-cards rule 6a, step 1). A result that ran but looks wrong goes in one sentence under the table either way (6a).
+
+**Add my own** is on this card every time, so the person's own examples are offered at the step where examples are reviewed, not only up front: the person's own examples, a .sql file or a folder of them, a sheet of questions and SQL, a dashboard export (Tableau, Power BI, LookML) or a screenshot, each checked before it is added ([`shared/own-examples.md`](../../shared/own-examples.md)); then this card again.
+
+**Dropping the failures has no option of its own**: **Review one by one** shows them first and the page can drop them, and "drop the failing ones" typed in Other still does it (the `Drop the failing ones` row below).
 
 | Answer | Do |
 |---|---|
-| Keep all that ran | The identity card from Phase 4a if `reviewer_email`/`reviewer_role` aren't saved yet; here **Don't sign anything yet** leaves every example written but unsigned and goes on to Phase 7 (not 4b). Then, per area, write the examples that ran back with their own `question` and `sql` (same SQL, so it is a sign-off, not a change; their tags are kept): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add-example "$ROOT" --area <area> --file "<artifacts_dir>/local/tmp/agami-keep-examples.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. The sign-off is recorded in `curation_log.jsonl`, not on the example. Failed ones are left as they are; say how many. |
+| Keep all | First, every example the table above didn't show is listed and confirmed ([question-cards rule 4](../../shared/question-cards.md#4-lists-longer-than-a-card-holds-are-summarised)): a sign-off is never recorded for an example the person hasn't seen. Then the identity card from Phase 4a if `reviewer_email`/`reviewer_role` aren't saved yet; here **Don't sign anything yet** leaves every example written but unsigned and goes on to Phase 7 (not 4b). Then, per area, write the examples that ran back with their own `question` and `sql` (same SQL, so it is a sign-off, not a change; their tags are kept): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add-example "$ROOT" --area <area> --file "<artifacts_dir>/local/tmp/agami-keep-examples.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. The sign-off is recorded in `curation_log.jsonl`, not on the example. Failed ones are left as they are; say how many. |
 | Drop the failing ones | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" remove-example "$ROOT" --question "<area>/<question>" …` (one `--question` per failed item, `--signer`/`--role` when known). They are marked rejected and kept for audit, not deleted: say so. |
 | Review one by one | The one-by-one cards over every item, failed ones first; **Keep all remaining** on each card ends the review once the failures are dealt with. |
-| Show the full view | The full view below, then this card again. |
+| Add my own | [`shared/own-examples.md`](../../shared/own-examples.md), from its step 1; it checks each statement through `/agami-reconcile`, adds the ones that agree as examples signed as the person's, and asks about the ones that disagree. Its run is separate from the seeds, so nothing on this card is decided by it. Then this card again for the seeds. |
+| Mark them on a page | The full view below. |
 
-**One by one.** Ask up to 4 examples per card, one question each, header `Example 3/9` (at most 12 characters; past 9/99 use `Ex 12/40`). The question is the example's question and what it returned, *"Revenue by month this year: 12 rows, 2024-01 $41,200"* (or *"failed: <error>"*). **The SQL goes in the `Keep` option's `preview`**, as a metric's does on its sign-off card: the item's `sql`, laid out over lines with a short comment on each filter, then the first rows of `row_preview` under `row_headers` (or the `error` for a failed one), so the person checks the statement without asking for it ([question-cards rule 3a](../../shared/question-cards.md#3a-detail-goes-in-an-options-preview-not-the-question)). Options: **Keep** (the `add-example` sign-off above, for that one), **Drop** (`remove-example` for that one), **Keep all remaining** (keep this one and every remaining one that ran), and **Show the full view** (the page below; nothing is decided, and the same card is asked again after the URL; on a card with several questions, on the first question only). "Other" describes a fix in the person's words ("should only count paid orders"): rewrite that example's SQL, write it with `sm add-example` (same question, so it replaces), re-run its area with `sm seed-validate "$ROOT" --profile <profile> --area <area>`, and ask about it again showing the new result. A fix that touches a column or metric beyond this one example is 6a's: fix it everywhere, as 6a says. A question ("show me the SQL", "show me the rows") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). **An "Other" you can't act on is re-asked, never guessed**: an empty fix, or one naming a column the model doesn't have, is said back and you ask the same card again.
+**One by one.** Ask up to 4 examples per card, one question each, header `Example 3/9` (at most 12 characters; past 9/99 use `Ex 12/40`). The question is the example's question and what it returned, *"Revenue by month this year: 12 rows, 2024-01 $41,200"* (or *"failed: <error>"*). **The SQL goes in the `Keep` option's `preview`**, as a metric's does on its sign-off card: the item's `sql`, laid out over lines with a short comment on each filter, then the first rows of `row_preview` under `row_headers` (or the `error` for a failed one), so the person checks the statement without asking for it ([question-cards rule 3a](../../shared/question-cards.md#3a-detail-goes-in-an-options-preview-not-the-question)). Options: **Keep** (the `add-example` sign-off above, for that one), **Drop** (`remove-example` for that one), **Keep all remaining** (keep this one and every remaining one that ran), and **Mark them on a page** (the page below, on every question of the card; answers given on the card's other questions are applied first). "Other" describes a fix in the person's words ("should only count paid orders"): rewrite that example's SQL, write it with `sm add-example` (same question, so it replaces), re-run its area with `sm seed-validate "$ROOT" --profile <profile> --area <area>`, and ask about it again showing the new result. A fix that touches a column or metric beyond this one example is 6a's: fix it everywhere, as 6a says. A question ("show me the SQL", "show me the rows") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). **An "Other" you can't act on is re-asked, never guessed**: an empty fix, or one naming a column the model doesn't have, is said back and you ask the same card again.
 
 When every example has an answer, go to Phase 7.
 
-**Show the full view** (an option on the Examples and one-by-one cards, or asked for in words). The examples-validation page, with every result and its SQL. Render it from the items and serve it from localhost, giving the person the URL:
+**Show the full view** (an option on the Examples and one-by-one cards, labelled **Mark them on a page** there, or asked for in words). The examples-validation page, with every result and its SQL, which saves its own decisions ([question-cards rule 6a](../../shared/question-cards.md#6a-a-page-that-saves-its-decisions)): Keep, Reject (drop), Edit (a fixed SQL) or a note on each example, and a note for the whole model. When `reviewer_email` / `reviewer_role` aren't saved yet, the identity card from Phase 4a first: kept examples are signed as that saved identity, which the page shows. Render it from the items and serve it from localhost with the helper waiting for its save, giving the person the URL:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_examples_validation.py \
   --title "Seed examples · <profile>" --profile <profile> \
   --items-file "<artifacts_dir>/local/tmp/agami-examples-items.json" \
-  --read-only --out "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html" --minutes 30
+  --save-to-helper --artifacts-dir "<artifacts_dir>" \
+  --out "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html" \
+  --decisions "<artifacts_dir>/local/tmp/agami-page-<ts>.json" --minutes 30
 ```
 
-Run `serve_page.py` with `run_in_background` and read its first line, `{"url": …}`, for the URL to give the person.
+Run `serve_page.py` with `run_in_background` and wait as rule 6a says. Its `Page` card's options are **I've marked them on the page** and **Back to the cards**; the saved page tells the person to press the first, and **Back to the cards** reads the helper's output before stopping it, as rule 6a step 4 says.
 
 It takes the combined object or a single area's array; repeat `--items-file` to put several files on one page, labelling a single area's array with its area as `--items-file <area>=<path>` (an unlabelled one is refused there, since two areas can share a question; so is the same file twice). Each card shows its area.
 
-The page is read-only; decisions stay on the cards, so after the URL ask the card it was picked on again. A block pasted from an older, editable page is still accepted: `validate N` / `reject N` / `edit N` / `add example` / `note N` / `note all`. Apply each through the **packaged commands**, never by hand-rewriting `examples.yaml`. **`N` is the page's global example number (1..N across every area, assigned in render order).** `render_examples_validation.py` normalizes the items file to this same numbering, so resolve `N` → its example by reading that file back:
+**What the page saved.** The decisions file is `{"page": "examples", "profile", "decisions": [{"n", "area", "question", "action", "sql"?, "note"?}], "note_all"}`. Never read it by hand: check it against the items file the page was rendered from with
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_examples_decisions.py --decisions-file "<artifacts_dir>/local/tmp/agami-page-<ts>.json" \
+  --items-file "<artifacts_dir>/local/tmp/agami-examples-items.json" --expect-profile <profile> --out-dir "<artifacts_dir>/local/tmp"
+```
+
+Give it the same `--items-file` arguments, in the same order, that rendered the page (repeated, with their `<area>=` labels, when several files went on one page): it numbers the examples exactly as the renderer did, so every decision on the page finds its example.
+
+`{"ok": false, "error"}` (exit 2; another page or model, or a malformed file): say the error in one line, apply nothing, and ask the Examples card again. Otherwise `data` holds each `action` as the old page's block line by another name: `keep` is `validate N`, `drop` is `reject N`, `fix` (with its `sql`) is `edit N`, `note` is `note N`, and `note_all` is `note all`. Apply them as below, with the saved `reviewer_email` / `reviewer_role` as `--signer` / `--role`: `sm add-example --area <area> --file <data.files.keep[area]>` for the keeps, the same with `data.files.fix[area]` then `sm seed-validate --area <area>` for the fixes, one `sm remove-example --question "<area>/<question>"` per `data.drop` entry, and `data.notes` / `data.note_all` as the notes below. Each of `refused` (a decision whose `n`, `question` or `area` is not that item's, a keep on an example that failed, a malformed one) is said back and not applied. **A keep is a sign-off**: with no saved `reviewer_email` / `reviewer_role` the page refuses to save one, and one that arrives anyway is not applied; say so. Then say back in one line what changed, from the commands' output (*"Kept 9 examples, dropped 2, fixed 1: it now returns 12 rows."*), show a fixed example's new result as one-by-one does, delete the decisions file, and ask the Examples card again over the examples still undecided, or go to Phase 7 when none are. A block pasted from an older page is still accepted: `validate N` / `reject N` / `edit N` / `add example` / `note N` / `note all`. Apply each through the **packaged commands**, never by hand-rewriting `examples.yaml`. **`N` is the page's global example number (1..N across every area, assigned in render order).** `render_examples_validation.py` normalizes the items file to this same numbering, so resolve `N` → its example by reading that file back:
 - **`validate N`** → the example is a trusted anchor; if the block carries a `by <email>` clause, record the sign-off via `sm add-example` (re-write the same example with `--signer`/`--role`). It reports `applied` (one line per example re-written).
 - **`reject N`** → **`sm remove-example "$ROOT" --area <area> --question "<that example's exact question>"`** (`--signer`/`--role` to record who). To reject several across areas in one call, leave out `--area` and name each as `--question "<area>/<question>"` (looked up in that area only); a bare question is matched in whichever area has it, and one that more than one area has is refused (`refused: ambiguous_question`, with the areas) and nothing is rejected. That call adds `areas` and `totals` to the output. It marks the example `status: rejected`: kept in `examples.yaml` for audit (not deleted), dropped from the runtime ranker. Tell the person it's rejected and kept, not deleted.
 - **`edit N`** that fixes *that example's* SQL → re-write it with `sm add-example` (dedups by question, so it replaces). Re-run the new SQL to capture its number.
@@ -1377,6 +1573,8 @@ agami-connect just ran. Here's what we found:
   that use them and self-approve as you query.
 ```
 (Omit any zero line. The closing two lines are mandatory — they tell the user "you can ship now; the tail is optional.")
+
+When 2g ran, one line from its answers: *"<k> answers recorded as yours; <n> questions left for the next reload."* (leave out the second clause when none are left).
 
 When 2f drafted the company description, show it too, in one line: *"Company (draft): <description>. Correct it in /agami-model."* After the block, state the datasource's one-line description from `datasource.yaml` — *"Agents will pick this datasource by: "<description>" — edit it any time with `sm set-description`."* If you generated it in 2f, say it is a draft. If it is empty (they skipped 1.4 C), say so in one line: an organization with several datasources routes questions by this line.
 

@@ -46,6 +46,13 @@ SYS_DICTIONARY = [
 ]
 
 
+def _CHECK_ROW(matched: int) -> dict:
+    """One join check's row: five rows read, `matched` of them finding their partner."""
+    return {"probe": "0", "rows_read": "5", "rows_keyed": "5", "rows_matched": str(matched), "vals": "5",
+            "vals_matched": str(matched), "to_keys": str(matched), "to_rows": str(matched),
+            "to_rows_matched": str(matched)}
+
+
 # --- pure transforms --------------------------------------------------------
 
 def test_choice_field_ops_groups_and_skips_blanks():
@@ -56,6 +63,41 @@ def test_choice_field_ops_groups_and_skips_blanks():
     assert by[("incident", "state")] == {"1": "New"}          # blank-value row dropped
     assert ("incident", "note") not in by                     # blank-label column → no op
     assert all(o["op"] == "edit" and o["field"] == "choice_field" for o in ops)
+
+
+_CONTACT = [
+    {"name": "incident", "element": "contact_type", "value": "email", "label": "Email"},
+    {"name": "incident", "element": "contact_type", "value": "phone", "label": "Phone"},
+    {"name": "incident", "element": "contact_type", "value": "walk-in", "label": "Walk-in"},
+]
+
+
+def _contact_ops(held):
+    ops = M.choice_field_ops(_CONTACT, table_col="name", column_col="element", value_col="value",
+                             label_col="label")
+    return M.key_choices_on_held_values(ops, held or {})
+
+
+def test_choice_labels_key_on_the_values_the_column_holds_ignoring_case():
+    """#678: an export that wrote `EMAIL` (or the label `Email`) where the platform stores `email`
+    got a list keyed `email`, which no row holds. The column's own values now key the labels,
+    matched to a choice's value or label ignoring case; one nothing matches stays unlabelled."""
+    (op,) = _contact_ops({("incident", "contact_type"): ["EMAIL", "Phone", "Self-service"]})
+    assert op["value"] == {"EMAIL": "Email", "Phone": "Phone", "Self-service": ""}
+    # another column's op, and a column with nothing held, pass through untouched
+    other = {"op": "edit", "kind": "table", "name": "incident", "column": "state",
+             "field": "description", "value": "x"}
+    assert M.key_choices_on_held_values([other], {("incident", "state"): ["1"]}) == [other]
+
+
+def test_choice_labels_keep_the_choice_values_when_no_held_value_matches():
+    (op,) = _contact_ops({("incident", "contact_type"): ["x1", "x2"]})
+    assert op["value"] == {"email": "Email", "phone": "Phone", "walk-in": "Walk-in"}
+
+
+def test_choice_labels_without_held_values_are_unchanged():
+    (op,) = _contact_ops(None)
+    assert op["value"] == {"email": "Email", "phone": "Phone", "walk-in": "Walk-in"}
 
 
 def test_choice_field_ops_valid_filter_restricts_to_model_columns():
@@ -107,13 +149,9 @@ def test_descriptions_by_element_propagates_parent_declarations():
     assert by_el == {"priority": "Priority", "business_impact": "Business impact"}  # `state` dropped (conflict)
 
 
-def test_detect_preset_and_usable_sources():
+def test_detect_preset():
     assert M.detect_preset(["incident", "sys_choice", "sys_user"]) == "servicenow"
     assert M.detect_preset(["orders", "customers"]) is None
-    # only sys_choice present → only the choice role is usable
-    usable = M.usable_sources("servicenow", ["incident", "sys_choice"])
-    assert set(usable) == {"choice"}
-    assert M.usable_sources("servicenow", ["incident", "sys_dictionary"]).keys() == {"dictionary"}
 
 
 # --- integration: ops actually apply, metadata provenance persists ----------
@@ -260,15 +298,15 @@ def test_cmd_enrich_metadata_applies_from_canned_db(tmp_path, monkeypatch):
     _servicenow_model(tmp_path)
     from semantic_model import introspect as INTRO
 
-    def fake_factory(profile, python=None):
+    def fake_factory(profile, python=None, **kw):
         def run(sql):
             s = sql.lower()
             if "sys_choice" in s:
                 return SYS_CHOICE
             if "sys_dictionary" in s:
                 return SYS_DICTIONARY
-            if "matched" in s:                 # the value-overlap verification probe
-                return [{"matched": "5"}]
+            if "rows_matched" in s:            # the join check on the data
+                return [_CHECK_ROW(5)]
             return []
         return run
 
@@ -294,6 +332,31 @@ def test_cmd_enrich_metadata_applies_from_canned_db(tmp_path, monkeypatch):
     assert edge.signed_off_role == "system"
 
 
+
+def test_enrich_metadata_keys_labels_on_the_values_the_data_holds(tmp_path, monkeypatch):
+    """#678 end to end: introspection listed the column's data values (`EMAIL`, `PHONE`); the
+    sys_choice labels land on those keys rather than replacing them with the platform's `email`."""
+    _servicenow_model(tmp_path)
+    path = tmp_path / "subject_areas" / "itsm" / "tables" / "incident.yaml"
+    doc = yaml.safe_load(path.read_text())
+    doc["columns"].append({"name": "contact_type", "type": "string",
+                           "choice_field": {"EMAIL": "", "PHONE": ""}})
+    path.write_text(yaml.safe_dump(doc))
+    from semantic_model import introspect as INTRO
+
+    monkeypatch.setattr(INTRO, "make_execute_sql_runner", lambda profile, python=None, **kw: (
+        lambda sql: _CONTACT if "sys_choice" in sql.lower() else []))
+    from semantic_model import cli
+
+    ns = cli.build_parser().parse_args(
+        ["enrich-metadata", str(tmp_path), "--profile", "servicenow", "--db-type", "redshift"])
+    assert ns.func(ns) == 0
+    incident = next(t for sa in loader.load_datasource(tmp_path).subject_areas
+                    for t in sa.tables_defined if t.name == "incident")
+    contact = next(c for c in incident.columns if c.name == "contact_type")
+    assert contact.choice_field == {"EMAIL": "Email", "PHONE": "Phone"}
+
+
 def test_enrich_metadata_reports_a_description_whose_provenance_it_replaced(tmp_path, monkeypatch, capsys):
     _servicenow_model(tmp_path)
     from semantic_model import curate
@@ -301,7 +364,7 @@ def test_enrich_metadata_reports_a_description_whose_provenance_it_replaced(tmp_
 
     curate.apply(tmp_path, [{"op": "edit", "kind": "table", "name": "incident", "column": "severity",
                              "field": "description", "value": "How bad it is", "source": "ai"}])
-    monkeypatch.setattr(INTRO, "make_execute_sql_runner", lambda profile, python=None: (
+    monkeypatch.setattr(INTRO, "make_execute_sql_runner", lambda profile, python=None, **kw: (
         lambda sql: SYS_DICTIONARY if "sys_dictionary" in sql.lower() else []))
     from semantic_model import cli
 
@@ -323,8 +386,10 @@ def test_enrich_metadata_with_no_preset_is_nothing_to_do(tmp_path, monkeypatch, 
         (itsm / "tables" / f"{meta}.yaml").unlink()
     from semantic_model import introspect as INTRO
 
-    def no_db(profile, python=None):
-        raise AssertionError("nothing to do must not touch the database")
+    ran: list[str] = []
+
+    def no_db(profile, python=None, **kw):
+        return lambda sql: ran.append(sql) or []
 
     monkeypatch.setattr(INTRO, "make_execute_sql_runner", no_db)
     from semantic_model import cli
@@ -333,6 +398,7 @@ def test_enrich_metadata_with_no_preset_is_nothing_to_do(tmp_path, monkeypatch, 
     assert ns.func(ns) == 0
     out = capsys.readouterr().out
     assert '"enriched": false' in out and "nothing to do" in out
+    assert ran == []   # a model with no platform's shape costs no query, not even the catalog
 
 
 def test_enrich_metadata_explicit_preset_without_sources_fails(tmp_path, monkeypatch):
@@ -357,15 +423,15 @@ def test_enrich_metadata_drops_unverified_preset_reference(tmp_path, monkeypatch
     _servicenow_model(tmp_path)
     from semantic_model import introspect as INTRO
 
-    def fake_factory(profile, python=None):
+    def fake_factory(profile, python=None, **kw):
         def run(sql):
             s = sql.lower()
             if "sys_choice" in s:
                 return SYS_CHOICE
             if "sys_dictionary" in s:
                 return SYS_DICTIONARY
-            if "matched" in s:
-                return [{"matched": "0"}]          # NO overlap
+            if "rows_matched" in s:
+                return [_CHECK_ROW(0)]             # NO overlap
             return []
         return run
 
@@ -378,63 +444,139 @@ def test_enrich_metadata_drops_unverified_preset_reference(tmp_path, monkeypatch
     assert not [r for r in org.cross_subject_area_relationships if r.to_table == "sys_user"]
 
 
-def test_verified_references_unverified_when_table_too_big():
-    # the #7 guard: a FROM table above the row threshold must NOT be overlap-scanned — the ref is
-    # kept UNVERIFIED (inferred/unreviewed), not dropped, not probed.
-    from semantic_model import cli
-    from semantic_model import dialects as D
-    from semantic_model import introspect as INTRO
-    from semantic_model import models as mm
-    big = mm.PerformanceHints(estimated_row_count=INTRO._OVERLAP_PROBE_MAX_ROWS + 1)
-
-    def tbl(name, cols, perf=None):
-        return mm.Table(name=name, schema="public", storage_connection="c", grain=["sys_id"],
-                        performance_hints=perf,
-                        columns=[mm.Column(name="sys_id", type="integer", primary_key=True)]
-                                + [mm.Column(name=c, type="integer") for c in cols])
-    itsm = mm.SubjectArea(name="itsm", description="d", tables_defined=[tbl("incident", ["caller_id"], big)])
-    sysa = mm.SubjectArea(name="sys", description="d", tables_defined=[tbl("sys_user", [])])
-    org = mm.Datasource(datasource="o", version=1, subject_areas=[itsm, sysa])
-    probed = {"n": 0}
-
-    def runner(sql):
-        if "matched" in sql:
-            probed["n"] += 1
-            return [{"matched": "5"}]
-        return []
-    intra, cross, skipped, unverified = cli._build_verified_references(
-        org, runner, D.get_dialect("redshift"), {"caller_id": "sys_user"})
-    assert probed["n"] == 0          # too big → not scanned
-    assert unverified == 1 and len(cross) == 1
-    assert cross[0]["review_state"] == "unreviewed" and cross[0]["confidence"] == "inferred"
-
-
-def test_a_preset_only_reference_is_unreviewed_even_when_values_overlap():
-    # #509: matching values are evidence, not a declaration. Only a reference this database's own
-    # dictionary declares is engine-approved; one only the preset assumes waits for review.
-    from semantic_model import cli
-    from semantic_model import dialects as D
+def _two_area_org(perf=None):
     from semantic_model import models as mm
 
-    def tbl(name, cols):
+    def tbl(name, cols, hints=None):
         return mm.Table(name=name, schema="public", storage_connection="c", grain=["sys_id"],
+                        performance_hints=hints,
                         columns=[mm.Column(name="sys_id", type="integer", primary_key=True)]
                                 + [mm.Column(name=c, type="integer") for c in cols])
-    org = mm.Datasource(datasource="o", version=1, subject_areas=[
+    return mm.Datasource(datasource="o", version=1, subject_areas=[
         mm.SubjectArea(name="itsm", description="d",
-                       tables_defined=[tbl("incident", ["caller_id", "assignment_group"])]),
+                       tables_defined=[tbl("incident", ["caller_id", "assignment_group"], perf)]),
         mm.SubjectArea(name="sys", description="d",
-                       tables_defined=[tbl("sys_user", []), tbl("sys_user_group", [])])])
+                       tables_defined=[tbl("sys_user", [], perf), tbl("sys_user_group", [], perf)])])
 
-    def runner(sql):
-        return [{"matched": "5"}] if "matched" in sql else []
-    _, cross, _, unverified = cli._build_verified_references(
-        org, runner, D.get_dialect("redshift"),
-        {"caller_id": "sys_user", "assignment_group": "sys_user_group"}, declared={"caller_id"})
-    by_col = {r["from_column"]: r for r in cross}
-    assert by_col["caller_id"]["review_state"] == "approved"
-    assert by_col["caller_id"]["signed_off_role"] == "system"
+
+DECLARES_CALLER = [{"name": "incident", "element": "caller_id", "internal_type": "reference", "reference": "sys_user"}]
+
+
+def test_a_declared_reference_that_cannot_be_checked_goes_to_review_unprobed():
+    # an engine that can't bound a read of a table of unknown size: nothing is probed, nothing written
+    from semantic_model import dialects as D
+    from semantic_model import platform_joins as PJ
+    probed = []
+    found = PJ.find_reference_joins(_two_area_org(), lambda sql: probed.append(sql) or [], D.get_dialect("mysql"),
+                                    "servicenow", dictionary_rows=DECLARES_CALLER,
+                                    dictionary_cfg=M.PRESETS["servicenow"]["dictionary"], parents={})
+    assert probed == [] and found.written == []
+    assert [c["review_reason"] for c in found.review] == [
+        "declared by the dictionary, but could not be checked on the data"]
+
+
+def test_a_preset_only_reference_is_written_unreviewed_when_values_overlap():
+    # #509: matching values are evidence, not a declaration. Only a reference this database's own
+    # dictionary declares is engine-approved; one only the preset assumes is usable but unreviewed.
+    from semantic_model import dialects as D
+    from semantic_model import platform_joins as PJ
+    found = PJ.find_reference_joins(_two_area_org(), lambda sql: [_CHECK_ROW(5)], D.get_dialect("redshift"),
+                                    "servicenow", dictionary_rows=DECLARES_CALLER,
+                                    dictionary_cfg=M.PRESETS["servicenow"]["dictionary"], parents={})
+    by_col = {s["from_column"]: s for s in found.written}
+    assert (by_col["caller_id"]["review_state"], by_col["caller_id"]["signed_off_role"]) == ("approved", "system")
     preset_only = by_col["assignment_group"]
     assert (preset_only["review_state"], preset_only["confidence"]) == ("unreviewed", "inferred")
-    assert "signed_off_by" not in preset_only and "not declared" in preset_only["description"]
-    assert unverified == 0   # it was verified — it is unreviewed because it is undeclared
+    assert "signed_off_by" not in preset_only and "found by preset" in preset_only["description"]
+    assert found.review == []
+
+
+def test_the_check_budget_goes_to_declared_pairs_first_and_says_why_others_wait(monkeypatch):
+    from semantic_model import dialects as D
+    from semantic_model import platform_joins as PJ
+    monkeypatch.setattr(PJ, "REFERENCE_PROBE_CAP", 1)
+    found = PJ.find_reference_joins(_two_area_org(), lambda sql: [_CHECK_ROW(5)], D.get_dialect("redshift"),
+                                    "servicenow", dictionary_rows=DECLARES_CALLER,
+                                    dictionary_cfg=M.PRESETS["servicenow"]["dictionary"], parents={})
+    assert [s["from_column"] for s in found.written] == ["caller_id"]
+    assert found.notes == ["reference candidates: 1 not checked on the data (the cap of 1 checks was reached)"]
+    unsized = PJ.find_reference_joins(_two_area_org(), lambda sql: [], D.get_dialect("mysql"), "servicenow",
+                                      dictionary_rows=DECLARES_CALLER,
+                                      dictionary_cfg=M.PRESETS["servicenow"]["dictionary"], parents={})
+    assert unsized.notes == ["reference candidates: 2 not checked on the data (a table of unknown size)"]
+
+
+def test_a_value_scan_spreads_a_binding_cap_across_link_columns():
+    from semantic_model import models as mm
+    from semantic_model import platform_joins as PJ
+
+    def t(name):
+        return mm.Table(name=name, schema="s", storage_connection="c", grain=["sys_id"],
+                        columns=[mm.Column(name="sys_id", type="string", primary_key=True)])
+    a, b = t("a"), t("b")
+    c1, c2 = mm.Column(name="x_sys_id", type="string"), mm.Column(name="y_sys_id", type="string")
+    order = [(p.c.name, p.u.name) for p in PJ._round_robin([[PJ._Pair(a, c1, u, "values", False) for u in (a, b)],
+                                                          [PJ._Pair(a, c2, u, "values", False) for u in (a, b)]])]
+    assert order == [("x_sys_id", "a"), ("y_sys_id", "a"), ("x_sys_id", "b"), ("y_sys_id", "b")]
+
+
+def test_the_columns_a_join_was_written_from_come_from_what_curate_applied():
+    from semantic_model import cli
+    assert cli._applied_column("rel itsm/incident.caller_id→sys_user") == ("incident", "caller_id")
+    assert cli._applied_column("xrel Incident.Parent_Sys_Id→task") == ("incident", "parent_sys_id")
+
+
+def test_enrich_metadata_sizes_each_read_from_the_source_count(tmp_path, monkeypatch, capsys):
+    """Each metadata read runs under a cap sized from the source's own COUNT(*), not the caller's;
+    a source past the ceiling is refused with its count and never read."""
+    _servicenow_model(tmp_path)
+    from semantic_model import cli
+    from semantic_model import introspect as INTRO
+
+    caps: list = []
+    reads: list[str] = []
+
+    def factory(count):
+        def make(profile, python=None, max_rows=None, **kw):
+            caps.append(max_rows)
+
+            def run(sql):
+                s = sql.lower()
+                if "count(*)" in s:
+                    return [{"N": count}]
+                if "sys_choice" in s or "sys_dictionary" in s:
+                    reads.append(s)
+                    return SYS_CHOICE if "sys_choice" in s else SYS_DICTIONARY
+                return []
+            return run
+        return make
+
+    args = ["enrich-metadata", str(tmp_path), "--profile", "servicenow", "--db-type", "redshift",
+            "--skip-references"]
+    monkeypatch.setattr(INTRO, "make_execute_sql_runner", factory(213_960))
+    ns = cli.build_parser().parse_args(args)
+    assert ns.func(ns) == 0
+    # the default runner, the catalog listing's at the ceiling, then one sized from each source's count
+    assert caps == [None, 5_000_000] + [213_960 + 1_000 + 2_139] * 2, caps
+    assert len(reads) == 2
+
+    capsys.readouterr()
+    caps.clear()
+    reads.clear()
+    monkeypatch.setattr(INTRO, "make_execute_sql_runner", factory(6_000_000))
+    ns = cli.build_parser().parse_args(args)
+    assert ns.func(ns) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert "6,000,000 rows" in out["error"] and "5,000,000" in out["error"], out
+    assert reads == [] and caps == [None, 5_000_000]
+
+
+def test_an_unread_count_leaves_the_metadata_read_under_the_deployment_cap():
+    from semantic_model import cli
+
+    def refused(sql):
+        raise RuntimeError("count not allowed")
+
+    assert cli._metadata_read_cap(refused, "dict") is None
+    assert cli._metadata_read_cap(lambda sql: [], "dict") is None
+    assert cli._metadata_read_cap(lambda sql: [{"n": 10}], "dict") == 1_010

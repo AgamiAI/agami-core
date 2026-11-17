@@ -34,10 +34,12 @@ from typing import Any, Iterator, Optional
 
 import yaml
 
+from . import pii
 from . import validator as V
 from .loader import _read_yaml as _load
 from .loader import load_datasource
 from .models import (
+    Ambiguity,
     CrossSubjectAreaRelationship,
     Datasource,
     Entity,
@@ -489,7 +491,9 @@ class ApplyResult:
     provenance_changed: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
-        return {"applied": self.applied, "skipped": self.skipped, "errors": self.errors,
+        # `applied_count` matches `sm describe-file`, so one key reads both commands (#678).
+        return {"applied": self.applied, "applied_count": len(self.applied),
+                "skipped": self.skipped, "errors": self.errors,
                 "validated": self.validated, "committed": self.committed,
                 **({"commit_note": self.commit_note} if self.commit_note else {}),
                 **({"stale": self.stale} if self.stale else {}),
@@ -567,20 +571,40 @@ def set_datasource_description(root: str | Path, description: str) -> "ApplyResu
     `datasource.md` narrative, which is context read after the datasource is chosen. Validated and
     committed like `set_key_terminology`, with the prior file restored on a validation failure. Only
     the first line is kept and it is stripped: a routing label that spans paragraphs stops being one."""
+    line = (description or "").strip().splitlines()[0].strip() if (description or "").strip() else ""
+    if not line:
+        res = ApplyResult()
+        res.errors.append("description is empty")
+        return res
+    return _set_datasource_field(root, "description", line, "datasource description")
+
+
+def set_fiscal_year_start(root: str | Path, month: int) -> "ApplyResult":
+    """Record the month the fiscal year starts in, as a person gave it (ACE-182), January included:
+    the build never writes one, and `open_questions` asks until this has run."""
+    if not isinstance(month, int) or not 1 <= month <= 12:
+        res = ApplyResult()
+        res.errors.append(f"fiscal_year_start_month must be a month from 1 to 12, not {month!r}")
+        return res
+    return _set_datasource_field(root, "fiscal_year_start_month", month, "fiscal year start",
+                                 also={"fiscal_year_start_confirmed": True})
+
+
+def _set_datasource_field(root: str | Path, field: str, value: Any, msg: str, *,
+                          also: Optional[dict] = None) -> "ApplyResult":
+    """Write one datasource.yaml field (and `also`, alongside it), validated and committed, with the
+    prior file restored on a validation failure."""
     root = Path(root)
     res = ApplyResult()
     dsp = root / "datasource.yaml"
     if not dsp.exists():
         res.errors.append(f"no datasource.yaml at {dsp}")
         return res
-    line = (description or "").strip().splitlines()[0].strip() if (description or "").strip() else ""
-    if not line:
-        res.errors.append("description is empty")
-        return res
     prior = dsp.read_text(encoding="utf-8")
     odoc = _load(dsp) or {}
-    before = odoc.get("description")
-    odoc["description"] = line
+    before = odoc.get(field)
+    odoc[field] = value
+    odoc.update(also or {})
     _dump(dsp, odoc)
     try:
         vres = V.validate(load_datasource(root, include_rejected=True), cache=_VALIDATION_CACHE)
@@ -593,10 +617,10 @@ def set_datasource_description(root: str | Path, description: str) -> "ApplyResu
         res.errors.append(f"validation failed to run: {e}")
         dsp.write_text(prior, encoding="utf-8")
         return res
-    res.applied = ["description"]
+    res.applied = [field]
     res.committed, res.commit_note = _record(
-        root, "datasource description",
-        [{"op": "edit", "kind": "datasource", "field": "description", "value": line, "before": before}],
+        root, msg,
+        [{"op": "edit", "kind": "datasource", "field": field, "value": value, "before": before}],
         None, None)
     return res
 
@@ -611,6 +635,8 @@ _VALID_OPS = {"approve", "reject", "exclude", "include", "edit", "move", "add"}
 # move == {op:move, kind:table, name, area, to_area}: the table changes owning area (see _move_table)
 # add == {op:add, kind:relationship, from_table, to_table, from_column + to_column | on, relationship}:
 #        a new join, written unreviewed where its two tables' areas say (see _add_join)
+# add == {op:add, kind:ambiguity, name, when, options, applies_to, default?, behaviour?}: a declared
+#        ambiguity a person confirmed, written to datasource.yaml under their sign-off (see _add_ambiguity)
 # reject example == {op:reject, kind:example, area, question}: as remove_examples (see _reject_example)
 
 # The `area` that names the datasource-level lists (cross_subject_area_metrics / _entities) rather
@@ -636,7 +662,7 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
                 op = {**op, "area": _resolve_area(root, op)}
             if op.get("kind") == "example" and not op.get("name"):
                 op = {**op, "name": (op.get("question") or "").strip() or "?"}   # for the label and the log
-            if op.get("op") == "add" and not op.get("name"):
+            if op.get("op") == "add" and op.get("kind") == "relationship" and not op.get("name"):
                 op = {**op, "name": f"{op.get('from_table') or '?'}->{op.get('to_table') or '?'}"}
             keys, before, staled, resolved = _apply_one(root, op, signer, role, backups, res.notes)
             if op.get("op") == "add" and keys[0][1][1] != CROSS_AREA:
@@ -778,9 +804,12 @@ def _apply_one(root: Path, op: dict, signer, role,
         carried, joins, keys = _move_table(root, op, area, backups, notes if notes is not None else [])
         return keys, None, False, {"carried": carried, "joins": joins}
 
+    if action == "add" and kind == "ambiguity":
+        return _add_ambiguity(root, op, signer, role, backups)
     if action == "add":
         if kind != "relationship":
-            raise ValueError("add applies to joins only (kind: relationship); add metrics with `sm add`")
+            raise ValueError("add applies to joins and ambiguities only (kind: relationship or "
+                             "ambiguity); add metrics with `sm add`")
         place, entry = _add_join(root, op, backups)
         return [(None, _key("relationship", place, entry), None)], None, False, {}
 
@@ -872,6 +901,59 @@ def _apply_one(root: Path, op: dict, signer, role,
         return keys, before, staled, _resolved_area(op, place)
 
     raise ValueError(f"unknown kind {kind!r}")
+
+
+def _add_ambiguity(root: Path, op: dict, signer, role,
+                   backups: "dict[Path, Optional[str]]") -> tuple[list, Any, bool, dict]:
+    """Declare an ambiguity a person confirmed (#486): `sm open-questions` proposes the entry, and the
+    person picks the usual reading (`default`, an option's label) and whether the agent asks or
+    answers with it and offers the others (`behaviour`; answer_and_offer when a default is picked,
+    ask otherwise). Never written without a person's sign-off: the curation log records who said it
+    and when. An entry of the same name already declared is left as it is."""
+    if not signer or not role or role == "system":
+        raise ValueError("an ambiguity is a person's choice: sign it off with --signer and --role")
+    configured = _configured_reviewer(root)
+    if configured and signer.strip().lower() != configured.strip().lower():
+        raise ValueError(f"signer {signer!r} is not the reviewer_email this folder's .config "
+                         "records; an answer is signed by the person who gave it")
+    for k in ("applies_to", "columns", "column_groups", "metrics"):
+        v = op.get(k)
+        if v is not None and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+            raise ValueError(f"{k} must be a list of names")
+    if not str(op.get("when") or "").strip():
+        raise ValueError("an ambiguity needs `when`: the kind of question it is about")
+    options = [{k: v for k, v in dict(o).items() if k != "default"} for o in op.get("options") or []]
+    default = op.get("default")
+    if default is not None and default not in [o.get("label") for o in options]:
+        raise ValueError(f"default {default!r} is not one of the options "
+                         f"({', '.join(str(o.get('label')) for o in options)})")
+    for o in options:
+        if default is not None and o.get("label") == default:
+            o["default"] = True
+    entry = {"name": op["name"], "when": op["when"], "options": options,
+             "behaviour": op.get("behaviour") or ("answer_and_offer" if default is not None else "ask")}
+    entry.update({k: list(op[k]) for k in ("applies_to", "columns", "column_groups", "metrics") if op.get(k)})
+    Ambiguity.model_validate(entry)
+    path = root / "datasource.yaml"
+    _snapshot(backups, path)
+    doc = _load(path) or {}
+    declared = doc.get("ambiguities") or []
+    if any(a.get("name") == entry["name"] for a in declared):
+        raise ValueError(f"an ambiguity named {entry['name']!r} is already declared")
+    doc["ambiguities"] = [*declared, entry]
+    _dump(path, doc)
+    return [(None, ("ambiguity", CROSS_AREA, entry["name"]), None)], None, False, {}
+
+
+def _configured_reviewer(root: Path) -> Optional[str]:
+    """The `reviewer_email` in `<artifacts_dir>/local/.config`, the identity the person typed once for
+    sign-offs, or None when there is none to hold a signer to."""
+    try:
+        cfg = json.loads((root.parent / "local" / ".config").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    email = cfg.get("reviewer_email") if isinstance(cfg, dict) else None
+    return email if isinstance(email, str) and email.strip() else None
 
 
 def _apply_placeholder(root: Path, area: str, op: dict, new_state: Optional[str], signer, role,
@@ -1974,6 +2056,12 @@ def _description_source_of(table_doc: dict, column: Optional[str]) -> Optional[s
 def _set_column_field(table_doc: dict, col_name: str, op: dict, new_state, signer, role) -> Any:
     for c in table_doc.get("columns", []):
         if c.get("name") == col_name:
+            # Every list reaches the model here (enrich-metadata, the page, the cards), so a list of
+            # people is refused here, whatever the column's flags say.
+            if (op.get("op") == "edit" and op.get("field") == "choice_field" and op.get("value")
+                    and pii.value_list_blocked(col_name, op["value"], sensitive=bool(c.get("sensitive")),
+                                               caveats=c.get("caveats") or ())):
+                raise ValueError(f"no value list on {col_name}: its values would be personal data in the model")
             return _set_trust(c, op, new_state, signer, role, desc_source=True)  # column desc has provenance
     raise ValueError(f"column {col_name} not found")
 
@@ -2382,9 +2470,13 @@ def remove_examples(root: str | Path, area: str, questions: list[str],
         return res
     present = {(e.get("question") or "").strip() for e in existing}
     # the whole question: two that open alike must stay tellable apart (#550)
-    res.applied += [f"example (rejected) {area}/{q}" for q in _mark_examples_rejected(existing, wanted)]
+    changed = _mark_examples_rejected(existing, wanted)
+    res.applied += [f"example (rejected) {area}/{q}" for q in changed]
     for missing in sorted(wanted - present):
-        res.skipped.append({"item": missing, "reason": "no example with that question"})
+        res.skipped.append({"item": missing, "reason": f"no example with that question in area {area!r}"})
+    # Already rejected: nothing changed, and saying nothing read as success for the wrong item.
+    for done in sorted(wanted & present - {q.strip() for q in changed}):
+        res.skipped.append({"item": done, "reason": f"already rejected in area {area!r}; nothing changed"})
     if not res.applied:
         return res
     path = root / "prompt_examples" / area / "examples.yaml"

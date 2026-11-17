@@ -8,7 +8,9 @@ has no way to ask for it, so what the tool accepts and refuses is unchanged.
 
 from __future__ import annotations
 
+import inspect
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -25,6 +27,7 @@ if str(PKG_SRC) not in sys.path:
 
 import execute_sql  # noqa: E402
 import guardrail  # noqa: E402
+import sql_guard  # noqa: E402
 import tools  # noqa: E402
 from semantic_model import dialects as D  # noqa: E402
 from semantic_model import introspect as INTRO  # noqa: E402
@@ -179,6 +182,40 @@ def test_pg_get_constraintdef_runs_only_as_agami_s_own_catalog_query(model):
             assert not executor.seen
 
 
+BACKSLASH_REPRO = (
+    r"SELECT o.id FROM orders o WHERE o.id::text = 'a\' AND o.id::text = '; "
+    r"INSERT INTO orders SELECT o2.id FROM orders o2; --'"
+)
+
+
+@pytest.mark.parametrize("kw", [{}, {"no_safety": True}, {"no_safety": True, "build_profile": True}])
+def test_a_backslash_escaped_quote_never_reaches_the_database(model, kw):
+    """The read-only gate sits above `no_safety`, so the refusal holds on every flag combination,
+    and the executor is never called."""
+    env, executor = _run(BACKSLASH_REPRO, **kw)
+    assert env.status == "refused" and env.refusal.rule == guardrail.RULE_READ_ONLY
+    assert not executor.seen
+    # The MCP tool's fail-fast pre-check is the same gate.
+    assert tools.check_read_only(BACKSLASH_REPRO).rule == guardrail.RULE_READ_ONLY
+
+
+def test_a_catalog_query_carrying_a_backslash_is_never_agami_s_own():
+    """The fingerprint ignores literal values, so a backslash that could move a literal's end must
+    keep a statement off the allow-list. An even run passes the read-only gate, which is exactly
+    why the matcher needs its own check."""
+    assert execute_sql._builtin_catalog_query(D.PostgreSQL().sql_constraint_definitions("public"))
+    assert not execute_sql._builtin_catalog_query(D.PostgreSQL().sql_constraint_definitions("a\\\\"))
+    smuggled = D.PostgreSQL().sql_constraint_definitions("a\\' , version() --")
+    assert not execute_sql._builtin_catalog_query(smuggled)
+
+
+@pytest.mark.parametrize("schema", ["a\\' , version() AS v --", "a\\\\"])
+def test_a_catalog_query_with_a_backslash_is_refused_end_to_end(model, schema):
+    env, executor = _run(D.PostgreSQL().sql_constraint_definitions(schema),
+                         no_safety=True, build_profile=True)
+    assert env.status == "refused" and not executor.seen
+
+
 def test_the_built_in_list_failing_to_load_keeps_the_gate_shut(model, monkeypatch):
     monkeypatch.setattr(D, "catalog_function_queries", lambda: 1 / 0)
     env, _ = _run(D.PostgreSQL().sql_constraint_definitions("public"), build_profile=True)
@@ -240,7 +277,8 @@ def test_the_mcp_tool_cannot_ask_for_the_build_profile():
 
 
 @pytest.mark.parametrize("path", ["forked", "in_process"])
-@pytest.mark.parametrize("sql", [INFO_SCHEMA, JSONB_EACH, D.PostgreSQL().sql_constraint_definitions("public")])
+@pytest.mark.parametrize("sql", [INFO_SCHEMA, JSONB_EACH, D.PostgreSQL().sql_constraint_definitions("public"),
+                                 D.Redshift().sql_schemas()])
 def test_the_mcp_tool_refuses_profiling_reads_as_it_always_did(model, path, sql):
     """The tool's answer to these is the one it gave before #523, whatever the call carries."""
     args = {"sql": sql, "datasource": PROFILE, "build_profile": True, "build-profile": True}
@@ -855,3 +893,178 @@ def test_duckdb_s_columns_pattern_is_refused_as_a_star_off_the_build_profile(rea
         res = _on_engine(sql, build_profile=False)
         assert res.status == "refused" and res.refusal.rule == guardrail.RULE_SELECT_STAR, sql
     assert _on_engine("SELECT o.id, o.status FROM orders o", build_profile=False).status == "ok"
+
+
+# --- every built-in catalog read passes the gate (#668) -----------------------------------------
+
+REDSHIFT_SCHEMAS = D.Redshift().sql_schemas()
+
+
+def _catalog_reads(dialect: D.Dialect) -> dict[str, str]:
+    """Every built-in catalog statement `dialect` renders, by method name, with stand-in names."""
+    stand_in = {"schemas": ["sales", "ops"], "schema": "sales", "table": "orders", "cap": 5_000_000}
+    out = {}
+    for name, method in inspect.getmembers(dialect, inspect.ismethod):
+        if name.startswith("sql_"):
+            params = inspect.signature(method).parameters
+            sql = method(*(stand_in.get(p, "x") for p in params))
+            if sql:
+                out[name] = sql
+    return out
+
+
+def test_every_built_in_catalog_read_the_recon_gate_refuses_is_on_the_build_allow_list():
+    """The drift test: a dialect change that makes one of agami's own catalog reads call a function
+    the recon gate refuses must put it on the list, or the build sees an empty catalog (#668)."""
+    allowed = {sql_guard.statement_fingerprint(q) for q in D.catalog_function_queries()}
+    refused = {}
+    for db_type in D.supported_db_types():
+        for name, sql in _catalog_reads(D.get_dialect(db_type)).items():
+            if sql_guard.check_no_recon(sql) is not None:
+                refused[f"{db_type}.{name}"] = sql
+    assert "redshift.sql_schemas" in refused  # the test sees the reads it exists for
+    missing = sorted(k for k, sql in refused.items() if sql_guard.statement_fingerprint(sql) not in allowed)
+    assert not missing, f"refused by the recon gate and not in catalog_function_queries(): {missing}"
+
+
+def test_redshift_s_schema_list_runs_only_as_agami_s_own_catalog_query(model):
+    assert "has_schema_privilege" in REDSHIFT_SCHEMAS
+    # What the build-time runner sends: `--no-safety --build-profile`.
+    env, executor = _run(REDSHIFT_SCHEMAS, no_safety=True, build_profile=True)
+    assert env.status == "ok", env.refusal
+    assert executor.seen == [REDSHIFT_SCHEMAS]
+    # The build profile alone gets it past the recon gate, and the model pass then refuses
+    # `pg_namespace`, which is not one of the catalog views it admits.
+    env, _ = _run(REDSHIFT_SCHEMAS, build_profile=True)
+    assert env.status == "refused" and env.refusal.rule == guardrail.RULE_TABLE_SCOPE
+    for kw in ({}, {"no_safety": True}):
+        env, executor = _run(REDSHIFT_SCHEMAS, **kw)
+        assert env.status == "refused" and env.refusal.rule == guardrail.RULE_RECON and not executor.seen
+
+
+@pytest.mark.parametrize("sql", [
+    # An extra predicate.
+    REDSHIFT_SCHEMAS.replace("ORDER BY nspname", "AND nspowner > 1 ORDER BY nspname"),
+    # A UNION.
+    REDSHIFT_SCHEMAS.replace(" ORDER BY nspname", " UNION SELECT usename FROM pg_user ORDER BY nspname"),
+    # A second statement.
+    REDSHIFT_SCHEMAS + "; SELECT has_schema_privilege('payroll', 'USAGE') AS ok",
+    # A different privilege target, and a different privilege function.
+    REDSHIFT_SCHEMAS.replace("has_schema_privilege(nspname,", "has_schema_privilege('someone', nspname,"),
+    REDSHIFT_SCHEMAS.replace("has_schema_privilege(nspname,", "has_table_privilege(nspname,"),
+    # The function in a statement an agent wrote.
+    "SELECT has_schema_privilege('payroll', 'USAGE') AS ok",
+    "SELECT n.nspname FROM pg_namespace n WHERE has_schema_privilege(n.nspname, 'USAGE')",
+])
+@pytest.mark.parametrize("kw", [{}, {"build_profile": True}, {"no_safety": True, "build_profile": True}])
+def test_anything_but_redshift_s_own_schema_list_stays_refused(model, sql, kw):
+    env, executor = _run(sql, **kw)
+    assert env.status == "refused" and not executor.seen, sql
+    assert env.refusal.rule in (guardrail.RULE_RECON, guardrail.RULE_READ_ONLY), env.refusal
+
+
+def test_a_hosted_server_refuses_redshift_s_schema_list_even_with_the_build_profile(model, monkeypatch, tmp_path):
+    from store import Store
+
+    store = Store.connect(f"sqlite:///{tmp_path / 'app.db'}")
+    store.run_migrations()
+    store.close()
+    monkeypatch.setenv("AGAMI_DB_URL", f"sqlite:///{tmp_path / 'app.db'}")
+    for kw in ({"build_profile": True}, {"no_safety": True, "build_profile": True}):
+        env, executor = _run(REDSHIFT_SCHEMAS, **kw)
+        assert env.status == "refused" and env.refusal.rule == guardrail.RULE_RECON and not executor.seen
+
+
+class _RedshiftCatalog:
+    """An executor that answers the discovery reads the way a Redshift catalog would."""
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    def execute(self, vetted_sql, creds, *, profile):  # noqa: ANN001, ANN201
+        self.seen.append(vetted_sql)
+        if "pg_namespace" in vetted_sql:
+            return execute_sql.ExecResult(columns=["schema_name"], rows=[("sales",)])
+        if "information_schema.tables" in vetted_sql:
+            return execute_sql.ExecResult(columns=["schema_name", "table_name", "table_type"],
+                                          rows=[("sales", "orders", "VIEW")])
+        return execute_sql.ExecResult(
+            columns=["table_schema", "table_name", "column_name", "data_type", "numeric_scale", "ordinal_position"],
+            rows=[("sales", "orders", "id", "integer", None, 1)])
+
+
+def _runner_through_the_command_line(monkeypatch, capsys, executor):
+    """The build-time runner, with the subprocess replaced by `execute_sql.main` in this process:
+    the flags the runner adds and every gate are the real ones; only the database is not."""
+    class _Done:
+        def __init__(self, returncode, out, err):  # noqa: ANN001
+            self.returncode, self.stdout, self.stderr = returncode, out, err
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        monkeypatch.setattr(sys, "argv", ["execute_sql", *cmd[2:]])
+        rc = execute_sql.main()
+        captured = capsys.readouterr()
+        return _Done(rc, captured.out, captured.err)
+
+    monkeypatch.setattr(execute_sql, "BUILTIN_EXECUTOR", executor)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return INTRO.make_execute_sql_runner(PROFILE, building_the_model=True)
+
+
+def test_discovery_on_redshift_lists_the_schemas_the_login_may_use(model, monkeypatch, capsys):
+    executor = _RedshiftCatalog()
+    runner = _runner_through_the_command_line(monkeypatch, capsys, executor)
+    inventory = INTRO.discover_inventory(PROFILE, "redshift", runner=runner)
+    assert inventory["schemas"] == ["sales"]
+    assert [(t["schema"], t["table"]) for t in inventory["tables"]] == [("sales", "orders")]
+    assert executor.seen[0] == REDSHIFT_SCHEMAS
+
+
+@pytest.mark.parametrize("entry", ["discover_inventory", "introspect"])
+def test_a_refused_catalog_read_fails_discovery_naming_the_rule(model, monkeypatch, capsys, tmp_path, entry):
+    """Never "no tables discovered": that reads as an empty warehouse, and sends the person looking
+    for a permission problem that does not exist."""
+    monkeypatch.setattr(D, "catalog_function_queries", lambda: [])
+    executor = _RedshiftCatalog()
+    runner = _runner_through_the_command_line(monkeypatch, capsys, executor)
+    with pytest.raises(RuntimeError) as err:
+        if entry == "discover_inventory":
+            INTRO.discover_inventory(PROFILE, "redshift", runner=runner)
+        else:
+            INTRO.introspect(PROFILE, "redshift", runner=runner, artifacts_dir=tmp_path, dry_run=True)
+    assert guardrail.RULE_RECON in str(err.value)
+    assert "no tables discovered" not in str(err.value)
+    # The workaround that holds on every surface, hosted included, where the build profile is dropped.
+    assert "schema.table" in str(err.value) and "defect" not in str(err.value)
+    assert not executor.seen
+
+
+def test_a_refusal_after_a_warning_line_still_fails_discovery_naming_the_rule(model):
+    """A driver warning above the refusal's JSON must not turn it back into an empty catalog."""
+    stderr = "WARNING: connection pool is nearly full\n" + json.dumps({"refusal": {"rule": "recon"}}) + "\n"
+
+    def runner(sql):  # noqa: ANN001, ANN202
+        raise INTRO.ExecuteSqlFailure(stderr.strip(), 1)
+
+    with pytest.raises(RuntimeError, match="recon"):
+        INTRO.discover_inventory(PROFILE, "redshift", runner=runner)
+
+
+def test_a_refused_table_list_fails_discovery_naming_the_rule(model, monkeypatch):
+    """The same for the per-schema table read, refused or not by the recon gate."""
+    def runner(sql):  # noqa: ANN001, ANN202
+        if "pg_namespace" in sql:
+            return [{"schema_name": "sales"}]
+        raise INTRO.ExecuteSqlFailure(json.dumps({"refusal": {"rule": "table_scope", "detail": "d"}}), 1)
+
+    with pytest.raises(RuntimeError, match="table_scope"):
+        INTRO.discover_inventory(PROFILE, "redshift", runner=runner)
+
+
+def test_a_catalog_the_login_cannot_read_still_reports_it_as_locked_down(model):
+    """A database error is not a refusal: probe mode's allowlist advice still applies."""
+    def runner(sql):  # noqa: ANN001, ANN202
+        raise INTRO.ExecuteSqlFailure("permission denied for schema sales", 9)
+
+    with pytest.raises(RuntimeError, match="no tables discovered"):
+        INTRO.discover_inventory(PROFILE, "redshift", runner=runner)

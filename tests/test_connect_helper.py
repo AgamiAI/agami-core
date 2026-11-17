@@ -1128,3 +1128,17 @@ def test_page_shows_the_connection_the_password_is_for() -> None:
 def test_a_failure_says_what_to_check(kind: str, fields: dict, says: str) -> None:
     # A live run's "rejected the connection's credentials" read as a wrong password; the user didn't exist.
     assert says in connect_helper._failure_detail(kind, "GENERIC", fields)
+
+
+def test_rewriting_the_credentials_file_does_not_follow_a_planted_link(tmp_path: Path) -> None:
+    """#651 review: the temp file had a fixed name, so a link planted there redirected the write."""
+    creds = tmp_path / "credentials"
+    creds.write_text("[a]\ntype = sqlite\n", encoding="utf-8")
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me", encoding="utf-8")
+    (tmp_path / "credentials.tmp").symlink_to(victim)
+    connect_helper._write_whole(creds, "[b]\ntype = sqlite\n")
+    assert victim.read_text() == "keep me"
+    assert creds.read_text() == "[b]\ntype = sqlite\n" and not creds.is_symlink()
+    assert creds.stat().st_mode & 0o777 == 0o600
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["credentials", "credentials.tmp", "victim.txt"]

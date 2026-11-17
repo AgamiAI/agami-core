@@ -274,6 +274,22 @@ def test_ready_branch_matches_the_start_card():
     assert "a reload or re-introspect request skips the card" in line
 
 
+def test_build_branch_goes_into_the_build_and_never_recommends_a_question():
+    # Credentials but no model: the returning card recommended "Ask a question" of a database with
+    # nothing built. `build` skips the card and goes straight to Phase 1.
+    text = SKILL.read_text(encoding="utf-8")
+    line = next(ln for ln in text.splitlines() if ln.startswith("1. **Resolve the environment**"))
+    branch = line.split("**`build`**", 1)[1].split("**`promote`**", 1)[0]
+    assert "show no start card" in branch
+    assert "never offer \"Ask a question\"" in branch
+    assert "Phase 1" in branch and "not `reintrospect`" in branch
+    card = _start_card()
+    assert "`data.next` is `build`" in card
+    returning = card.split("**Returning**", 1)[1]
+    assert "`data.next` is `ready`" in returning.splitlines()[0]
+    assert "and built" in returning.splitlines()[0]
+
+
 def test_fields_card_prompt_rules_out_passwords_and_urls():
     s = _between("### 0a.4c ", "### 0a.4k ")
     assert "never a password or a URL that holds one" in s
@@ -359,7 +375,7 @@ def test_4a_unparseable_other_is_reasked_never_guessed():
 def test_4a_personal_data_card_hides_columns_with_exclude_ops():
     s = _phase_4()
     assert "Hide these from queries" in s
-    assert "Keep them all queryable" in s
+    assert "**Keep them queryable**" in s and "- Always last: **Keep them all queryable**" not in s
     assert "multiSelect" in s
     assert '"op":"exclude","kind":"table"' in s and '"column"' in s
     assert "grouped by table" in s.lower()
@@ -398,13 +414,13 @@ def test_6_shows_a_table_of_seeds_then_the_four_option_card():
     s = _phase_6()
     assert 'sm" seed-validate' in s
     assert "15 rows" in s
-    for label in (
-        "Keep all that ran (Recommended)",
-        "Review one by one",
-        "Drop the failing ones",
-        "Show the full view",
-    ):
-        assert f"- **{label}**" in s, label
+    # #674: "ran" proves the SQL executes, not that it is right, so the page is recommended and
+    # keeping them all comes last, in this order.
+    card = s[s.index("(header `Examples`)"):]
+    card = card[: card.index("\n\n**Add my own**")]
+    labels = re.findall(r"^- \*\*([^*]+)\*\*", card, re.M)
+    assert labels == ["Mark them on a page (Recommended)", "Review one by one", "Add my own", "Keep all"]
+    assert "Keep all that ran" not in s
     assert "Review the failing ones" not in s and "Review all one by one" not in s
 
 
@@ -555,11 +571,13 @@ def test_1_5_context_card_asks_for_definitions_questions_and_reports():
     s = _between("### 1.5 ", "### 1.6 ")
     assert "header `Context`" in s and "multiSelect" in s
     labels = _card_labels(s)
+    # Issue 3 of the question-cards test log: a person with nothing to hand over got a model built
+    # from guesses. "Ask me as you go" replaced "Nothing to share" as the default (a card holds 4).
     assert labels == [
+        "Ask me as you go (Recommended)",
         "Definitions or a semantic layer",
         "Questions people ask",
         "Report SQL or dashboards",
-        "Nothing to share",
     ]
     assert "spec workbook" in s and "dbt / LookML / Cube" in s
     assert "agami-asked-questions.txt" in s and "reconcile/inbox" in s
@@ -710,12 +728,14 @@ def test_example_cards_show_the_sql_in_the_keep_preview():
 
 
 def test_review_cards_offer_the_full_view_as_an_option():
-    # "show the full view" worked only typed in Other, and no card said it existed.
+    # "show the full view" worked only typed in Other, and no card said it existed. #651: the page now
+    # saves its own decisions, so the option says what it does, on every question of a card.
     four, six = _phase_4(), _phase_6()
-    assert four.count("- **Show the full view**") == 2      # the Sign-off card and the item cards
-    assert six.count("- **Show the full view**") == 1        # the Examples card
-    assert "and **Show the full view** (the page below" in six  # the example item cards
-    assert "| Show the full view |" in four and "| Show the full view |" in six
+    assert four.count("- **Review on a page**") == 2      # the Sign-off card and the item cards
+    assert six.count("- **Mark them on a page (Recommended)**") == 1     # the Examples card
+    assert "and **Mark them on a page** (the page below, on every question of the card" in six  # item cards
+    assert "| Review on a page |" in four and "| Mark them on a page |" in six
+    assert "first question only" not in four + six
     phase_7 = _phase("## Phase 7", "## Phase 8")
     assert "`Show the full view`" in phase_7
 
@@ -746,3 +766,389 @@ def test_join_candidate_group_options_preview_the_joins_they_add():
     assert "each option's `preview` lists every join that option adds" in s
     assert "Never offer a numbered range" in s
     assert "Add all remaining" in s and "Add none" in s
+
+
+# --- 2g: ask what the data can't settle (issues 3 and 9 of the question-cards test log, #486) ---
+
+
+def _section_2g() -> str:
+    return _between("### 2g ", "## Phase 3:")
+
+
+def test_2g_asks_only_checked_questions_from_the_engine():
+    s = _section_2g()
+    assert 'sm" open-questions "$ROOT" --profile <profile>' in s
+    assert "checked on the data" in s and "`dropped`" in s
+    # the engine words every question; the skill never writes its own SQL or ops
+    assert "never write one by hand" in s
+    for kind in ("`ambiguity`", "`look_alike`", "`coded_values`", "`unknown_column`"):
+        assert kind in s, kind
+
+
+def test_2g_pages_every_question_and_each_can_skip_the_rest():
+    s = _section_2g()
+    # ACE-183: the engine has no cap; the skill pages its questions onto cards
+    assert "up to 4 questions per card" in s and "there is no cap" in s and "at most 12" not in s
+    # a table not checked is said, never passed over as settled
+    assert "`skipped`" in s and "Not checked:" in s and "`windowed`" in s
+    # every card's evidence is shown just before it, not a table cut off after 15 rows
+    assert "**Show each page before its card**" in s and "at most 15 rows" not in s
+    assert "every question ends with **Skip the rest**" in s
+    assert "**Ask each time**" in s
+    assert "no option is marked Recommended" in s
+
+
+def test_2g_records_each_answer_as_the_persons_with_who_and_when():
+    s = _section_2g()
+    assert '--signer "<reviewer_email>" --role "<reviewer_role>"' in s
+    assert "the signer, the role and the time" in s
+    assert '"default": "<that option\'s label>"' in s and '"behaviour": "ask"' in s
+    assert "source: human" in s
+    # a live run decoded a code list itself and signed it under an email nobody typed
+    assert "**Only an answer the person gave on a card is written with `--signer`**" in s
+    assert "never one taken from git, the environment, the Claude login or memory" in s
+
+
+def test_2g_runs_only_when_ask_me_as_you_go_was_picked_and_says_no_duration():
+    s = _section_2g()
+    assert "`Ask me as you go` was picked" in s
+    assert not re.search(r"\d+\s*(?:–|-)?\s*\d*\s*(?:seconds|minutes|min)\b", s)
+    text = SKILL.read_text(encoding="utf-8")
+    steps = text[text.index("## Progress tracking") : text.index("## Phase −1")]
+    assert "6. Answer what the data can't settle" in steps
+    assert '6 when "Ask me as you go" wasn\'t picked' in steps
+
+
+def test_2f_keeps_its_closing_paragraphs_above_2g():
+    # A run that skips 2g, or has nothing to ask, still writes the description and the company draft.
+    s = _between("### 2f ", "### 2g ")
+    assert "**The one-line datasource description (from 1.4 C).**" in s
+    assert "**The company draft (from 1.4 A's" in s
+    # 2g is the last section before Phase 3: nothing of 2f follows it
+    assert _section_2g().rstrip().endswith("---")
+    assert "**The company draft" not in _section_2g()
+
+
+def test_2g_passes_the_engines_cards_unchanged_and_never_claims_settled_after_a_failure():
+    s = _section_2g()
+    assert "**Then the cards: each question's `card`, passed to AskUserQuestion unchanged**" in s
+    assert "never say the data settled anything while `counts.failed` is not 0" in s
+    assert "**Don't sign anything yet** on that card writes nothing" in s
+
+def _2g_how() -> str:
+    s = _section_2g()
+    return s[s.index("**Cards or a page.**"):s.index("**Then the cards:")]
+
+
+def _2g_page() -> str:
+    s = _section_2g()
+    return s[s.index("**Review on a page** (#676)"):]
+
+
+def test_2g_offers_review_on_a_page_beside_the_cards_recommended_past_8():
+    how = _2g_how()
+    card = next(ln for ln in how.splitlines() if "(header `Answer how`)" in ln)
+    assert "**Review on a page**" in card and "**Answer on cards**" in card
+    assert "more than 8" in how and "(Recommended)" in how
+    # one recommendation at a time, and a remote session goes straight to the cards
+    assert "8 or fewer" in how and "SSH_CONNECTION" in how
+    assert len("Answer how") <= 12
+
+
+def test_2g_page_uses_the_saving_helper_and_its_parser_never_the_file_by_hand():
+    page = _2g_page()
+    for step in ('open-questions "$ROOT" --profile <profile> --all', "render_open_questions_page.py",
+                 "--save-to-helper --artifacts-dir", "serve_page.py", "--decisions", "run_in_background",
+                 "question-cards.md#6a-a-page-that-saves-its-decisions",
+                 "**I've saved it** / **Back to the cards**",
+                 "parse_open_questions_decisions.py --decisions-file", "--expect-profile <profile>",
+                 '--ops-out', 'curate "$ROOT" --ops-file', '{"status": "expired"}', "Never read it by hand",
+                 "the page and `agami-open-questions-<ts>.json` (it holds sample values)"):
+        assert step in page, step
+
+
+def test_2g_page_records_for_the_saved_identity_and_reports_who():
+    page = _2g_page()
+    assert "identity card" in page and "before rendering" in page
+    assert '--signer "<reviewer_email>" --role "<reviewer_role>"' in page
+    # what was recorded, and for whom, the way the other saving pages report back
+    assert "as yours (<reviewer_email>)" in page
+    assert "is said back and not applied" in page
+    assert "blank is undecided" in page.lower()
+
+
+def test_2g_page_rows_are_the_three_kinds_with_their_choices():
+    page = _2g_page()
+    for choice in ("**Ask each time**", "**Don't know**", "**Hide this column**", "**Both are in use**",
+                   "sample values", "the build's guess"):
+        assert choice in page, choice
+
+
+# --- pages that save their own decisions (#651) -------------------------------------------------
+
+
+def test_4a_full_view_saves_through_the_helper_and_applies_like_agami_model():
+    full = _phase_4().split("**Show the full view** (an option")[1]
+    assert "--save-to-helper" in full and "--decisions" in full and "--read-only" not in full
+    assert "question-cards.md#6a-a-page-that-saves-its-decisions" in full
+    assert "as `/agami-model` Phase 5b does" in full
+    assert "`--initial-tab pii` from the personal-data question" in full
+
+
+def test_4a_bulk_sign_off_lists_the_unseen_items_first():
+    s = _phase_4()
+    assert "a sign-off is never recorded for a definition the person hasn't seen" in s
+    assert '"bulk":true' in s
+
+
+def test_6_examples_page_saves_and_its_card_says_ive_marked_them():
+    full = _phase_6().split("**Show the full view** (an option")[1]
+    assert "--save-to-helper --artifacts-dir" in full and "--decisions" in full
+    assert "**I've marked them on the page** and **Back to the cards**" in full
+    # what the page saved maps onto the old block's lines, applied by the same commands
+    for pair in ("`keep` is `validate N`", "`drop` is `reject N`", "`fix` (with its `sql`) is `edit N`", "`note_all` is `note all`"):
+        assert pair in full, pair
+    assert "is said back and not applied" in full
+
+
+def test_6_saved_examples_are_checked_by_the_parser_and_a_keep_needs_an_identity():
+    full = _phase_6().split("**Show the full view** (an option")[1]
+    assert "parse_examples_decisions.py --decisions-file" in full and "--expect-profile <profile>" in full
+    assert "Never read it by hand" in full
+    assert "**A keep is a sign-off**" in full and "is not applied; say so" in full
+
+
+def test_6_dropping_the_failing_ones_is_typed_in_other():
+    """#649's Add my own and #674's order fill the card; dropping the failures is still one phrase away."""
+    s = _phase_6()
+    assert '"drop the failing ones" typed in Other' in s
+    assert "| Drop the failing ones |" in s
+
+
+def test_approve_all_remaining_marks_its_ops_bulk_in_connect():
+    assert 'Each of its approve ops carries `"bulk": true`.' in _phase_4()
+
+
+def test_6_the_parser_gets_the_same_items_files_as_the_renderer():
+    full = _phase_6().split("**Show the full view** (an option")[1]
+    assert "Give it the same `--items-file` arguments, in the same order, that rendered the page" in full
+
+
+# --- 1.6p: pick from a list, on a page that saves itself (#654) ---------------------------------
+
+
+def _section_16p() -> str:
+    return _between("### 1.6p ", "### 1.7 ")
+
+
+def _tables_card() -> list[str]:
+    s = _section_16()
+    i = s.index("Then call AskUserQuestion, one question (header `Tables`)")
+    lines = s[i:].splitlines()[2:]
+    return [ln for ln in lines[: next(n for n, ln in enumerate(lines) if not ln.startswith("- **"))]]
+
+
+def test_1_6_offers_pick_from_a_list_within_four_options():
+    options = _tables_card()
+    assert len(options) == 4
+    assert [o.split("**")[1] for o in options] == [
+        "Pick from a list", "Keep everything", "Drop staging and backups", "Only some schemas"]
+    assert "more than 10 tables" in options[0] and "(Recommended)" in options[0]
+    # one recommendation at a time: dropping the copies is recommended only on a small catalog
+    assert "With 10 tables or fewer, mark it **(Recommended)**" in options[2]
+
+
+def test_1_6_takes_typed_names_in_the_question_not_as_an_option():
+    s = _section_16()
+    card = s[s.index("(header `Tables`)"):]
+    assert card.splitlines()[0].endswith('Or type table names or patterns in Other, like orders, customers or all crm_*."*:')
+    assert "--keep pick:" in s and "there is no option for it" in s
+
+
+def test_1_6p_serves_the_picker_with_the_saving_helper_and_writes_through_keep():
+    s = _section_16p()
+    for step in ("SSH_CONNECTION", "render_table_picker.py", "serve_page.py", "--decisions",
+                 "run_in_background", "Monitor tool", "never a foreground sleep",
+                 "**I've saved it** / **Back to the cards**", "TaskStop",
+                 '--keep page:"<decisions file>"', "agami-keep.txt", '"Keeping <kept> of <N> tables."',
+                 '{"status": "expired"}', "never edit the file"):
+        assert step in s, step
+    assert s.index("reads the helper's output first") < s.index("TaskStop")
+
+
+def test_1_6p_falls_back_to_a_numbered_list_typed_in_other():
+    s = _section_16p()
+    fallback = s[s.index("**The numbered list**"):]
+    assert "--numbered" in fallback and "--keep pick:" in fallback
+    q = next(ln for ln in fallback.splitlines() if "(header `Table pick`)" in ln)
+    # what to type is in the question (rule 5), and the options are the alternatives to typing
+    assert "Type numbers, ranges or patterns in Other, like 1-12, 15 or all crm_* or everything except audit_*." in q
+    assert "**Keep everything** / **Drop staging and backups**" in q and "Type" not in q.split(":", 1)[1].split("**")[1]
+    assert "Past 200 tables" in fallback and "the first 200 tables" in fallback
+    # numbers are read only up to the last one the list showed, and never on the main card
+    assert '--shown <shown>' in fallback
+    assert "--shown 0" in _section_16()
+
+
+def test_1_6p_headers_are_new_and_fit_a_card():
+    s = _section_16p()
+    for h in ("Table list", "Table pick"):
+        assert f"header `{h}`" in s and len(h) <= 12
+
+
+def test_1_6p_back_to_the_cards_goes_to_the_numbered_list():
+    """Copilot on #657: in a cloud or web session the page can be unreachable without
+    SSH_CONNECTION; going back to the Tables card offered Pick from a list, another dead page."""
+    s = _section_16p()
+    back = s[s.index("**Back to the cards** reads the helper's output first"):]
+    back = back[: back.index("\n")]
+    assert back.index("TaskStop") < back.index("**The numbered list**")
+    assert "`Tables` card again" not in back
+
+
+# --- #673: say up front what to have ready; ask the organisation and the source system first -----
+
+README = SKILL.parents[4] / "README.md"
+
+
+def test_0a_0_before_you_start_comes_before_the_database_card():
+    text = SKILL.read_text(encoding="utf-8")
+    assert text.index("### 0a.0 ") < text.index("### 0a.2 ")
+    s = _between("### 0a.0 ", "### 0a.1 ")
+    for item in (
+        "What your organisation does",
+        "What system the data comes from",
+        "when your fiscal year starts",
+        "what currency amounts are in",
+        "Definitions of the tables and columns",
+        "Definitions of your metrics and business terms",
+        "The questions people ask",
+    ):
+        assert item in s, item
+    # both paths through Phase 0a start here
+    top = _between("## Phase 0a:", "### 0a.1 ")
+    assert top.count("**0a.0** → 0a.1 → 0a.2") == 2
+
+
+def test_0a_0_asks_the_organisation_and_the_source_system_as_their_own_first_questions():
+    s = _between("### 0a.0 ", "### 0a.1 ")
+    assert "1.4 A's `Company` card" in s and "header `Source`" in s
+    assert s.index("1.4 A's `Company` card") < s.index("header `Source`")
+    # hints, never copied verbatim, that switch on product-specific help
+    assert "never copied verbatim" in s
+    assert "enrich-metadata" in s and "--preset servicenow" in s
+    # nothing is written before the folder and the interpreter exist; the fiscal year goes through
+    # ACE-182's set-fiscal-year after 1.7 and the currency stays a hint for the units step
+    assert "**Hold the answers; write nothing yet.**" in s and "right after 0a.8" in s
+    assert 'sm" set-fiscal-year "$ROOT" --month <n>' in s and "skip 1.4 D's card" in s
+    assert "set-org" not in s.split("**Hold the answers")[1].split("Items 3 to 5")[0].replace("1.4 A", "")
+    assert "`$CURRENCY_HINT`, a hint only" in s
+    held = _between("### 0a.8 ", "### 0a.9 ")
+    assert "**Then write what 0a.0 held**" in held
+    # the questions people ask become checked examples, as they do today
+    assert "agami-asked-questions.txt" in s or "the `Questions people ask` option of 1.5" in s
+
+
+def test_1_4_and_1_5_do_not_ask_again_what_0a_0_asked():
+    four = _between("### 1.4 ", "### 1.5 ")
+    assert "already asked in 0a.0" in four
+    five = _between("### 1.5 ", "### 1.6 ")
+    assert "Don't ask the source system again" in five
+
+
+def test_readme_says_what_to_have_ready():
+    r = README.read_text(encoding="utf-8")
+    s = r[r.index("**Before you start**"): r.index("1. **Start setup.**")]
+    for item in ("organisation does", "system the data comes from", "fiscal year", "currency",
+                 "tables and columns", "metrics and business terms", "questions people ask"):
+        assert item in s, item
+
+
+# --- #674: cards ask what the data means to the business; plumbing is decided and reported ------
+
+CARDS = SKILL.parents[2] / "shared" / "question-cards.md"
+HELPER_PAGE = SKILL.parents[2] / "shared" / "connect-helper-page.html"
+
+
+def _cards_rule(start: str) -> str:
+    text = CARDS.read_text(encoding="utf-8")
+    i = text.index(start)
+    j = text.find("\n## ", i + len(start))
+    return text[i: j if j != -1 else len(text)]
+
+
+def test_question_cards_rule_business_questions_only():
+    r = _cards_rule("## 9. ")
+    assert "what the data means to the business" in r
+    for plumbing in ("--no-safety", "append", "batch", "threshold"):
+        assert plumbing in r, plumbing
+    assert "conservatively" in r and "one line" in r
+    assert "never names a file or table without saying what it is" in r
+
+
+def test_question_cards_rule_filled_down_answers_are_confirmed():
+    r = _cards_rule("## 10. ")
+    assert "the same answer down a whole column" in r
+    assert "one line" in r and "before signing" in r
+
+
+def test_connect_points_at_the_business_questions_rule():
+    style = _between("## Conversation style", "## Progress tracking")
+    assert "question-cards.md#9-" in style and "question-cards.md#10-" in style
+
+
+def test_6_keep_all_shows_every_example_before_it_signs():
+    s = _phase_6()
+    row = next(ln for ln in s.splitlines() if ln.startswith("| Keep all |"))
+    assert "rule 4" in row
+
+
+def test_password_page_sends_the_person_back_to_the_card():
+    page = HELPER_PAGE.read_text(encoding="utf-8")
+    assert "Go back to Claude and pick <b>I've saved it</b>." in page
+    assert "The result shows in Claude" not in page
+
+
+# --- #675: personal data per organisation ---------------------------------------------------------
+
+
+def test_4a_keep_option_says_what_stays():
+    s = _phase_4()
+    assert "but a raw value is never shown. Suspected ones stay ordinary columns." in s
+
+
+def test_4a_skips_the_personal_data_question_when_the_warehouse_enforces_it():
+    s = _phase_4()
+    skip = s[s.index("**When `sm sensitive` prints `personal_data: enforced_by_warehouse`"):]
+    skip = skip[: skip.index("\n\n")]
+    assert "skip this question" in skip and "one line" in skip
+
+
+def test_0a_0_sets_the_personal_data_setting_from_the_source_answer():
+    s = _between("### 0a.0 ", "### 0a.1 ")
+    assert 'sm" set-personal-data "<artifacts_dir>" enforced_by_warehouse' in s
+    assert "never deployed" in s
+    assert "whether the warehouse already controls who sees personal data" in s
+
+
+
+def test_1_4_d_is_skipped_when_0a_0_gave_the_fiscal_month():
+    d = _between("**D. Fiscal-year card", "`chmod 644`")
+    assert "`$FISCAL_START_MONTH`" in d
+
+
+def test_4a_skip_line_gives_the_kept_count_on_a_reload():
+    s = _phase_4()
+    skip = s[s.index("**When `sm sensitive` prints `personal_data: enforced_by_warehouse`"):]
+    skip = skip[: skip.index("\n\n")]
+    assert "nothing was flagged or hidden" not in skip
+    assert "`count` is above 0" in skip
+
+
+def test_a_presets_dictionary_tables_are_never_kept_as_model_tables():
+    """Since ACE-181 `enrich-metadata --preset` reads the platform's dictionary and choice tables
+    straight from the database; an older line told 1.6 to keep them, and a live run modelled them."""
+    text = SKILL.read_text(encoding="utf-8")
+    assert "keeps the product's dictionary tables in the kept set" not in text
+    assert "only when they are in the model" not in text
+    assert "never add the preset's source tables" in text

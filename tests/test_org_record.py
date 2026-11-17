@@ -208,3 +208,50 @@ def test_record_without_the_rewrite_stamps_writes_as_before(tmp_path):
         "cross_datasource_relationships: []\n"
         "cross_datasource_metrics: []\n"
     )
+
+
+
+# --- #675: personal data enforced by the warehouse is a build-only setting ------------------------
+
+
+def test_personal_data_setting_lives_in_the_local_config_and_never_in_organization_yaml(tmp_path):
+    import json
+    import stat
+
+    from semantic_model import build_settings as BS
+    from semantic_model import cli
+
+    OR.set_org_fields(tmp_path, name="Acme")
+    before = OR.record_path(tmp_path).read_text(encoding="utf-8")
+    cfg = tmp_path / "local" / ".config"
+    cfg.parent.mkdir()
+    cfg.write_text(json.dumps({"active_profile": "demo", "reviewer_email": "you@example.com"}))
+
+    assert cli.main(["set-personal-data", str(tmp_path), "enforced_by_warehouse"]) == 0
+    assert BS.warehouse_enforces_personal_data(tmp_path)
+    doc = json.loads(cfg.read_text())
+    assert doc == {"active_profile": "demo", "reviewer_email": "you@example.com",
+                   "personal_data": "enforced_by_warehouse"}   # every other key kept
+    assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
+    assert OR.record_path(tmp_path).read_text(encoding="utf-8") == before   # deployed file untouched
+
+    assert cli.main(["set-personal-data", str(tmp_path), "flagged_by_agami"]) == 0
+    assert not BS.warehouse_enforces_personal_data(tmp_path)
+    assert "personal_data" not in json.loads(cfg.read_text())
+
+
+def test_personal_data_setting_reads_as_unset_without_a_readable_config(tmp_path):
+    from semantic_model import build_settings as BS
+
+    assert not BS.warehouse_enforces_personal_data(tmp_path)
+    (tmp_path / "local").mkdir()
+    (tmp_path / "local" / ".config").write_text("not json")
+    assert not BS.warehouse_enforces_personal_data(tmp_path)
+    with pytest.raises(ValueError):
+        BS.set_personal_data(tmp_path, "sometimes")
+
+
+def test_organization_record_refuses_a_personal_data_key():
+    # Kept out on purpose: an older core refuses unknown keys, so the setting never goes here.
+    with pytest.raises(ValueError):
+        OrgRecord.model_validate({"org_id": "x", "personal_data": "enforced_by_warehouse"})

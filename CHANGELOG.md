@@ -12,6 +12,455 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.24] — 2026-11-17
+
+### Security
+
+- **A new metric from the model explorer is always a proposal.** A saved page, or a pasted block,
+  could send a new metric already marked approved and signed by anyone it named, and it was stored
+  that way. The parser now drops a new metric's or example's sign-off and provenance fields (and any
+  confidence other than proposed) and lists what it dropped. Approval comes only from an approve,
+  signed as the saved reviewer.
+- **A stricter read-only check.** It now reads quotes, comments and names the same way on every
+  database it supports, and refuses the few forms that databases read differently. A `;` is
+  allowed only at the end of a statement. Each refusal says how to rewrite the SQL: a `;` inside a
+  string, such as `STRING_AGG(a, '; ')`, becomes `CHR(59)`; `ESCAPE '\'` becomes `ESCAPE '!'`; three
+  quotes in a row become `CHR(39)`. Nested block comments, Oracle `q'…'` strings and `U&` names and
+  strings are refused too.
+
+### Added
+
+- **A build checks every join on the data, and profiles what the columns hold (#448).** A join was
+  confirmed on 50 distinct values with one match enough, and a join card said "100% of 38 sampled
+  values match" without saying whether 38 was every value. Now each join is checked on the whole key
+  when its table is under 500,000 rows and on 5,000 rows otherwise, spread across the table where
+  the database samples whole pages; a key into a table too big to read whole is looked up for the
+  keys read. The card says which: "all 38 values" or "4,812 of 5,000 sampled (96%)". The check also
+  counts rows with no partner, which an inner join drops, and a key that repeats on the side it
+  points at, which multiplies totals. A declared key on a database that doesn't enforce it now needs
+  95% of its rows to find their partner. Each table is also profiled, whole or sampled the same way:
+  how full each column is, its distinct count, range, the most frequent values of a coded column,
+  and findings such as a column that is always empty or one value, a date after today on a column
+  named for something that already happened, two dates in the reverse of their names' order, and a
+  text column mixing date formats. Personal columns, and columns named like a person's name or a tax
+  or contact number, get counts only, and the file is cut to what the model serves on every write
+  and read. The profile and the join checks are written to `.introspect/profile.json` (`sm profile
+  <root> --table <t>` reads it), and enrichment describes columns from it instead of five sample
+  rows. The checks run eight to a statement and four statements at once (one for a browser sign-in),
+  and a join checked on the whole key needs no separate uniqueness probe: on a 42-table Postgres
+  behind a cloud pooler, checking its 73 joins took 2.2 seconds instead of 73 one at a time, and the
+  join-candidate scan 15 seconds instead of 205.
+
+- **Onboarding asks what the data can't settle, and proposes ambiguities (#486).** The "What can
+  you share" card now opens with **Ask me as you go**, the default, for people with no document to
+  hand over. After the descriptions, a new step asks on cards, in plain words, only what the data
+  can't answer: which date "sales last month" means, which statuses "completed" covers, whether an
+  amount includes tax, which of two joins to the same table is meant, whether past rows count, a
+  fiscal year, codes nobody could decode, unreadable columns and look-alike tables. `sm
+  open-questions` finds the candidates from patterns in the model, runs every reading as a bounded
+  aggregate (one statement per table, one more for its dates and two for a fiscal-year check;
+  never a personal column, never a table whose estimated size is above the guard) and keeps only
+  those whose answers differ. Each question comes with its card, ready to ask unchanged; a check
+  that fails is reported by its error's class, and the step never calls a failed run settled. At most 12 are asked, with
+  **Skip the rest** on every card. Nothing is declared until the person answers: `sm curate`'s new
+  `add` op for an ambiguity is refused without `--signer` and `--role`, and the curation log records
+  who answered and when.
+
+- **Add your own examples at the examples step (#645).** The connect examples card now always
+  offers **Add my own**, and "add an example" in `/agami-model` or `/agami-reconcile` reaches the
+  same procedure (`shared/own-examples.md`). It reads a `.sql` file or a folder of them, a CSV or
+  `.xlsx` sheet of questions and SQL, a question and SQL typed in, a screenshot, or a dashboard
+  export: a Tableau workbook (`.twb`, `.twbx`: each worksheet's custom SQL or table, fields and
+  filters), a Power BI template (`.pbit`: each table's native SQL) or LookML views (`.lkml`: derived
+  tables and plain measures). Calculated fields, DAX and LookML measures are listed, never turned
+  into SQL. Every statement goes through reconcile's part-by-part check and agami answers the same
+  question cold; `reconcile.py own-examples` then sorts the run: the ones that agree are added as
+  examples signed as the person's, the ones that disagree with a definition are asked as "which
+  should be the default?" and kept as open questions in the shape of a declared ambiguity, and the
+  ones with a measured mistake are sent back. Workbook XML that declares a DTD or an entity is
+  refused, zip members are size-limited, a folder walk never follows a link out of the folder, an
+  example already kept under the same question is never overwritten without a yes, and connection
+  details in an export never reach the output.
+
+- **Pick the tables to model from a list (#654).** Connecting a 46-table schema offered "keep
+  everything" or typing the names. The tables card now offers **Pick from a list** (recommended
+  past 10 tables): a one-time page on `127.0.0.1`, served by the same helper as the review pages,
+  listing every table by schema with its row estimate and column count, a search box, select all /
+  none per schema, and the likely staging and backup copies marked (unticked when each copies
+  another table). **Save tables** sends the pick to the helper; `inventory_summary.py --keep
+  page:<file>` checks it (the picker's page and database, no other keys, only tables the inventory
+  holds) and writes the same `agami-keep.txt` as the card's other answers, and the chat says
+  "Keeping N of M tables." Where a page can't open, `--numbered` lists the tables in the chat and
+  `--keep pick:<file>` reads numbers, ranges and patterns typed in Other (`1-12, 15`, `all crm_*`,
+  `everything except audit_*`); numbers are read only up to the last one the list showed, so none
+  on the main card, where typed names go the same way. A name that is both a schema and a table, or
+  several tables that differ only in case, is asked about rather than guessed; `all <name>` means the
+  schema. `sm discover --row-estimates` reads every table's size from one catalog-statistics query
+  on Postgres, Supabase, Redshift, MySQL and Snowflake (never a count); elsewhere the size shows as
+  unknown. On Redshift, `svv_table_info` lists only tables the login can see in it, so a login
+  without that access sees sizes as unknown. A pick is one post under the helper's 1 MiB cap, about
+  20,000 table names. Every table name reaches the page as escaped data and is shown as text.
+
+- **Review pages save their own decisions, like the password page (#651).** Every review or
+  sign-off question now offers **Review on a page** (the seed examples card: **Mark them on a
+  page**), on every question of a card rather than the first. The model explorer opens on the list
+  the card asked about (`--initial-tab review --section metrics|entities|joins`, or
+  `--initial-tab pii`, whose columns can now be hidden there); the person decides the whole list
+  and presses **Save decisions**. The page posts to `serve_page.py --decisions`, a one-time helper
+  on `127.0.0.1` (random port, a token in the URL, one JSON post of at most 1 MiB from the page's
+  own origin, 30 minutes), which writes the decisions to a file and exits; the chat applies them
+  with the same commands a card uses (`parse_model_feedback.py` and `sm curate` for the explorer,
+  `sm add-example` / `sm remove-example` / `sm seed-validate` for the examples), signed as the
+  saved sign-off identity, which the page shows and cannot change, and says back what changed in
+  one line. Nothing is copied or pasted. A remote or SSH session, or a helper that can't start,
+  stays on the cards and says why. A page that only shows something keeps its banner, which now
+  says nothing on it is saved. The helper allows only the page's own scripts (by hash), gives a
+  post 10 seconds in all and serves at most 8 connections; what a page saved is checked before it
+  is applied (`parse_model_feedback.py --expect-profile`, the new `parse_examples_decisions.py`),
+  and neither a page nor its post can choose the signer. The password helper's credentials rewrite
+  no longer follows a link planted at its temporary file's name.
+
+- **A number is followed through every step of the query (#621).** A number computed in a CTE or a
+  subquery in FROM, or counted over rows a step filtered, read `undetermined` in the receipt's
+  `columns` section. The receipt now follows it to the SELECT that computes it — through a column a
+  step only passes on, through a per-row expression a step computes (`closed - opened AS days`),
+  through a one-row lookup step whose value a condition compares with — and collects the
+  restrictions on its rows from every step on the way, innermost first. A filter on a grouped
+  step's key outside the step is a restriction on its rows; any other condition after a step
+  counted is a `result_filters` entry. A WITH name binds by the scope gate's own rule. New output
+  item keys: `joins_not_declared` (a matched number counted through a join the model does not
+  declare, outer query included; a plain match is `restrictions == []` and
+  `joins_not_declared == []`), `built_from` (an aggregate over a per-group number that is a
+  metric, as in an average of a per-day total: the metric, the aggregate, the grouping; a declared
+  second-order metric with that grain and aggregate is matched instead), and `reason` (why a number
+  is `undetermined`, in one fixed phrase: a recursive step, a pivot, row order, a UNION, a step
+  that groups or de-duplicates, numbers from different steps, `*`, an undeclared relation, an
+  unattributable column, nesting too deep, a sampled table, an unread binding, or several metrics
+  alike). `aggregate` now also counts a number computed in a step. When a statement names a
+  sensitive column, every value in a condition that reads a step's column (or an output alias, or
+  holds a subquery) is withheld, so a rename in a step cannot carry one out; a whole-row reference
+  (`CAST(c AS TEXT)`) has its values withheld whenever the model declares a sensitive column. Not
+  modelled, so `undetermined` with its reason: one step read through two references, a step
+  projecting a set-returning or unknown function (never a one-row lookup), a name a `WITH
+  RECURSIVE` sibling defined later could bind, and `DISTINCT ON`. A step body is entered once per
+  number, so steps that fan out stay linear. `joins_not_declared` lists are capped and charged to
+  the receipt's condition budget, a cut list counted on the section's marker.
+
+- **A metric matches only a number that read all its tables (#630).** The expression alone matched
+  `SUM(amount) FROM orders` to a metric declared on `payments`. A metric whose `source_tables` the
+  number did not all read is not its match, and `missing_tables` names the metric and the table. A
+  number that read an extra table can still match, with that table's joins and conditions shown;
+  of a one-table metric and its two-table twin, the twin wins when both tables were read.
+
+- **The joins, aggregates and tables sections read a WITH step by one rule (#204, #200, #462,
+  #429).** Each section answered "what does this name read" its own way, so one receipt could
+  describe one step two ways. Every section now binds a WITH name where it is written, by the scope
+  gate's rule, and a step stands for a declared table only when it hands that table back row for
+  row with every column under its own name. A join to such a step is reported as the join to the
+  table: `o → order_items` over `WITH o AS (SELECT * FROM orders)` reads `declared`, with a new
+  `resolves_to` key on the joins item (`orders → order_items`; null when nothing was resolved), the
+  same edge the aggregates section names, and a number counted through it no longer lists it in
+  `joins_not_declared`. A step that renames or computes a column no longer stands for its table in
+  the aggregates section either: one that renamed its join key read `not_multiplied` over a real
+  fan. A grouped step named like a declared table no longer borrows that table's relationships, so
+  a step grouped to the join key reads `not_multiplied` instead of a fan it does not have. A join
+  inside a step only downgrades the numbers of the query arms that read that step. A `tables` item
+  resolves its own reference by schema: `staging.orders` gets staging's row estimate and filters,
+  a schema-qualified table read beside a WITH of its name is the table, and an unqualified name the
+  model declares in two schemas borrows no row and is counted on the section's marker. A table
+  name told apart from a WITH of the same name only by quoting (`"orders"` beside `WITH orders`),
+  a table whose alias renames its columns (`orders AS t(customer_id, id)`), and a name a `WITH
+  RECURSIVE` sibling defined later may bind are read as neither the table nor the step in every
+  section: the number is `undetermined` with its reason, the join `undeclarable`, the table item
+  borrows no row. Which steps reach which query arms, and what each step stands for, are worked
+  out once per statement, and a statement's WITH bindings are kept on its own parse tree rather
+  than in one module-wide entry two threads evicted from each other.
+
+- **A receipt claims no more than it can show, from an audit of 100 real receipts.** Seven shapes
+  read as more than they were. A condition looser than AND (`a OR b`) is listed in brackets in
+  `restrictions`, `result_filters`, `missing_conditions` and `built_from`, since a reader joins
+  each list with AND. A condition line is bounded at 500 characters, link and join wording
+  included, and a cut backs out of a string or quoted name it ends inside (doubled quotes,
+  backslash escapes and T-SQL `[names]` understood) and closes every bracket it left open
+  (`(a OR b …)`), so a cut never reads as a different, complete condition. Each arm of a UNION is
+  its own item, matched (or not) on its own and keyed by the column it lands in; the right arm of
+  an EXCEPT or INTERSECT, which adds no rows, is never `matched`. A filter on a step's column is
+  listed over the tables the step reads, each substituted column named by its table (`WHERE
+  p.is_open` over `status = 'open' AS is_open` lists `orders.status = 'open'`), a grouping step's
+  key included; a number filtered on a value no condition over the tables can state, or that would
+  need a table the statement reads twice, a whole-row reference, a subquery naming the step, or
+  more than a bounded amount of text, is `undetermined`. A condition on a table reached by one of
+  several relationships the model declares between two tables names the one used, beside the
+  query's own join keys, once, with every condition reached through it (`only assets rows that
+  have a matching users row (on users.id = assets.assigned_to_id) via assets.assigned_to_id →
+  users.id: u.active = FALSE`), through a step too, and is `undetermined` when the join fits more
+  than one or is a comma join. A join that drops the counted rows with no partner is listed in table names,
+  never a step's or a query alias (`only orders rows that have a matching customers row (on
+  customers.id = orders.customer_id)`): a plain, INNER, NATURAL, or equated comma or CROSS join,
+  and an outer join whose optional side the number reads or a later inner join needs, whose own ON
+  conditions are then listed too; a join to a step lists what the step requires over its tables,
+  and a number joined to one whose join columns come from no one table is `undetermined`. A join
+  after a step counted is said that way among the result filters. The model records nothing
+  saying every row has a partner; a join between two of the metric's own tables is not listed. A
+  negation is shown as the most readable SQL it is (`x IS NOT NULL`, `x NOT IN (…)`, `a <> b`,
+  and `u.active = FALSE` for a column the model types boolean), and a subquery reading a step
+  shows the step's own SELECT, or is withheld whole when the step would carry a withheld value, is
+  recursive or nests too deep. `joins_not_declared` names tables, never a step's alias. Read
+  `undetermined`: a join key a step hands on renamed, arms matched BY NAME, an anti-join, an outer
+  join keyed by something other than a plain `=` or required beside a RIGHT join.
+
+- **A matched metric says which rows it was counted over (#656).** The receipt's `columns`
+  section compared an output column's expression with each metric's binding and nothing else, so
+  `COUNT(DISTINCT number) … WHERE state = 'open'` read `matched` to the metric counting every row,
+  with nothing saying it was one slice. A matched item now carries `restrictions` (the WHERE,
+  inner-join ON and the column's own FILTER or CASE conditions beyond the metric's own; `[]` means
+  the metric's whole definition) and `result_filters` (HAVING, QUALIFY). A metric's own condition is
+  compared as part of the match, so a curated `SUM(amount) FILTER (WHERE status = 'paid')` now
+  matches a statement filtering to paid rows, and a statement leaving that condition out carries
+  `missing_conditions` naming it; one filtering the same column another way reads
+  `computed_differently`. An outer join's ON condition is listed for a number that reads the joined
+  table, and a SEMI or ANTI join is listed as the join. Only a bare `column = column` between two
+  references counts as a join condition; anything else naming two tables is listed. A metric's own
+  condition counts only on a reference the number reads, so a self-join's other side never stands
+  for it. An applied declared default filter is not listed. Every value in a condition naming a
+  sensitive column reads `<withheld>`, as does every value in a condition holding a subquery when the
+  statement names a sensitive column anywhere. Each list shows ten conditions and the receipt one
+  hundred in all; the section's `undetermined` sentence counts the columns cut short. A number read
+  through a CTE or subquery, or from a sampled or time-travelled table, now reads `undetermined`
+  where it used to read `matched` with that filter unseen, and so does a number in a shape the check
+  does not model: a FULL join, a window over filtered rows, an outer-join condition its aggregate
+  lets NULL rows past, or two references whose names differ only by case. The receipt's echo bound also strips
+  invisible characters (zero-width, word joiner, byte-order mark, tag characters).
+
+- **Reference joins found on a ServiceNow warehouse exported as renamed views (#670).** A build of
+  such a warehouse (link columns ending `_sys_id`) found few of its joins: the preset knew only the
+  platform's own table names and keyed a reference field by name alone, so a field two classes point
+  at different tables was dropped. The build now finds the platform's dictionary tables in any
+  schema, renamed or not, maps each modelled view to its platform class, and proposes joins from the
+  dictionary, from parent classes and from a scan of link columns nothing explains. Every one is
+  checked on the data, within a cap. A declared join that checks out is written approved; one the
+  data confirms but the dictionary does not declare is written usable and unreviewed; only a
+  borderline match (70–95%), a column that fits two targets, or two links between the same pair goes
+  to the review list, with its reason. Renamed views also get descriptions and value labels. The
+  dictionary tables are read, never added to the model, and only when the model has the platform's
+  shape (a `sys_id` column) or `--preset` is given.
+
+- **Connect says what to have ready, then asks about the organisation and the source system first
+  (#673).** A before-you-start checklist opens `/agami-connect` and the README. The company and the
+  source system are the first two questions; they steer descriptions and switch on a named
+  product's metadata preset, and are never copied into the model as text. A fiscal year start given
+  up front is held and recorded after the build, so it is not asked again.
+
+- **Personal data the warehouse already protects (#675).** When the warehouse's own row- and
+  column-level security keeps people from personal values, `sm set-personal-data` records that as a
+  local build setting (not part of the deployed model). A build then clears the personal-data flags
+  it found, after every value read has run, keeps flags the model already had, and says so in one
+  line; `sm sensitive` reports the setting and the skills skip the personal-data question. The
+  card's last option now reads "Keep them queryable". Detection improves too: a request, ticket or
+  order number with phone-shaped digits is an identifier, a column that points at a person
+  (`assigned_user`, `opened_by`, `assigned_to`, `owner`) is flagged when its values look like names
+  or login ids, however often each one repeats, and `last_login` or `is_user` are not people. Such a
+  column never gets a value list unless every value is a code (Yes/No, "Created Date"), with the
+  setting on or off: the model files are not the warehouse.
+
+- **Review the open questions on a page that saves (#676).** `sm open-questions --all` lists every
+  open item, uncapped, ordered by how much it changes answers, together with the build's own guesses
+  to confirm: a code list it labelled alone, or a column it described alone (never one a person
+  signed). The page shows each question with its evidence and a choice of readings, "Ask each time"
+  or "Don't know"; a code list with the guess filled in; an unclear column with up to five sample
+  values. Saving applies one `sm curate` batch signed by the person who saved, and the file with
+  the sample values is deleted afterwards. Yes/No flags, plain numbers and codes that carry their
+  own label are no longer asked.
+
+- **Build progress you can see (#677).** Every progress line starts with its UTC time. A step that
+  writes nothing for a minute adds "waiting on the database for N min: …", and join checks log
+  "joins checked k/N", so a slow step no longer looks hung. Long builds open a live, read-only
+  progress page on `127.0.0.1` (batch n of N, stages, tables read, elapsed time); `sm introspect
+  --batch n/N` names the batch. Columns, keys and samples are read for up to four tables at once
+  (one at a time for a sign-in that prompts, such as a browser or MFA login) and folded in table
+  order, so the model is the same as a one-at-a-time build. A failing table or Ctrl-C cancels the
+  tables still queued.
+
+### Changed
+
+- **Receipts and schema replies say only whether a definition is approved, not who approved it.**
+  The `execute_sql` receipt's joins and metrics no longer carry `signed_off_by`, `signed_off_role`
+  or `signed_off_at` (nor does the copy the audit trail stores), and neither do the schema reply's
+  joins and metrics or the `sm context` / `sm bundle` payloads; `review_state` is unchanged. The
+  signer stays in the model files, curation, `sm history` and the model explorer.
+- **Connect no longer guesses how long a build takes.** The per-database time table and every
+  duration claim are gone from the connect skill; it says what the build does and reports progress
+  from the engine's own counts (`joins: checking 78 on the data`, `profiled 20/42 tables`).
+
+- **A bulk sign-off never signs an unseen item (#651).** "Approve all remaining", and "Approve
+  all" over more than the 15 rows its table shows, first list the items not yet shown and ask once
+  more. Each op of a bulk sign-off, on a card or the page's "Approve N", carries `"bulk": true`
+  into `curation_log.jsonl`.
+
+- **Building a model is about 7x faster.** Each statement the build sends ran in its own process
+  that imported the semantic-model runtime only to report that no model was loaded. The receipt
+  now answers "no model" first and looks the runtime up without importing it, so the bundled
+  sample builds in 9.1 s instead of 66.4 s (median of three, 181 statements), with the same
+  model. A missing runtime is still reported as missing. One cause changes: a runtime module
+  that is installed but raises when imported, on a call with no model, is now reported as "no
+  model" rather than "could not be built", because the module is no longer run to find out.
+
+- **"Ask me as you go" reaches the large tables and asks in business words (#672).** It skipped
+  every table above the size guard, so the busiest tables got no questions; it stopped at 12; it
+  offered readings no one would mean (a "completed" status that says the work failed); and some
+  questions named a table. A large table is now read on its recent rows (since the first of the
+  month three months back), the largest tables go first, every question is returned in order of
+  how much its readings' answers differ, a failure-like status is offered only as "also include",
+  and questions name rows by what they are. Cards come four at a time, each page with its evidence,
+  and the skill says which tables it did not check and which it read on recent rows. In the
+  `open-questions` output, `more` is gone and `windowed` is new.
+
+- **Connect cards ask business questions only (#674).** A card asks what the data means, in plain
+  words with an example. Safety flags, appending, batches and mapping thresholds are decided
+  conservatively and reported in one line, and a card never names a file or table without saying
+  what it is. Answers that come back the same for a whole column are confirmed in one line before
+  they are signed. The examples card reads "Mark them on a page (Recommended) / Review one by one /
+  Add my own / Keep all", and "Keep all" lists every example not yet seen before signing.
+
+- **Builds send far fewer statements.** A table's per-column reads (value lists, grain and key
+  checks, the placeholder scan) went one statement per column, each a new process and connection,
+  and on a view the view ran again each time. They now go up to 25 columns to a statement, falling
+  back to one column at a time when a combined read fails or times out. Columns of a type a database
+  cannot compare (CLOB, arrays, JSON) are still read alone.
+
+- **A view is sized with one capped count.** A view has no row estimate, so every cost guard read it
+  as small, and grain checks, value reads and overlap probes ran over the biggest views. A table the
+  catalog cannot size now gets one `COUNT` that stops at 5,000,001 rows; past that it is treated as
+  "at least 5,000,000", and a count that fails or runs out of time is treated as large. The model
+  page shows such a view as "≥ 5M", and the schema reply says "at least 5,000,000". A view whose
+  count failed is treated as large during the build but gets no size in the model, so the model page
+  says "size unknown" rather than claiming 5,000,000 rows.
+
+### Fixed
+
+- Suggested "average days" metrics keep the fraction of a day. Some warehouses, Redshift among them, average whole numbers to a whole number, so 2.7 days read as 2.
+- A table measured at 5,000,000 rows or more reads as "at least 5,000,000 rows" in the receipt and in what Claude is told about the table, not as one exact number.
+- No metric is suggested on a record key that was removed from the model.
+- The table picker no longer unticks a table that exists only in two backup or staging schemas. Each was named a copy of the other, so a default save left the table out.
+- **A receipt names a `GROUP BY 1` grouping by what it groups.** A number built from a metric per group (an
+  average of a per-day count) reported its grouping as `by: ["1"]`. A position is now read as the
+  expression it points at in that query's own select list; when it points at nothing, or the list
+  holds a `*`, `by` is null (the grouping could not be read) instead of a number.
+
+- **A running total over a metric is undetermined, not "not the agreed definition".** A window
+  calculation (`SUM(COUNT(*)) OVER (ORDER BY month)`, a share of a total, a `LAG`) came back
+  `unmatched` with no reason. What the window is computed over is now compared on its own: when
+  that is the metric, the item is `undetermined` and its reason names the window and the metric;
+  when it is not (another table, a missing condition, `COUNT(*)` for `COUNT(DISTINCT …)`), the item
+  says so exactly as the plain aggregate would. A plain aggregate is unaffected.
+
+- **A receipt says which link a join went through.** When the model declares several relationships
+  between the same two tables (two different people on one record), a declared join item now carries
+  `via`, the column(s) the join goes through, and `summary`, "<table> linked to <table> through
+  <column>". Both are null when there is one link, or when the links cannot be told apart by
+  their columns.
+
+- **A row count on a table whose rows repeat says so.** `COUNT(*)` (or a COUNT without DISTINCT)
+  over a table the model records as repeating each record on several rows, where the agreed metric
+  counts `COUNT(DISTINCT <key>)` on it, now carries the reason "counts rows; each record appears
+  several times on this table; the agreed metric counts each record once". Read from the repeat
+  fact a build writes on the table; without it the item is unchanged. Reconcile reports such a row
+  as open with that reason, never as a gap or a count by design.
+
+- **`sm examples --metric` works on its own.** The query skill names `--metric`, but the command
+  refused any call without `--query`. `--metric` alone now lists the examples tagged with that
+  metric (the most tags first); with neither flag the command says to give one.
+
+- **`sm suggest-metrics` proposes a count for a table whose rows repeat each record.** Introspection
+  measures the repeat and rightly leaves such a table without a one-column grain, but nothing was
+  then proposed on it, so the tables people ask about most often had no count. It now proposes a
+  distinct-record count on the measured record key (`COUNT(DISTINCT <key>)`), test-run like the
+  others, alongside the distinct-record flag rates; still no duration average over the repeats. A
+  table that holds each record once is unchanged.
+
+- **`sm enrich-metadata` reads a dictionary of any size it can, without a row cap from the caller.** The
+  skill told it to run under a 200,000-row cap, and a platform dictionary larger than that was refused
+  outright. The command now counts each metadata table first and reads it under a cap of that count
+  plus a margin, for that read alone; a table over 5,000,000 rows is refused with its count, never
+  read. Listing the catalog to find those tables is bounded the same way. The query-time cap is
+  unchanged, and the skill no longer asks for a number for this command.
+- **`sm introspect` says why the database couldn't be used.** A credentials profile missing its
+  password read every table, got no columns, and ended with "every name yielded zero columns. Check
+  the --tables list", pointing at shell quoting. A failure about the connection (missing
+  credentials, no driver, authentication, the network) now stops the run at the first statement
+  with the database's own message and exit code 2, instead of failing each table in turn (on a
+  network failure, each after its own timeout). A connection lost later in the build, while joins
+  are probed, stops it the same way before anything is written; one probe failing on its own
+  statement still only skips that probe. `sm discover` stops the same way, instead of advising an
+  explicit table list as if the catalog were locked down. Both commands also read the credentials
+  in the `--artifacts` folder they were given; they used whichever folder the pointer file named.
+
+- **A database that is connected but not built goes into the build, not the "Ask a question" card.**
+  With credentials saved and no model yet, `/agami-connect` showed the returning card and recommended
+  asking a question of a database with nothing built. `connect_resolve.py` now returns `next: build`
+  for that case, and the skill starts the build.
+
+- **A `.sql` file whose statement has a comment above it is read (#645).** The intake skipped it
+  as "not a SELECT", and split a statement on a `;` inside a string or a comment. The comment now
+  names the statement.
+
+- **The receipt no longer calls a metric written another way "not the agreed definition" (#655).**
+  `SUM(CASE WHEN p THEN x END)` beside a binding `SUM(x) FILTER (WHERE p)` was reported
+  `unmatched`. Spellings that give the same number on every input now match: FILTER and
+  `CASE WHEN … END` for SUM, AVG and COUNT (not MIN, MAX or DISTINCT, which compare text by
+  collation); `COUNT(*)`, `COUNT(1)` and `COUNT(CASE WHEN p THEN 1 END)`; an `ELSE 0` under
+  `COALESCE(…, 0)`; under a plain `GROUP BY`, `SUM(CASE WHEN p THEN 1 ELSE 0 END)` as a count and
+  `NULLIF(COUNT(*), 0)` as `COUNT(*)`; and the order of `AND` terms and `*` operands. Each was run
+  both ways on SQLite, DuckDB and Postgres. When a declared metric reads the same columns with the
+  same kind of aggregate but is still written differently, the column's status is the new
+  `computed_differently` ("not compared") instead of `unmatched`.
+
+- **Redshift builds found no tables (#668).** Since #588 the Redshift schema list filters on
+  `has_schema_privilege`, which the SQL guard refuses as a privilege probe, and the query was never
+  added to the build's allow-list of agami's own catalog reads. Every Redshift build reported "no
+  tables discovered" on a warehouse the login could read. The query is now on the list, matched by
+  fingerprint as before, so a statement an AI writes that calls the function is still refused, and a
+  hosted server still never takes `--build-profile`. A test now fails when any dialect's catalog read
+  would be refused and is missing from the list. When the guard refuses discovery's schema or table
+  list, discovery now fails with the rule and the workaround (an explicit `schema.table` list)
+  instead of reporting an empty catalog.
+
+- **A build in several batches checks only the new joins, and keeps what earlier batches found
+  (#669).** Each `introspect --append` batch re-checked every join in the model, so each batch took
+  longer than the last, and each one replaced the join candidates found before it, so a build could
+  report "0 joins found" while candidates existed. An append now checks only pairs that touch a
+  table it read; a table read again is re-tested; candidates are merged across batches. A table's
+  own key is no longer paired with another table's own key, and a generic id shared by several
+  tables counts as a reference only when it names the table it points at (`customer_id` →
+  `customers`). When the check cap stops the scan, the report and `join_candidates.json` name the
+  tables left unchecked, and the report shows candidates found beside joins written.
+
+- **The build no longer guesses three facts that change answers (#671).** A table that repeats each
+  record several times per key was modelled as one row per record, so every plain count was too
+  high. A table with no grain is now checked once, comparing its rows with its distinct keys (on
+  recent rows or a sample when it is large); a repeat becomes a caveat to count distinct keys, and
+  proposed metrics count distinct records. The fiscal year start is no longer written as January
+  unasked: it is asked on a card, January included, recorded once answered, and kept on a rebuild;
+  `sm set-fiscal-year --month N` sets it. Two amount columns in different units are recorded as each
+  column's unit, never as a per-question ambiguity. `datasource.yaml` gains
+  `fiscal_year_start_confirmed`; an older agami-core refuses a stored model that has it, so take
+  care rolling back past this release.
+
+- **A column named like a refused keyword is no longer refused (#492).** A column called `notify`,
+  `lock`, `set` or `into`, quoted, qualified (`t.notify`) or a plain item in the select list, was
+  refused as a write. It is now read as the column it is. `NOTIFY chan`, `LOCK TABLE`, `SET x` and
+  `SELECT … INTO` stay refused, and `SELECT INTO "from" FROM t`, which creates a table on Postgres
+  and Redshift, is refused too; write `t.into` or quote the name.
+
+- **Small fixes from a large build (#678).** Value labels from the platform's choice list match the
+  values a column holds ignoring case (`EMAIL` and `Email`). `sm describe-file` and `sm curate`
+  report what they applied under the same keys, so a successful write no longer reads as a no-op.
+  On Redshift, a read-only login gets row estimates in the table list, and a table with none says
+  "size unknown". A join from a record to its parent-class record on the same id is labelled
+  one-to-one, not many-to-one. `sm add` test-runs a derived metric's resolved SQL, not its
+  `{placeholder}`. `sm remove-example` resolves an `<area>/<question>` name to that area and reports
+  an example it skips.
+
 ## [0.9.23] — 2026-11-17
 
 ### Added

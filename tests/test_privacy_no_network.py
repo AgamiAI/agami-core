@@ -107,9 +107,14 @@ def test_urllib_parse_is_still_allowed():
 
 # A listener is not egress, so the scan above has nothing to say about one. But a shipped script that
 # accepts connections is a surface of its own, so pin it: only the connect helper and the page server
-# listen, and only on the loopback interface, where nothing off this machine can reach them.
+# listen, and only on the loopback interface, where nothing off this machine can reach them. The page
+# server's saving mode (`--decisions`, #651) is the one listener that takes data from a page other
+# than the password: one JSON post behind a token, written to a file and applied by the skill, never
+# by the server. Its refusals are tested in test_serve_page.py. The build-progress page (#677) is
+# read-only: GET and HEAD of its page and a status summary of the progress log, behind a token; it
+# takes nothing from the page (test_introspect_progress.py).
 LISTEN = re.compile(r"\bhttp\.server\b|\bsocketserver\b")
-LISTENERS = {"connect_helper.py", "serve_page.py"}
+LISTENERS = {"connect_helper.py", "serve_page.py", "progress_page.py"}
 
 
 def test_only_the_local_helpers_listen_and_only_on_loopback():
@@ -119,3 +124,25 @@ def test_only_the_local_helpers_listen_and_only_on_loopback():
         text = (SCRIPTS_DIR / name).read_text()
         assert '"127.0.0.1"' in text, name
         assert not re.search(r"""["'](?:0\.0\.0\.0|::|localhost)?["']\s*,\s*\d""", text.replace('"127.0.0.1"', "")), name
+
+
+def test_every_listener_is_in_the_privacy_inventory():
+    # docs/privacy.md is where a person learns what listens on their machine; a new listener that
+    # the scan above allows must be described there too, with its address and lifetime.
+    doc = (REPO_ROOT / "docs" / "privacy.md").read_text()
+    missing = [name for name in sorted(LISTENERS) if f"scripts/{name}" not in doc]
+    assert not missing, f"listener(s) missing from docs/privacy.md: {missing}"
+
+
+def test_the_page_server_takes_decisions_only_behind_its_checks():
+    text = (SCRIPTS_DIR / "serve_page.py").read_text()
+    # one post, size-capped, from the page's own origin, at the token's path, written and nothing more
+    for needle in ("MAX_DECISIONS", "srv.origins", 'srv.base + "save"', "srv.taken or srv.closed", "_write_private"):
+        assert needle in text, needle
+    assert "subprocess" not in text and "curate" not in text  # applying is the skill's job
+
+
+def test_the_progress_page_takes_nothing_from_the_page():
+    text = (SCRIPTS_DIR / "progress_page.py").read_text()
+    assert "do_POST = do_PUT = do_DELETE = do_PATCH = _refuse" in text
+    assert "rfile" not in text and "subprocess" not in text and "write_text" not in text

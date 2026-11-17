@@ -1,0 +1,840 @@
+"""Every query that has ever been read as a false match, in one place (ACE-177 criterion 11).
+
+A false `matched` is the defect the receipt's `columns` section exists to prevent, so each one found
+stays a test, here, rather than in whichever battery happened to find it. The lists are DATA: the
+batteries assert what each reads as, and `receipt_truth` executes every one the receipt calls
+`matched` and checks the claim against the numbers.
+
+The SQL is written against the synthetic `acme` model of `tests/test_ace177_filters_on_a_matched_metric.py`
+(`orders`, `customers`, `payments`, `change_requests`) unless a list says otherwise.
+"""
+
+from __future__ import annotations
+
+# #655 / #658: two spellings of one metric that can return different rows, over the `t (g, p, x)`
+# table of `tests/test_receipt_equivalent_spellings.py`. None may match.
+# (binding, written, why it is not the same number, witness). Each witness is
+# (engine, dataset, grouped) on which the two return different rows.
+SPELLINGS_DIFFERENT = [
+    (
+        "SUM(x) FILTER (WHERE p = 'paid')",
+        "SUM(CASE WHEN p = 'paid' THEN x ELSE 0 END)",
+        "no matching row: NULL against 0",
+        ("sqlite", "none_paid", False),
+    ),
+    (
+        "AVG(x) FILTER (WHERE p = 'paid')",
+        "AVG(CASE WHEN p = 'paid' THEN x ELSE 0 END)",
+        "the zeros are averaged in",
+        ("sqlite", "full", False),
+    ),
+    (
+        "COUNT(*) FILTER (WHERE p = 'paid')",
+        "SUM(CASE WHEN p = 'paid' THEN 1 ELSE 0 END)",
+        "an empty table: 0 against NULL",
+        ("sqlite", "empty", False),
+    ),
+    (
+        "COUNT(*) FILTER (WHERE p = 'paid')",
+        "SUM(CASE WHEN p = 'paid' THEN 1 END)",
+        "a group with no match: 0 against NULL",
+        ("sqlite", "full", True),
+    ),
+    (
+        "COUNT(*)",
+        "NULLIF(COUNT(*), 0)",
+        "an empty table: 0 against NULL",
+        ("sqlite", "empty", False),
+    ),
+    # Widening for division. A numeric cast keeps integer division on SQLite, and on Postgres a
+    # quotient past 10^16 keeps one digit fewer than `* 1.0` gives (not reproducible on this data).
+    (
+        "SUM(x) * 1.0 / COUNT(*)",
+        "CAST(SUM(x) AS NUMERIC) / COUNT(*)",
+        "SQLite: a NUMERIC cast of an integer is still an integer",
+        ("sqlite", "full", False),
+    ),
+    # Dropping NULLIF from a denominator: DuckDB returns infinity for 1/0, not NULL.
+    (
+        "SUM(x) / NULLIF(COUNT(*) FILTER (WHERE p = 'zzz'), 0)",
+        "SUM(x) / COUNT(*) FILTER (WHERE p = 'zzz')",
+        "DuckDB divides by zero to infinity",
+        ("duckdb", "full", False),
+    ),
+    # A FILTER can leave a group's aggregate with no input, so the grouped-only rules do not hold
+    # inside one: group 1 has no row with g > 1, giving NULL against 0. Both directions.
+    (
+        "COUNT(CASE WHEN p = 'paid' THEN 1 END) FILTER (WHERE g > 1)",
+        "SUM(CASE WHEN p = 'paid' THEN 1 ELSE 0 END) FILTER (WHERE g > 1)",
+        "a FILTER that empties group 1: 0 against NULL",
+        (("sqlite", "duckdb"), "full", True),
+    ),
+    (
+        "SUM(CASE WHEN p = 'paid' THEN 1 ELSE 0 END) FILTER (WHERE g > 1)",
+        "COUNT(CASE WHEN p = 'paid' THEN 1 END) FILTER (WHERE g > 1)",
+        "a FILTER that empties group 1: NULL against 0",
+        (("sqlite", "duckdb"), "full", True),
+    ),
+    # A CASE result carries no column collation, so over a collated text column DISTINCT, MIN and
+    # MAX compare differently in the CASE form: SQLite, `x TEXT COLLATE NOCASE`.
+    (
+        "COUNT(DISTINCT x) FILTER (WHERE p = 'paid')",
+        "COUNT(DISTINCT CASE WHEN p = 'paid' THEN x END)",
+        "'a' and 'A' are one value under NOCASE, two in the CASE form",
+        ("sqlite_nocase", "nocase", False),
+    ),
+    (
+        "MIN(x) FILTER (WHERE p = 'paid')",
+        "MIN(CASE WHEN p = 'paid' THEN x END)",
+        "NOCASE orders 'a' first, BINARY orders 'A' first",
+        ("sqlite_nocase", "nocase", False),
+    ),
+    (
+        "MAX(x) FILTER (WHERE p = 'paid')",
+        "MAX(CASE WHEN p = 'paid' THEN x END)",
+        "NOCASE orders 'B' last, BINARY orders 'a' last",
+        ("sqlite_nocase", "nocase", False),
+    ),
+    # SQLite compares two columns of different collations with the LEFT one's, so `=` and `<>` are
+    # not symmetric there.
+    (
+        "COUNT(*) FILTER (WHERE x = p)",
+        "COUNT(*) FILTER (WHERE p = x)",
+        "'a' = 'A' under the left column's NOCASE, not under BINARY",
+        ("sqlite_nocase", "nocase", False),
+    ),
+    (
+        "COUNT(*) FILTER (WHERE x <> p)",
+        "COUNT(*) FILTER (WHERE p <> x)",
+        "'a' <> 'A' only under the left column's BINARY",
+        ("sqlite_nocase", "nocase", False),
+    ),
+    (
+        "COUNT(*) FILTER (WHERE g > 1)",
+        "NULLIF(COUNT(*) FILTER (WHERE g > 1), 0)",
+        "a FILTER that empties group 1: 0 against NULL",
+        (("sqlite", "duckdb"), "full", True),
+    ),
+]
+
+
+# A filtered statement against UNFILTERED metrics (`change_count`, `total_sales`, `order_count`):
+# none may read `matched` with nothing listed. Includes every two-table condition the review found
+# being dropped as a "join" (OR, function, tuple, CASE, concatenation, non-equal comparison), and
+# the same filter one step back (a CTE, a derived table), which reads `undetermined`.
+NOT_A_PLAIN_MATCH = [
+    "SELECT COUNT(*) AS n FROM orders WHERE NOT (status = 'cancelled')",
+    "SELECT COUNT(*) AS n FROM orders WHERE status <> 'cancelled'",
+    "SELECT COUNT(*) AS n FROM orders WHERE status IN ('paid', 'shipped')",
+    "SELECT COUNT(*) AS n FROM orders WHERE status NOT IN ('cancelled')",
+    "SELECT SUM(total_amount) AS n FROM orders WHERE total_amount BETWEEN 10 AND 100",
+    "SELECT COUNT(*) AS n FROM orders WHERE status = 'paid' OR status = 'shipped'",
+    "SELECT COUNT(*) AS n FROM orders WHERE status IS NOT NULL",
+    "SELECT COUNT(*) AS n FROM orders WHERE status LIKE 'p%'",
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "AND c.region = 'EU'",
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE c.region = 'EU'",
+    "SELECT COUNT(*) AS n FROM orders o, customers c WHERE c.id = o.customer_id "
+    "AND c.region = 'EU'",
+    "SELECT COUNT(*) AS n FROM orders o WHERE EXISTS (SELECT 1 FROM customers c "
+    "WHERE c.id = o.customer_id AND c.region = 'EU')",
+    "SELECT COUNT(*) AS n FROM orders WHERE customer_id IN (SELECT id FROM customers "
+    "WHERE region = 'EU')",
+    "SELECT COUNT(*) AS n FROM orders o WHERE o.opened = o.closed",
+    "SELECT COUNT(*) AS n FROM orders WHERE 1 = 0",
+    "SELECT COUNT(*) AS n FROM orders WHERE TRUE AND status = 'paid'",
+    "SELECT COUNT(*) FILTER (WHERE status = 'paid') AS n FROM orders",
+    "SELECT SUM(CASE WHEN status = 'paid' THEN total_amount END) AS n FROM orders",
+    "SELECT COUNT(CASE WHEN status = 'paid' THEN 'x' END) AS n FROM orders",
+    "SELECT COUNT(*) FILTER (WHERE status = 'paid') AS n FROM orders WHERE customer_id = 3",
+    "SELECT COUNT(*) AS n FROM orders WHERE ((O.STATUS = 'paid'))",
+    "SELECT customer_id, COUNT(*) AS n FROM orders WHERE status = 'paid' "
+    "GROUP BY customer_id HAVING COUNT(*) > 1",
+    "SELECT COUNT(DISTINCT number) AS n FROM change_requests WHERE opened >= DATE '2026-01-01'",
+    "SELECT COUNT(*) AS n FROM orders WHERE " + " AND ".join(
+        f"status <> 's{i}'" for i in range(12)),
+    # A condition naming two references that is not a bare `col = col` restricts rows (review).
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE o.status = 'x' OR c.region = 'EU'",
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE COALESCE(o.status, c.status) = 'x'",
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE (o.status, c.region) IN (('x', 'EU'))",
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id OR c.region = 'EU'",
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE (o.status = 'paid' OR c.id IS NULL)",
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE CASE WHEN c.id IS NULL THEN TRUE ELSE o.status = 'x' END",
+    "SELECT COUNT(*) AS n FROM orders o JOIN orders o2 ON o2.id = o.id "
+    "AND (o2.status = 'paid' OR o.id < 0)",
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE o.status || c.region = 'paid' || c.region",
+    "SELECT SUM(o.total_amount) AS n FROM orders o JOIN payments p ON p.order_id = o.id "
+    "WHERE p.amount > o.total_amount",
+    # The same filter one step back: ACE-178 follows the step and lists it.
+    "WITH paid AS (SELECT id FROM orders WHERE status = 'paid') SELECT COUNT(*) AS n FROM paid",
+    "SELECT COUNT(*) AS n FROM (SELECT id FROM orders WHERE status = 'paid') x",
+    "SELECT SUM(p.total_amount) AS n FROM (SELECT total_amount FROM orders "
+    "WHERE status = 'paid') p",
+]
+
+
+# Against the full model, which also declares the curated twin `paid_sales`: a condition on a
+# reference the number does not read (a self-join's other side, an unqualified column in a
+# two-reference SELECT, another table's same-named column) may never stand for the twin's own.
+TWIN_TRICKS = [
+    "SELECT SUM(a.total_amount) AS s FROM orders a JOIN orders b ON b.id = a.customer_id "
+    "WHERE b.status = 'paid'",
+    "SELECT SUM(a.total_amount) FILTER (WHERE b.status = 'paid') AS s FROM orders a "
+    "JOIN orders b ON b.id = a.customer_id",
+    "SELECT SUM(o.total_amount) AS s FROM orders o JOIN payments p ON p.order_id = o.id "
+    "WHERE status = 'paid'",
+    # The curated twin's condition written on the OTHER table of a join.
+    "SELECT SUM(o.total_amount) AS s FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE c.status = 'paid'",
+]
+
+# The same rows as `paid_sales`, spelled every way #658 accepts: each is the twin, nothing extra.
+CURATED_SPELLINGS = [
+    "SELECT SUM(total_amount) AS s FROM orders WHERE status = 'paid'",
+    "SELECT SUM(total_amount) FILTER (WHERE status = 'paid') AS s FROM orders",
+    "SELECT SUM(CASE WHEN status = 'paid' THEN total_amount END) AS s FROM orders",
+    "SELECT SUM(o.total_amount) AS s FROM orders o WHERE ((O.STATUS = 'paid'))",
+    "SELECT SUM(total_amount) FILTER (WHERE status = 'paid') AS s FROM orders o "
+    "WHERE o.status = 'paid'",
+]
+
+# (storage type, statement): a SEMI or ANTI join keeps or drops rows by what another relation
+# holds, so it is listed as the join itself.
+SEMI_ANTI = [
+    ("DuckDB", "SELECT SUM(o.total_amount) AS n FROM orders o SEMI JOIN payments p "
+               "ON p.order_id = o.id"),
+    ("DuckDB", "SELECT SUM(o.total_amount) AS n FROM orders o ANTI JOIN payments p "
+               "ON p.order_id = o.id"),
+    ("Databricks", "SELECT SUM(o.total_amount) AS n FROM orders o LEFT ANTI JOIN payments p "
+                   "ON p.order_id = o.id AND p.status = 'x'"),
+]
+
+# (storage type, statement): a sampled table, or a table read as of another time, is not the metric
+# over the table and reads `undetermined`.
+UNSEEN_ROWS = [
+    ("PostgreSQL", "SELECT SUM(total_amount) AS n FROM orders TABLESAMPLE SYSTEM (10)"),
+    ("DuckDB", "SELECT SUM(total_amount) AS n FROM orders USING SAMPLE 10%"),
+    ("Snowflake", "SELECT SUM(total_amount) AS n FROM orders AT(TIMESTAMP => '2026-01-01')"),
+    ("BigQuery", "SELECT SUM(total_amount) AS n FROM orders "
+                 "FOR SYSTEM_TIME AS OF TIMESTAMP '2026-01-01'"),
+]
+
+
+# ACE-178: a restriction hidden one or more steps back — in a CTE, a subquery in FROM, a step's join,
+# a lookup step's value, a filter on a step's group key — over the same synthetic model, against
+# UNFILTERED metrics. None may read a plain `matched`: each lists the restriction, names a join the
+# model does not declare, or is not `matched`. A false match found in ACE-178's reviews joins here.
+STEP_TRICKS = [
+    # B. join forms through a step
+    "WITH s AS (SELECT o.total_amount FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "AND c.region = 'EU') SELECT SUM(total_amount) AS n FROM s",
+    "WITH s AS (SELECT o.total_amount FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE c.region = 'EU') SELECT SUM(total_amount) AS n FROM s",
+    "SELECT SUM(s.total_amount) AS n FROM (SELECT o.total_amount FROM orders o, customers c "
+    "WHERE c.id = o.customer_id AND c.region = 'EU') s",
+    "SELECT SUM(o.total_amount) AS n FROM orders o JOIN (SELECT id FROM customers "
+    "WHERE region = 'EU') c ON c.id = o.customer_id",
+    # C. step-specific
+    "WITH g AS (SELECT status, COUNT(*) AS n FROM orders GROUP BY status) "
+    "SELECT n FROM g WHERE status = 'paid'",
+    "WITH g AS (SELECT status AS st, COUNT(*) AS n FROM orders GROUP BY 1) "
+    "SELECT n FROM g WHERE st = 'paid'",
+    "WITH a AS (SELECT MAX(opened) AS d FROM orders) SELECT COUNT(*) AS n FROM orders o, a "
+    "WHERE o.opened >= a.d",
+    "WITH z AS (SELECT 1 AS k WHERE FALSE) SELECT COUNT(*) AS n FROM orders o CROSS JOIN z",
+    "WITH orders AS (SELECT id, total_amount FROM public.orders WHERE status = 'paid') "
+    "SELECT SUM(total_amount) AS n FROM orders",
+    "SELECT COUNT(*) AS n FROM (WITH o AS (SELECT id FROM orders WHERE status = 'paid') "
+    "SELECT id FROM o) x",
+    "WITH p AS (SELECT id, customer_id FROM orders WHERE status = 'paid') "
+    "SELECT COUNT(*) AS n FROM p a JOIN p b ON a.id = b.id",
+    "WITH a AS (SELECT id FROM s), s AS (SELECT id FROM orders WHERE status = 'paid') "
+    "SELECT COUNT(*) AS n FROM a",
+    "WITH p AS (SELECT id FROM orders WHERE status = 'paid') SELECT COUNT(*) AS n FROM \"p\"",
+    "WITH r AS (SELECT total_amount, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM orders) "
+    "SELECT SUM(total_amount) AS n FROM r WHERE rn <= 10",
+    "WITH t AS (SELECT total_amount FROM orders ORDER BY total_amount DESC LIMIT 10) "
+    "SELECT SUM(total_amount) AS n FROM t",
+    "WITH d AS (SELECT DISTINCT customer_id, total_amount FROM orders) "
+    "SELECT SUM(total_amount) AS n FROM d",
+    "WITH u AS (SELECT total_amount FROM orders WHERE status = 'paid' UNION ALL "
+    "SELECT total_amount FROM orders) SELECT SUM(total_amount) AS n FROM u",
+    "WITH paid AS (SELECT id FROM orders WHERE status = 'paid') "
+    "SELECT COUNT(*) AS n FROM orders WHERE id IN (SELECT id FROM paid)",
+    "WITH s AS (SELECT COUNT(*) FILTER (WHERE status = 'paid') AS n FROM orders) SELECT n FROM s",
+    "WITH s AS (SELECT SUM(CASE WHEN status = 'paid' THEN total_amount END) AS n FROM orders) "
+    "SELECT s.n AS n FROM s",
+    # Ten steps, the filter only in the innermost.
+    "WITH s0 AS (SELECT id, total_amount FROM orders WHERE status = 'paid'), "
+    + ", ".join(f"s{i} AS (SELECT id, total_amount FROM s{i - 1})" for i in range(1, 10))
+    + " SELECT SUM(total_amount) AS n FROM s9",
+    "WITH c AS (SELECT o.total_amount, c.status FROM orders o JOIN customers c "
+    "ON c.id = o.customer_id) SELECT SUM(total_amount) AS n FROM c WHERE status = 'paid'",
+    "WITH g AS (SELECT customer_id, COUNT(*) AS c FROM orders GROUP BY customer_id "
+    "HAVING COUNT(*) > 5) SELECT COUNT(*) AS n FROM orders o JOIN g ON g.customer_id = "
+    "o.customer_id",
+    "WITH g AS (SELECT customer_id, SUM(total_amount) AS t FROM orders WHERE status = 'paid' "
+    "GROUP BY customer_id) SELECT SUM(t) AS n FROM g",
+    "WITH RECURSIVE r AS (SELECT id, total_amount FROM orders WHERE status = 'paid' UNION ALL "
+    "SELECT id, total_amount FROM r WHERE id < 0) SELECT SUM(total_amount) AS n FROM r",
+    "WITH s AS (SELECT o.total_amount FROM orders o LEFT JOIN customers c ON c.id = "
+    "o.customer_id WHERE c.region = 'EU') SELECT SUM(total_amount) AS n FROM s",
+    "WITH x AS (SELECT * FROM orders WHERE status = 'paid') SELECT SUM(x.total_amount) AS n FROM x",
+    # PR review (ACE-178). One step read through two references: its references collapsed into
+    # one, so `b`'s condition stood for the metric's own condition on `a`.
+    "WITH x AS (SELECT id, customer_id, total_amount, status FROM orders) SELECT SUM(a.total_amount) "
+    "AS n FROM x a JOIN x b ON a.customer_id = b.id WHERE b.status = 'paid'",
+    "WITH x AS (SELECT id, customer_id, total_amount, status FROM orders) SELECT SUM(a.total_amount) "
+    "AS n FROM x a, x b WHERE a.customer_id = b.id AND b.status = 'paid'",
+    "WITH x AS (SELECT id, customer_id, total_amount, status FROM orders), p AS (SELECT id FROM x "
+    "WHERE status = 'paid'), q AS (SELECT customer_id, total_amount FROM x) "
+    "SELECT SUM(q.total_amount) AS n FROM q JOIN p ON q.customer_id = p.id",
+    "WITH orders AS (SELECT id, customer_id, total_amount, status FROM orders) SELECT "
+    "SUM(a.total_amount) AS n FROM orders a JOIN orders b ON a.customer_id = b.id "
+    "WHERE b.status = 'paid'",
+    "WITH g AS (SELECT status, COUNT(*) AS n FROM orders GROUP BY status) "
+    "SELECT a.n FROM g a CROSS JOIN g b WHERE b.status = 'paid'",
+    # Set-returning and unknown functions in a step multiply or drop rows no condition states.
+    "WITH a AS (SELECT generate_series(1, 3) AS k) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "CROSS JOIN a",
+    "SELECT SUM(o.total_amount) AS n FROM orders o CROSS JOIN (SELECT UNNEST(ARRAY[1, 2, 3]) AS k) a",
+    "WITH f AS (SELECT MAX(opened) AS m, generate_series(1, 3) AS g FROM orders) "
+    "SELECT SUM(o.total_amount) AS n FROM orders o CROSS JOIN f",
+    "WITH s AS (SELECT total_amount, generate_series(1, 3) AS g FROM orders) "
+    "SELECT SUM(total_amount) AS n FROM s",
+    "WITH s AS (SELECT total_amount, unnest(ARRAY[1, 2]) AS g FROM orders) "
+    "SELECT SUM(total_amount) AS n FROM s",
+    "WITH s AS (SELECT total_amount, my_rows(id) AS g FROM orders) SELECT SUM(total_amount) AS n FROM s",
+    # Under WITH RECURSIVE a step may bind a sibling defined after it.
+    "WITH RECURSIVE a AS (SELECT total_amount, status FROM orders), orders AS (SELECT "
+    "total_amount, status FROM public.orders WHERE status = 'refunded') "
+    "SELECT SUM(total_amount) AS n FROM a",
+    # DISTINCT ON keeps one row per key, chosen by order: not a de-duplication.
+    "WITH s AS (SELECT DISTINCT ON (customer_id) customer_id, total_amount FROM orders "
+    "ORDER BY customer_id, id) SELECT COUNT(DISTINCT total_amount) AS n FROM s",
+    # A lookup step's value that cuts every row, and a FULL join in a step.
+    "WITH a AS (SELECT MAX(opened) AS d FROM orders) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "CROSS JOIN a WHERE a.d > '2030-01-01'",
+    "WITH a AS (SELECT MAX(opened) AS d FROM orders) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "JOIN a ON a.d IS NULL",
+    "WITH a AS (SELECT MAX(opened) AS d FROM orders GROUP BY status) SELECT SUM(o.total_amount) AS n "
+    "FROM orders o CROSS JOIN a",
+    "WITH x AS (SELECT o.id, o.total_amount FROM orders o FULL JOIN payments p "
+    "ON p.order_id = o.id) SELECT COUNT(*) AS n FROM x",
+    "WITH g AS (SELECT status, COUNT(*) AS n FROM orders GROUP BY ROLLUP(status)) "
+    "SELECT n FROM g WHERE status IS NULL",
+]
+
+# PR #660 review. (label, metrics declared, storage type, statement): each read `matched` with
+# nothing listed before it was fixed; none may now. The metrics are declared per case, in the
+# `acme` model's tables, so a case adds no metric the other batteries would also see.
+_PAID_PAYMENTS = {"paid_payments": ("SUM(amount) FILTER (WHERE status = 'paid')", ["payments"])}
+REVIEW_TRICKS = [
+    ("window frame: a FILTER inside OVER is not a WHERE",
+     {"paid_window": ("SUM(total_amount) FILTER (WHERE status = 'paid') "
+                      "OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)", ["orders"])},
+     "PostgreSQL",
+     "SELECT SUM(total_amount) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS n "
+     "FROM orders WHERE status = 'paid'"),
+    ("mixed-reference FILTERs over a ratio",
+     {"amount_ratio": ("SUM(total_amount) / SUM(amount)", ["orders", "payments"])},
+     "PostgreSQL",
+     "SELECT SUM(o.total_amount) FILTER (WHERE o.status = 'paid') / "
+     "SUM(p.amount) FILTER (WHERE p.status = 'paid') AS n "
+     "FROM orders o JOIN payments p ON p.order_id = o.id"),
+    ("an unqualified equality on one table in a two-table SELECT",
+     {"order_count": ("COUNT(*)", ["orders"])},
+     "PostgreSQL",
+     "SELECT COUNT(*) AS n FROM orders o JOIN payments p ON p.order_id = o.id "
+     "WHERE customer_id = total_amount"),
+    ("aliases that differ only by quoted case",
+     {"paid_sales": ("SUM(total_amount) FILTER (WHERE status = 'paid')", ["orders"])},
+     "PostgreSQL",
+     'SELECT SUM(orders.total_amount) AS n FROM orders AS orders CROSS JOIN orders AS "ORDERS" '
+     "WHERE \"ORDERS\".status = 'paid'"),
+    ("an ANTI join's ON is not a filter on the kept rows",
+     {"paid_sales": ("SUM(total_amount) FILTER (WHERE status = 'paid')", ["orders"])},
+     "DuckDB",
+     "SELECT SUM(o.total_amount) AS n FROM orders o ANTI JOIN payments p "
+     "ON p.order_id = o.id AND o.status = 'paid'"),
+    ("a FULL join keeps both sides whatever its ON says",
+     _PAID_PAYMENTS, "PostgreSQL",
+     "SELECT SUM(p.amount) AS n FROM orders o FULL JOIN payments p "
+     "ON p.order_id = o.id AND p.status = 'paid'"),
+    ("an aggregate's own FILTER equating two references",
+     {"order_count": ("COUNT(*)", ["orders"])},
+     "PostgreSQL",
+     "SELECT COUNT(*) FILTER (WHERE o.customer_id = c.id) AS n "
+     "FROM orders o CROSS JOIN customers c"),
+    ("an outer ON condition where null-extended rows still count",
+     {"paid_payment_rows": ("COUNT(COALESCE(id, 0)) FILTER (WHERE status = 'paid')",
+                            ["payments"])},
+     "PostgreSQL",
+     "SELECT COUNT(COALESCE(p.id, 0)) AS n FROM orders o LEFT JOIN payments p "
+     "ON p.order_id = o.id AND p.status = 'paid'"),
+]
+
+
+# Against the curated twins (`paid_sales`, `paid_order_count`), these STEP_TRICKS ARE a twin: each
+# keeps only the paid orders it counts, through its steps, and may read as that twin with nothing
+# listed. Any other plain match of a STEP_TRICK, against either model, is a false one. Written by
+# hand; a key that is not in STEP_TRICKS fails the battery.
+STEP_TRICK_TWINS = {
+    "WITH g AS (SELECT status, COUNT(*) AS n FROM orders GROUP BY status) SELECT n FROM g WHERE status = 'paid'":
+        'paid_order_count',
+    "WITH g AS (SELECT status AS st, COUNT(*) AS n FROM orders GROUP BY 1) SELECT n FROM g WHERE st = 'paid'":
+        'paid_order_count',
+    "WITH orders AS (SELECT id, total_amount FROM public.orders WHERE status = 'paid') SELECT SUM(total_amount) AS n FROM orders":
+        'paid_sales',
+    "SELECT COUNT(*) AS n FROM (WITH o AS (SELECT id FROM orders WHERE status = 'paid') SELECT id FROM o) x":
+        'paid_order_count',
+    "WITH s AS (SELECT COUNT(*) FILTER (WHERE status = 'paid') AS n FROM orders) SELECT n FROM s":
+        'paid_order_count',
+    "WITH s AS (SELECT SUM(CASE WHEN status = 'paid' THEN total_amount END) AS n FROM orders) SELECT s.n AS n FROM s":
+        'paid_sales',
+    "WITH s0 AS (SELECT id, total_amount FROM orders WHERE status = 'paid'), s1 AS (SELECT id, total_amount FROM s0), s2 AS (SELECT id, total_amount FROM s1), s3 AS (SELECT id, total_amount FROM s2), s4 AS (SELECT id, total_amount FROM s3), s5 AS (SELECT id, total_amount FROM s4), s6 AS (SELECT id, total_amount FROM s5), s7 AS (SELECT id, total_amount FROM s6), s8 AS (SELECT id, total_amount FROM s7), s9 AS (SELECT id, total_amount FROM s8) SELECT SUM(total_amount) AS n FROM s9":
+        'paid_sales',
+}
+
+
+# ACE-178 item 7: a join to a WITH step is the declared join to the table the step reads only when the
+# step hands that table back row for row, every column under its own name. Against a model declaring
+# `orders.customer_id → customers.id`, each of these joins on something else — a renamed column, a
+# computed one, a de-duplicated step, the number's own side renamed, a filter on a renamed column — so
+# none may read a plain `matched`: each names the join, or lists the restriction.
+STEP_JOIN_TRICKS = [
+    "WITH c AS (SELECT region AS id FROM customers) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "JOIN c ON c.id = o.customer_id",
+    "WITH c AS (SELECT id + 0 AS id FROM customers) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "JOIN c ON c.id = o.customer_id",
+    "WITH c AS (SELECT DISTINCT id FROM customers) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "JOIN c ON c.id = o.customer_id",
+    "WITH o2 AS (SELECT customer_id AS id, total_amount FROM orders) SELECT SUM(o2.total_amount) AS n "
+    "FROM o2 JOIN customers c ON c.id = o2.id",
+    "WITH c AS (SELECT id, status AS region FROM customers) SELECT SUM(o.total_amount) AS n "
+    "FROM orders o JOIN c ON c.id = o.customer_id WHERE c.region = 'EU'",
+    "WITH c(id) AS (SELECT region FROM customers) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "JOIN c ON c.id = o.customer_id",
+    # Review of ACE-178 part 2. A quoted name an engine folds onto a WITH of that name: the scope
+    # gate reads it as the table, the engine may read the step. Neither, for the receipt.
+    "WITH customers AS (SELECT 1 AS id, status AS region FROM orders) SELECT SUM(o.total_amount) "
+    "AS n FROM orders o JOIN \"customers\" c ON c.id = o.customer_id",
+    "WITH orders AS (SELECT id, 1000 AS total_amount, customer_id FROM orders) "
+    "SELECT SUM(total_amount) AS n FROM \"orders\"",
+    # An alias column list renames a TABLE's columns by position, inside a step or not.
+    "WITH o2 AS (SELECT customer_id, total_amount FROM orders AS t(customer_id, id)) "
+    "SELECT SUM(o2.total_amount) AS n FROM o2 JOIN customers c ON c.id = o2.customer_id",
+    "SELECT SUM(o.total_amount) AS n FROM orders AS o(customer_id, total_amount)",
+    # Under WITH RECURSIVE a step may read a sibling defined after it.
+    "WITH RECURSIVE a AS (SELECT id, total_amount FROM orders), orders AS (SELECT id, 1000 AS "
+    "total_amount FROM public.orders) SELECT SUM(total_amount) AS n FROM a",
+    # A star that renames or replaces columns, a quoted column that is another column, a step with
+    # no columns, and a step over a table the model does not declare in that schema, or in the
+    # connecting user's default schema. (A catalog part is the scope gate's catalog check's to judge,
+    # as for a table read outside a step.)
+    "WITH c AS (SELECT * REPLACE (region AS id) FROM customers) SELECT SUM(o.total_amount) AS n "
+    "FROM orders o JOIN c ON c.id = o.customer_id",
+    "WITH c AS (SELECT \"Id\" AS id FROM customers) SELECT SUM(o.total_amount) AS n "
+    "FROM orders o JOIN c ON c.id = o.customer_id",
+    "WITH c AS (SELECT * FROM secretschema.customers) SELECT SUM(o.total_amount) AS n "
+    "FROM orders o JOIN c ON c.id = o.customer_id",
+    "WITH c AS (SELECT * FROM public..customers) SELECT SUM(o.total_amount) AS n "
+    "FROM orders o JOIN c ON c.id = o.customer_id",
+]
+
+
+# Found by auditing real receipts (ACE-178 part 3), rewritten over the synthetic models.
+#
+# An OR among the conditions on the counted rows. A reader joins a restriction list with AND, so
+# each list, joined that way, must keep the rows the statement keeps: `opened >= … AND a OR b` read
+# as `(opened >= … AND a) OR b` counted rows from every year. Over the `acme` model, UNFILTERED.
+OR_GROUPS = [
+    "SELECT COUNT(*) AS n FROM orders WHERE opened >= '2026-01-01' AND (LOWER(status) LIKE '%ship%' "
+    "OR LOWER(status) LIKE '%paid%')",
+    "SELECT COUNT(*) AS n FROM orders WHERE customer_id > 0 AND ((status = 'paid' AND "
+    "total_amount > 5) OR (status IN ('open', 'shipped') AND closed IS NULL) OR "
+    "(status = 'cancelled' AND opened < '2026-03-02') OR status IS NULL)",
+    "SELECT SUM(total_amount) AS n FROM orders WHERE (status = 'paid' OR status = 'open') "
+    "AND (customer_id = 1 OR customer_id = 2)",
+    "SELECT COUNT(DISTINCT number) AS n FROM change_requests WHERE opened >= '2026-01-02' "
+    "AND (type = 'normal' OR state = 'Closed')",
+]
+
+# A set operation whose arms count different things in one output column. Over the `acme` model:
+# no aggregate item of any arm may read `matched`, since the column holds every arm's rows.
+SET_OP_TRICKS = [
+    "SELECT 'paid orders' AS kind, COUNT(*) AS n FROM orders WHERE status = 'paid' UNION ALL "
+    "SELECT 'paid payments', COUNT(*) FROM payments WHERE status = 'paid'",
+    "SELECT 'orders' AS kind, COUNT(*) AS completed FROM orders WHERE status = 'paid' UNION ALL "
+    "SELECT 'payments', COUNT(*) FROM payments WHERE status = 'refunded' UNION ALL "
+    "SELECT 'changes', COUNT(DISTINCT number) FROM change_requests WHERE state = 'Closed'",
+    "SELECT SUM(total_amount) AS n FROM orders UNION ALL SELECT SUM(amount) FROM payments",
+    "SELECT COUNT(*) AS n FROM orders UNION SELECT COUNT(DISTINCT number) FROM change_requests",
+    "SELECT COUNT(*) AS n FROM orders UNION ALL (VALUES (3))",
+]
+
+# A filter in a later step on a step column computed from a table's, or renamed from one. Over the
+# `acme` model, UNFILTERED: each lists the condition over the tables (`STEP_BASE_TERMS`), a column it
+# substitutes named by its table, or is not `matched`.
+STEP_BASE_TERMS = {
+    "WITH pop AS (SELECT c.number, c.opened, TRIM(COALESCE(c.type, '')) LIKE 'em%' AS is_em "
+    "FROM change_requests c) SELECT COUNT(DISTINCT p.number) AS n FROM pop AS p WHERE p.is_em":
+        ["TRIM(COALESCE(change_requests.type, '')) LIKE 'em%'"],
+    "SELECT COUNT(DISTINCT p.number) AS n FROM (SELECT c.number, TRIM(COALESCE(c.type, '')) "
+    "LIKE 'em%' AS is_em FROM change_requests c) p WHERE p.is_em":
+        ["TRIM(COALESCE(change_requests.type, '')) LIKE 'em%'"],
+    "WITH pop AS (SELECT c.number, c.type AS kind FROM change_requests c) "
+    "SELECT COUNT(DISTINCT p.number) AS n FROM pop p WHERE p.kind = 'normal'":
+        ["change_requests.type = 'normal'"],
+    "WITH pop AS (SELECT o.id, o.total_amount, o.status = 'paid' AS is_paid FROM orders o) "
+    "SELECT SUM(total_amount) AS n FROM pop WHERE NOT is_paid":
+        ["orders.status <> 'paid'"],
+    "WITH a AS (SELECT id, total_amount, status = 'paid' OR status = 'open' AS live FROM orders), "
+    "b AS (SELECT id, total_amount, live AS keep FROM a) SELECT SUM(total_amount) AS n FROM b "
+    "WHERE keep AND id > 1":
+        ["(orders.status = 'paid' OR orders.status = 'open')", "orders.id > 1"],
+}
+
+# The same, where no condition over the tables states the step column, or stating it would not be
+# safe. Over the `acme` model, UNFILTERED: undetermined, with nothing of the condition shown.
+STEP_UNSTATED = [
+    # A number a grouping step computed.
+    "WITH g AS (SELECT customer_id, COUNT(*) AS c FROM orders GROUP BY customer_id) "
+    "SELECT SUM(o.total_amount) AS n FROM orders o JOIN g ON g.customer_id = o.customer_id "
+    "WHERE g.c > 1",
+    # A whole row of a table with a sensitive column, read through a step.
+    "WITH p AS (SELECT o.id, CAST(c AS TEXT) AS r FROM orders o JOIN customers c "
+    "ON c.id = o.customer_id) SELECT COUNT(*) AS n FROM p WHERE p.r LIKE '%secret%'",
+    # A subquery naming the step: its alias cannot be renamed from here.
+    "WITH p AS (SELECT o.id, o.customer_id AS cid FROM orders o) SELECT COUNT(*) AS n FROM p "
+    "WHERE EXISTS (SELECT 1 FROM customers c WHERE c.id = p.cid)",
+    # A table the statement reads twice: `orders.status` would not say which.
+    "WITH p AS (SELECT o.id, o.status = 'paid' AS f FROM orders o) SELECT COUNT(*) AS n "
+    "FROM p JOIN orders q ON q.id = p.id WHERE p.f",
+    # Each step doubling a column: the condition outgrows its bound (in milliseconds).
+    "WITH s0 AS (SELECT o.id, o.status AS a FROM orders o), "
+    + ", ".join(f"s{i} AS (SELECT id, a || a AS a FROM s{i - 1})" for i in range(1, 21))
+    + " SELECT COUNT(*) AS n FROM s20 WHERE s20.a = 'x'",
+]
+
+# A filter on a grouping step's group key keeps the same rows before and after it. Over the `acme`
+# model, UNFILTERED: (statement, the built-from number's restrictions).
+GROUP_KEY_THROUGH_STEP = [
+    ("WITH g AS (SELECT customer_id, SUM(total_amount) AS t FROM orders GROUP BY customer_id) "
+     "SELECT SUM(t) AS n FROM g WHERE customer_id > 1", ["orders.customer_id > 1"]),
+]
+
+# Over the `audit` model of `tests/test_ace178_receipt_audit_fixes.py` (`assets`, `users`,
+# `expense_lines`, `award_departments`, `outages`, `incidents`, `problems`), which declares three
+# relationships from `assets` to `users`.
+#
+# A condition on a table reached by one of several declared relationships: (statement, what the
+# receipt must say). A restriction list, or None for "not matched" (the link cannot be told). A
+# link is shown once, with every condition reached through it: on the join's own line when the join
+# drops rows, else on a line of its own (round 3).
+LINK_TRICKS = [
+    ("SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id WHERE NOT u.active",
+     ["only assets rows that have a matching users row (on users.id = assets.assigned_to_id) "
+      "via assets.assigned_to_id → users.id: u.active = FALSE"]),
+    ("SELECT COUNT(*) AS n FROM assets a JOIN users u ON a.owned_by_id = u.id "
+     "WHERE u.active = FALSE",
+     ["only assets rows that have a matching users row (on assets.owned_by_id = users.id) "
+      "via assets.owned_by_id → users.id: u.active = FALSE"]),
+    ("SELECT COUNT(*) AS n FROM assets a LEFT JOIN users u ON u.id = a.managed_by_id "
+     "WHERE u.active",
+     ["only assets rows that have a matching users row (on users.id = assets.managed_by_id) "
+      "via assets.managed_by_id → users.id: u.active"]),
+    ("SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id "
+     "AND u.id = a.managed_by_id WHERE NOT u.active", None),
+    ("SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id "
+     "WHERE NOT u.active AND u.id > 2",
+     ["only assets rows that have a matching users row (on users.id = assets.assigned_to_id) "
+      "via assets.assigned_to_id → users.id: u.active = FALSE AND u.id > 2"]),
+    # The related table read through a step.
+    ("WITH uu AS (SELECT id, active FROM users) SELECT COUNT(*) AS n FROM assets a "
+     "LEFT JOIN uu ON uu.id = a.managed_by_id WHERE uu.active",
+     ["only assets rows that have a matching users row (on users.id = assets.managed_by_id) "
+      "via assets.managed_by_id → users.id: users.active"]),
+    ("WITH uu AS (SELECT id, active FROM users) SELECT COUNT(*) AS n FROM assets a "
+     "LEFT JOIN uu ON uu.id = a.managed_by_id AND uu.id = a.owned_by_id WHERE uu.active", None),
+    # A comma join, whose columns the joins section does not read: which link cannot be told.
+    ("SELECT COUNT(*) AS n FROM assets a, users u WHERE u.id = a.assigned_to_id AND u.active", None),
+]
+
+# A join on the counted rows' path that keeps only the rows with a partner, listed in table names.
+# (statement, the restrictions the receipt must list).
+INNER_JOIN_TRICKS = [
+    ("SELECT d.is_central, SUM(e.amount) AS n FROM expense_lines e JOIN award_departments d "
+     "ON d.award_id = e.award_id WHERE e.fiscal_year = 2018 GROUP BY d.is_central",
+     ["e.fiscal_year = 2018",
+      "only expense_lines rows that have a matching award_departments row (on award_id)"]),
+    ("SELECT SUM(e.amount) AS n FROM expense_lines e, award_departments d "
+     "WHERE d.award_id = e.award_id",
+     ["only expense_lines rows that have a matching award_departments row (on award_id)"]),
+    ("SELECT SUM(e.amount) AS n FROM expense_lines e CROSS JOIN award_departments d "
+     "WHERE d.award_id = e.award_id",
+     ["only expense_lines rows that have a matching award_departments row (on award_id)"]),
+    ("SELECT SUM(e.amount) AS n FROM expense_lines e JOIN award_departments d USING (award_id)",
+     ["only expense_lines rows that have a matching award_departments row (on award_id)"]),
+    ("SELECT SUM(e.amount) AS n FROM award_departments d JOIN expense_lines e "
+     "ON d.award_id = e.award_id",
+     ["only expense_lines rows that have a matching award_departments row (on award_id)"]),
+    ("WITH x AS (SELECT e.amount FROM expense_lines e JOIN award_departments d "
+     "ON d.award_id = e.award_id) SELECT SUM(amount) AS n FROM x",
+     ["only expense_lines rows that have a matching award_departments row (on award_id)"]),
+    # A value condition in the ON narrows the rows as well.
+    ("SELECT COUNT(DISTINCT i.id) AS n FROM outages o JOIN incidents i "
+     "ON i.service_id = o.service_id AND i.opened BETWEEN o.begin_at AND o.end_at",
+     ["i.opened BETWEEN o.begin_at AND o.end_at",
+      "only incidents rows that have a matching outages row (on service_id)"]),
+    # NATURAL drops the rows with no partner as an ON would.
+    ("SELECT SUM(e.amount) AS n FROM expense_lines e NATURAL JOIN award_departments d",
+     ["only expense_lines rows that have a matching award_departments row (on every column the two share)"]),
+    # An outer join whose optional side the number reads keeps only the rows that found a partner.
+    ("SELECT SUM(e.amount) AS n FROM award_departments d LEFT JOIN expense_lines e "
+     "ON d.award_id = e.award_id",
+     ["only expense_lines rows that have a matching award_departments row (on award_id)"]),
+    ("SELECT SUM(e.amount) AS n FROM expense_lines e RIGHT JOIN award_departments d "
+     "ON d.award_id = e.award_id",
+     ["only expense_lines rows that have a matching award_departments row (on award_id)"]),
+    # An outer join keeps the rows with no partner; a CROSS join drops none.
+    ("SELECT SUM(e.amount) AS n FROM expense_lines e LEFT JOIN award_departments d "
+     "ON d.award_id = e.award_id", []),
+    ("SELECT SUM(e.amount) AS n FROM expense_lines e CROSS JOIN (SELECT MAX(fiscal_year) AS y "
+     "FROM expense_lines) m WHERE e.fiscal_year = m.y", ["e.fiscal_year = m.y"]),
+]
+
+# An outer join that a later inner join needs a partner from is an inner join too: its own ON
+# conditions, a step's filter (substituted) and every join line narrow the counted rows (re-audit,
+# round 2: all of them were missing). Over the `audit` model with `problem_count` its only metric.
+REAUDIT_JOIN_PATH = [
+    ("WITH mo AS (SELECT service_id, begin_at, end_at, end_at >= begin_at AS window_valid "
+     "FROM outages WHERE id > 0) SELECT COUNT(DISTINCT p.id) AS n FROM mo LEFT JOIN incidents i "
+     "ON i.service_id = mo.service_id AND i.opened >= mo.begin_at AND i.opened <= mo.end_at "
+     "JOIN problems p ON p.id = i.problem_id WHERE mo.window_valid",
+     ["id > 0", "outages.end_at >= outages.begin_at", "i.opened >= outages.begin_at",
+      "i.opened <= outages.end_at",
+      "only outages rows that have a matching incidents row (on service_id)",
+      "only problems rows that have a matching incidents row (on problems.id = incidents.problem_id)"]),
+    ("WITH mo AS (SELECT service_id, begin_at, end_at, end_at >= begin_at AS window_valid "
+     "FROM outages WHERE id > 0) SELECT COUNT(DISTINCT p.id) AS n FROM mo JOIN incidents i "
+     "ON i.service_id = mo.service_id AND i.opened >= mo.begin_at AND i.opened <= mo.end_at "
+     "JOIN problems p ON p.id = i.problem_id WHERE mo.window_valid",
+     ["id > 0", "outages.end_at >= outages.begin_at", "i.opened >= outages.begin_at",
+      "i.opened <= outages.end_at",
+      "only outages rows that have a matching incidents row (on service_id)",
+      "only problems rows that have a matching incidents row (on problems.id = incidents.problem_id)"]),
+]
+
+
+# Round 3, over the `audit` model with `problem_count` and `rejected` its metrics: a step joined in
+# requires rows of its own, and a count read off a LEFT join's optional side counts only the rows
+# with a partner. Every requirement is listed over the tables; no line names a step.
+ROUND3_JOIN_PATH = [
+    ("WITH mo AS (SELECT service_id, begin_at, end_at, end_at >= begin_at AS window_valid "
+     "FROM outages WHERE kind = 'major'), inc AS (SELECT i.problem_id FROM mo JOIN incidents i "
+     "ON i.service_id = mo.service_id AND i.opened >= mo.begin_at AND i.opened <= mo.end_at "
+     "WHERE mo.window_valid) SELECT COUNT(DISTINCT p.id) AS n FROM problems p "
+     "JOIN inc ON inc.problem_id = p.id",
+     ["kind = 'major'", "outages.end_at >= outages.begin_at", "i.opened >= outages.begin_at",
+      "i.opened <= outages.end_at",
+      "only outages rows that have a matching incidents row (on service_id)",
+      "only problems rows that have a matching incidents row (on incidents.problem_id = problems.id)"]),
+    ("WITH s AS (SELECT id FROM requests WHERE fiscal_year = 2025), rsn AS (SELECT request_id "
+     "FROM rejections WHERE reason IS NOT NULL) SELECT COUNT(DISTINCT n.request_id) AS n "
+     "FROM s LEFT JOIN rsn n ON n.request_id = s.id",
+     ["fiscal_year = 2025", "reason IS NOT NULL",
+      "only rejections rows that have a matching requests row "
+      "(on rejections.request_id = requests.id)"]),
+]
+
+# Round 3: a condition shown as the most readable SQL it is, and a link shown once. Over the
+# `audit` model.
+READABLE_CONDITIONS = [
+    ("SELECT COUNT(*) AS n FROM assets a WHERE NOT a.status IS NULL AND NOT a.status IN ('x', 'y') "
+     "AND NOT (a.id = 3) AND NOT a.status LIKE 'z%'",
+     ["a.status IS NOT NULL", "a.status NOT IN ('x', 'y')", "a.id <> 3", "a.status NOT LIKE 'z%'"]),
+    # The link and the join it names, once.
+    ("SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id WHERE NOT u.active",
+     ["only assets rows that have a matching users row (on users.id = assets.assigned_to_id) "
+      "via assets.assigned_to_id → users.id: u.active = FALSE"]),
+]
+
+
+# Round 3, exact synthetic analogs of two real receipts (same structure, made-up names). Over the
+# `audit` model; each with its one metric (see the battery). (statement, column, the restrictions,
+# or None for undetermined, the reference that states the claim over the tables).
+_OUTAGE_STEP = (
+    "WITH major_outage AS (SELECT os.id AS outage_id, os.service_id, os.began AS outage_begin, "
+    "os.ended AS outage_end, (os.ended >= os.began) AS window_valid, os.change_id FROM outages os "
+    "WHERE os.began >= DATE '2026-01-01' AND TRIM(COALESCE(os.kind, '')) = 'Emergency'), "
+)
+_OUTAGE_TAIL = (
+    "SELECT mo.outage_id, COUNT(DISTINCT p.number) AS problems_created FROM major_outage mo "
+    "LEFT JOIN changes c ON c.id = mo.change_id LEFT JOIN inc ON inc.outage_id = mo.outage_id "
+    "LEFT JOIN problems p ON p.id = inc.problem_id GROUP BY mo.outage_id"
+)
+AUDIT_REAL_SHAPES = [
+    # A count through a chain of LEFT JOINs needs every step on the chain: `p` exists only where
+    # `inc` found a row. Here `inc` re-reads the first step, one step through two references,
+    # which is not modelled: undetermined, never a match missing `inc`'s conditions.
+    (_OUTAGE_STEP + "inc AS (SELECT mo.outage_id, i.number AS incident_number, i.problem_id "
+     "FROM major_outage mo JOIN incidents i ON i.service_id = mo.service_id "
+     "AND i.opened >= mo.outage_begin AND i.opened <= mo.outage_end WHERE mo.window_valid) "
+     + _OUTAGE_TAIL, "problems_created", None, None),
+    # The same chain where `inc` reads the table. Its steps hand the join key on renamed
+    # (`id AS outage_id`), and a renamed column is not traced to a table: undetermined.
+    (_OUTAGE_STEP + "inc AS (SELECT o.id AS outage_id, i.problem_id FROM outages o "
+     "JOIN incidents i ON i.service_id = o.service_id AND i.opened >= o.began "
+     "AND i.opened <= o.ended WHERE o.ended >= o.began) " + _OUTAGE_TAIL, "problems_created",
+     None, None),
+    # Counting the optional side of a LEFT JOIN to a step, over a model declaring no relationship
+    # between the two steps' tables: the line tying the two steps, both steps' filters, and a
+    # non-equality period join naming both its tables. A third LEFT-joined step, counted by
+    # another column, is on none of `with_reason`'s lines.
+    ("WITH sub AS (SELECT DISTINCT f.request_id FROM expense_lines f JOIN dates d "
+     "ON d.date_key = f.submit_date_key JOIN fiscal_periods p ON CAST(d.full_date AS DATE) "
+     "BETWEEN p.period_start AND p.period_end AND p.adjustment_flag = 'N' "
+     "WHERE p.fiscal_year = 2025), rsn AS (SELECT DISTINCT r.request_id FROM rejections r "
+     "WHERE r.request_id IS NOT NULL AND r.reason IS NOT NULL AND r.reason <> ''), "
+     "apc AS (SELECT DISTINCT a.id AS request_id FROM requests a WHERE a.fiscal_year = 2025) "
+     "SELECT COUNT(DISTINCT s.request_id) AS submitted, COUNT(DISTINCT n.request_id) AS with_reason, "
+     "COUNT(DISTINCT x.request_id) AS approved FROM sub s LEFT JOIN rsn n "
+     "ON n.request_id = s.request_id LEFT JOIN apc x ON x.request_id = s.request_id",
+     "with_reason",
+     ["p.fiscal_year = 2025", "CAST(d.full_date AS DATE) BETWEEN p.period_start AND p.period_end",
+      "p.adjustment_flag = 'N'", "r.request_id IS NOT NULL", "r.reason IS NOT NULL",
+      "r.reason <> ''",
+      "only expense_lines rows that have a matching dates row "
+      "(on dates.date_key = expense_lines.submit_date_key)",
+      "only dates rows that have a matching fiscal_periods row",
+      "only rejections rows that have a matching expense_lines row (on request_id)"],
+     "SELECT COUNT(DISTINCT r.request_id) AS v FROM rejections r JOIN expense_lines f "
+     "ON f.request_id = r.request_id JOIN dates d ON d.date_key = f.submit_date_key "
+     "JOIN fiscal_periods p ON CAST(d.full_date AS DATE) BETWEEN p.period_start AND p.period_end "
+     "AND p.adjustment_flag = 'N' WHERE p.fiscal_year = 2025 AND r.request_id IS NOT NULL "
+     "AND r.reason IS NOT NULL AND r.reason <> ''"),
+]
+
+
+# Final round: over-claims a correctness review found, each fixed by deletion or by reading
+# undetermined. Over the `acme` model, UNFILTERED unless the storage type says otherwise:
+# (storage type, statement, the reason it reads undetermined).
+FAIL_CLOSED = [
+    # A join key a step hands on renamed (`customer_id AS status`).
+    ("PostgreSQL", "WITH x AS (SELECT customer_id AS status, total_amount FROM orders) "
+     "SELECT SUM(x.total_amount) AS n FROM x JOIN customers c ON c.status = x.status",
+     "_WHY_JOIN_UNNAMED"),
+    ("PostgreSQL", "WITH x AS (SELECT customer_id AS id, total_amount FROM orders) "
+     "SELECT SUM(x.total_amount) AS n FROM x JOIN customers c USING (id)", "_WHY_JOIN_UNNAMED"),
+    # Arms matched by column name.
+    ("DuckDB", "SELECT COUNT(*) AS n FROM orders UNION ALL BY NAME SELECT COUNT(*) AS n FROM orders",
+     "_WHY_BY_NAME"),
+    # An outer join's optional side required beside a RIGHT join; an anti-join; a key that is not
+    # a plain `=`.
+    ("PostgreSQL", "SELECT SUM(o.total_amount) AS n FROM payments p LEFT JOIN orders o "
+     "ON o.id = p.order_id RIGHT JOIN customers c ON c.id = o.customer_id", "_WHY_JOIN_ORDER"),
+    ("PostgreSQL", "SELECT SUM(o.total_amount) AS n FROM orders o LEFT JOIN payments p "
+     "ON p.order_id = o.id WHERE p.id IS NULL", "_WHY_JOIN_ORDER"),
+    ("PostgreSQL", "SELECT SUM(o.total_amount) AS n FROM orders o LEFT JOIN payments p "
+     "ON p.order_id IS NOT DISTINCT FROM o.id WHERE p.status = 'paid'", "_WHY_JOIN_ORDER"),
+]
+
+# A WHERE condition on an outer join's optional side drops the rows with no partner: the join and
+# its ON conditions are listed. (statement, restrictions) over the `acme` model, UNFILTERED.
+OPTIONAL_SIDE_FILTERED = [
+    ("SELECT SUM(o.total_amount) AS n FROM orders o LEFT JOIN payments p ON p.order_id = o.id "
+     "AND p.amount > 1 WHERE p.status = 'paid'",
+     ["p.status = 'paid'", "p.amount > 1",
+      "only orders rows that have a matching payments row (on payments.order_id = orders.id)"]),
+]
+
+# A subquery reading a step that cannot be shown is withheld whole, never shown with the step's
+# name or its values: a whole-row reference or a sensitive column inside, a recursive step, and a
+# chain deeper than the inlining bound. Over the `acme` model (`customers.email` is sensitive).
+INLINE_WITHHELD = [
+    "WITH paid AS (SELECT c.id FROM customers c WHERE CAST(c AS TEXT) LIKE '%SECRETVAL%') "
+    "SELECT SUM(total_amount) AS n FROM orders o WHERE o.customer_id IN (SELECT id FROM paid)",
+    "WITH a AS (SELECT c.id FROM customers c WHERE CAST(c AS TEXT) LIKE '%SECRETVAL%'), "
+    "paid AS (SELECT id FROM a) SELECT SUM(total_amount) AS n FROM orders o "
+    "WHERE o.customer_id IN (SELECT id FROM paid)",
+    "WITH paid AS (SELECT c.id FROM customers c WHERE CAST(c AS TEXT) LIKE '%SECRETVAL%') "
+    "SELECT SUM(total_amount) AS n FROM orders o WHERE EXISTS (SELECT 1 FROM paid "
+    "WHERE paid.id = o.customer_id)",
+    "WITH paid AS (SELECT c.id FROM customers c WHERE row_to_json(c)::text LIKE '%SECRETVAL%') "
+    "SELECT SUM(total_amount) AS n FROM orders o WHERE o.customer_id IN (SELECT id FROM paid)",
+    "WITH RECURSIVE r AS (SELECT id FROM customers WHERE id = 1 UNION ALL SELECT c.id "
+    "FROM customers c WHERE c.id IN (SELECT id FROM r)) SELECT SUM(total_amount) AS n "
+    "FROM orders WHERE customer_id IN (SELECT id FROM r)",
+    "WITH c0 AS (SELECT id FROM customers WHERE region = 'EU'), "
+    + ", ".join(f"c{i} AS (SELECT id FROM customers WHERE id IN (SELECT id FROM c{i - 1}))"
+                for i in range(1, 45))
+    + " SELECT SUM(total_amount) AS n FROM orders WHERE customer_id IN (SELECT id FROM c44)",
+]
+
+
+# The real rejections receipt, exactly: two DISTINCT steps over one key named the same on both
+# sides, the metric defined over the fact table, the count read off the LEFT join's OPTIONAL side
+# (`n.request_id`), and no relationship between the rejections and the fact table. Only the
+# requests with a rejection are counted, so the tying line is listed. (statement, restrictions)
+OPTIONAL_SIDE_COUNT = (
+    "WITH sub AS (SELECT DISTINCT f.request_id FROM expense_lines f JOIN dates d "
+    "ON d.date_key = f.submit_date_key JOIN fiscal_periods p ON CAST(d.full_date AS DATE) "
+    "BETWEEN p.period_start AND p.period_end AND p.adjustment_flag = 'N' "
+    "WHERE p.fiscal_year = 2025), rsn AS (SELECT DISTINCT r.request_id FROM rejections r "
+    "WHERE r.request_id IS NOT NULL AND r.reason IS NOT NULL AND r.reason <> '') "
+    "SELECT COUNT(DISTINCT n.request_id) AS with_reason FROM sub s LEFT JOIN rsn n "
+    "ON n.request_id = s.request_id",
+    ["p.fiscal_year = 2025", "CAST(d.full_date AS DATE) BETWEEN p.period_start AND p.period_end",
+     "p.adjustment_flag = 'N'", "r.request_id IS NOT NULL", "r.reason IS NOT NULL",
+     "r.reason <> ''",
+     "only expense_lines rows that have a matching dates row "
+     "(on dates.date_key = expense_lines.submit_date_key)",
+     "only dates rows that have a matching fiscal_periods row",
+     "only rejections rows that have a matching expense_lines row (on request_id)"],
+)
+
+
+# Final fixes. A WHERE condition on an outer join's optional side makes that side required only
+# when its shape rejects NULLs; any other may keep the null-extended rows. Over the `audit` model
+# with `problem_count` its metric: (condition, None for undetermined, or the restrictions).
+_PROBLEMS_LEFT = ("SELECT COUNT(DISTINCT p.id) AS n FROM problems p LEFT JOIN incidents i "
+                  "ON i.problem_id = p.id AND i.opened > '2026-01-01' WHERE ")
+OPTIONAL_SIDE_WHERE = [
+    (_PROBLEMS_LEFT + "COALESCE(i.number, 'X') = 'X'", None),
+    (_PROBLEMS_LEFT + "(i.number = 'X' OR i.number IS NULL)", None),
+    (_PROBLEMS_LEFT + "(p.state = 's' OR i.number = 'Y')", None),
+    (_PROBLEMS_LEFT + "NOT (i.id IS NOT NULL)", None),
+    (_PROBLEMS_LEFT + "CASE WHEN i.id IS NULL THEN TRUE ELSE FALSE END", None),
+    (_PROBLEMS_LEFT + "i.number = 'I1'",
+     ["i.number = 'I1'", "i.opened > '2026-01-01'",
+      "only problems rows that have a matching incidents row (on incidents.problem_id = problems.id)"]),
+    (_PROBLEMS_LEFT + "i.number IS NOT NULL",
+     ["i.number IS NOT NULL", "i.opened > '2026-01-01'",
+      "only problems rows that have a matching incidents row (on incidents.problem_id = problems.id)"]),
+]
+
+# A LEFT join neither read nor needed by the number can still repeat its rows: it stays on the
+# path the joins and aggregates sections read (named in `joins_not_declared`), and only its ON
+# conditions are not the number's. Over the `acme` model, UNFILTERED.
+FANNING_OUTER_JOINS = [
+    "SELECT SUM(o.total_amount) AS n FROM orders o LEFT JOIN payments p ON p.status = o.status",
+    "SELECT COUNT(*) AS n FROM orders o LEFT JOIN payments p ON p.status = o.status",
+    "WITH s AS (SELECT status FROM payments) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "LEFT JOIN s ON s.status = o.status",
+    "SELECT SUM(o.total_amount) AS n FROM payments p RIGHT JOIN orders o ON p.status = o.status",
+]
+
+# A step that renames its columns with a list (`s(x)`) is never written into a subquery: its body
+# does not say the new names. Withheld whole. Over the `acme` model.
+STEP_COLUMN_LIST_SUBQUERY = (
+    "WITH s(x) AS (SELECT id FROM orders WHERE status = 'paid') SELECT COUNT(*) AS n FROM orders "
+    "WHERE id IN (SELECT x FROM s)"
+)

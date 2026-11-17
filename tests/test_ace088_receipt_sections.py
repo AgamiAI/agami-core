@@ -145,7 +145,7 @@ def test_every_declared_section_is_present_and_shaped(org):
     """Empty-but-declared, never absent: a consumer must not have to tell "no joins" from "joins
     not checked", and it cannot do that if the key is sometimes missing."""
     receipt = rt.assemble_receipt(org, SQL)
-    assert tuple(receipt) == ("model_version", *guardrail.Receipt.SECTIONS)
+    assert tuple(receipt) == ("model_version", "agami_core_version", *guardrail.Receipt.SECTIONS)
     sections = _sections(org)
     for name, section in sections.items():
         assert set(section) == {"items", "undetermined"}, name
@@ -216,6 +216,22 @@ def test_tables_section_is_one_entry_per_reference_not_per_table(org):
     assert {(i["ref"], i["alias"]) for i in orders} == {("orders", "o"), ("public.orders", None)}
 
 
+def test_a_size_that_reached_the_cap_reads_as_at_least_never_its_stored_number(org):
+    # Stored as cap + 1 so guards stay conservative; the words must not hand that on as a total.
+    from semantic_model.models import ROW_COUNT_CAP
+
+    def orders_entry():
+        return next(i for i in _sections(org)["tables"]["items"] if i["qname"] == "public.orders")
+
+    assert orders_entry()["rows_text"] == f"about {ROW_ESTIMATE:,} rows"
+    table = next(t for a in org.subject_areas for t in a.tables_defined if t.name == "orders")
+    table.performance_hints.estimated_row_count = ROW_COUNT_CAP + 1
+    assert orders_entry()["rows_text"] == f"at least {ROW_COUNT_CAP:,} rows"
+    info = L._table_detail(org, table, None, area=None, columns=None,
+                           include=["performance_hints"], params=None, index=None)
+    assert info["performance_hints"]["estimated_row_count_text"] == f"at least {ROW_COUNT_CAP:,} rows"
+
+
 def test_tables_section_marks_a_reference_the_model_does_not_declare(org):
     """The CTE name is a reference the statement makes and the model knows nothing about. It is
     reported as undeclared rather than dropped, because a dropped reference is an unchecked one."""
@@ -251,8 +267,13 @@ def test_a_cte_that_shadows_a_declared_table_is_not_declared(org):
 
 
 def test_a_reference_a_shadowing_cte_zeroed_is_counted_rather_than_called_complete(org):
-    """The CTE subtraction is statement-GLOBAL, so a WITH-bound name collides with every reference
+    """The CTE subtraction WAS statement-GLOBAL, so a WITH-bound name collided with every reference
     to the declared table of that name — including a genuine read of the real table.
+
+    ACE-178 (#462) built the scope-aware resolution this docstring said the section could not: the
+    reference resolves where it is written, so `public.orders` is the table, its filter is judged
+    (`omitted`: the statement never writes it), and with nothing left unresolved the marker is null.
+    The history below is why the item had to change rather than the marker.
 
     The statement below reads `public.orders` for real and applies none of its declared filters, and
     the subtraction hands that reference `filters: []` anyway. `[]` is the same list a table
@@ -270,11 +291,10 @@ def test_a_reference_a_shadowing_cte_zeroed_is_counted_rather_than_called_comple
     section = rt.assemble_receipt(org, shadowing)["tables"]
 
     assert [i["ref"] for i in section["items"]] == ["public.orders"]
-    assert section["items"][0]["declared"] is False
-    assert section["items"][0]["filters"] == []
-    assert section["undetermined"] == (
-        "1 of the listed reference(s) could not be resolved to a model table."
-    )
+    assert section["items"][0]["declared"] is True
+    assert section["items"][0]["qname"] == "public.orders"
+    assert [f["status"] for f in section["items"][0]["filters"]] == ["omitted"]
+    assert section["undetermined"] is None
 
 
 def test_tables_section_carries_the_models_row_estimate_not_a_count(org):
@@ -635,11 +655,23 @@ def test_sections_carry_metadata_and_structure_only_never_values(org):
     assert {frozenset(i) for i in sections["columns"]["items"]} == {
         frozenset({"kind", "column"}),
         frozenset({"kind", "column", "scope", "status", "name", "area", "definition_prose",
-                   "expression", "confidence", "origin", "review_state", "signed_off_by",
-                   "signed_off_role", "signed_off_at", "source_tables", "aggregate"}),
+                   "expression", "confidence", "origin", "review_state", "source_tables",
+                   "aggregate",
+                   # ACE-177: the rows a matched number was counted over, the conditions applied
+                   # after counting, and a metric condition the statement lacks. These DO carry the
+                   # statement's own literals — the slice is the point — bounded by `_echo_expr`,
+                   # with every value beside a sensitive column withheld. Lists of strings, never a
+                   # number, so the integer assertion below still holds. ACE-178 reads a CTE body
+                   # for them, and `CTE_LITERAL` still reaches nowhere: the only output, `o.id`,
+                   # aggregates nothing, and a plain column carries no restrictions.
+                   "restrictions", "result_filters", "missing_conditions",
+                   # ACE-178: the joins on a matched number's path the model does not declare, a
+                   # metric whose tables the number did not all read, what a number is built from,
+                   # and why one is undetermined (a fixed phrase, never caller text).
+                   "joins_not_declared", "missing_tables", "built_from", "reason"}),
     }
     assert {frozenset(i) for i in sections["tables"]["items"]} == {
-        frozenset({"ref", "alias", "qname", "declared", "rows", "rows_as_of", "freshness",
+        frozenset({"ref", "alias", "qname", "declared", "rows", "rows_text", "rows_as_of", "freshness",
                    # The two the declared-filter accounting added. `scope` is a label built from a
                    # closed set of forms — `main` / `cte:<name>` / `subquery`, the first two taking
                    # a `#<n>` arm ordinal when the scope is one of several arms of a set operation —
@@ -675,7 +707,7 @@ def test_the_receipt_is_the_sections_and_the_version_pin(org):
     was described against. A flat key coming back would mean two descriptions of one statement that
     are free to disagree, which is the defect the sections exist to remove."""
     receipt = rt.assemble_receipt(org, SQL, model_version="v1")
-    assert list(receipt) == ["model_version", *guardrail.Receipt.SECTIONS]
+    assert list(receipt) == ["model_version", "agami_core_version", *guardrail.Receipt.SECTIONS]
     assert receipt["model_version"] == "v1"
     assert not (set(receipt) & DELETED_FLAT_KEYS)
 
@@ -703,7 +735,7 @@ def test_there_is_no_conditional_key_left_and_no_way_to_ask_for_one(org):
     import inspect
 
     plain = rt.assemble_receipt(org, SQL)
-    assert set(plain) == {"model_version", *guardrail.Receipt.SECTIONS}
+    assert set(plain) == {"model_version", "agami_core_version", *guardrail.Receipt.SECTIONS}
     assert "default_filters_applied" not in plain and "pre_flight" not in plain
 
     # Same shape for a statement that DOES omit a declared filter — the fact lands per reference,

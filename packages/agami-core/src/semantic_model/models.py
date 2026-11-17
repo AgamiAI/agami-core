@@ -553,6 +553,19 @@ class IndexHint(_Base):
     is_unique: bool = False
 
 
+# A table the catalog cannot size (a view keeps no statistics) is counted by the build only up to this
+# many rows, the largest line any size guard draws. Past it, the model records ROW_COUNT_CAP + 1: a lower
+# bound, never a measured size, so every guard reads the table as large and nothing says it holds exactly
+# that many rows. When the count fails, the build treats the table as large but writes no size, so it
+# reads as "size unknown" rather than "at least". No key of its own, so an older reader takes the model.
+ROW_COUNT_CAP = 5_000_000
+
+
+def rows_text(rows: int) -> str:
+    """A table's recorded size in words: `about 1,234 rows`, or `at least 5,000,000 rows` for the cap."""
+    return f"at least {ROW_COUNT_CAP:,} rows" if rows == ROW_COUNT_CAP + 1 else f"about {rows:,} rows"
+
+
 class PerformanceHints(_Base):
     estimated_row_count: Optional[int] = None
     # ISO-8601 UTC timestamp of when `estimated_row_count` was last measured (introspection
@@ -1299,7 +1312,12 @@ class Datasource(_Base):
     datasource: str  # this datasource's display name (used as the model title in the explorer/context)
     version: int = 1
     description: str = ""
-    fiscal_year_start_month: int = 1
+    # None until someone says (ACE-182): a January written by default was never questioned, and an
+    # organisation whose year starts in another month was answered on the calendar year.
+    fiscal_year_start_month: Optional[int] = None
+    # True once a person gave it. Older builds wrote January unasked, so a January on file without
+    # this is still a question; any other month on file was someone's answer.
+    fiscal_year_start_confirmed: bool = False
     storage_connections: list[StorageConnection] = Field(default_factory=list)
     subject_areas: list[SubjectArea] = Field(default_factory=list)
     cross_subject_area_relationships: list[CrossSubjectAreaRelationship] = Field(
@@ -1321,16 +1339,24 @@ class Datasource(_Base):
     def _omit_empty_ambiguities(self, handler: Any) -> Any:
         # Left out of every dump when empty, so a model with none declared serializes exactly as it
         # did before this field existed. An older agami-core forbids unknown keys, and a stored model
-        # carrying `ambiguities: []` would stop it loading after a rollback.
+        # carrying `ambiguities: []` would stop it loading after a rollback. An unasked fiscal start
+        # is left out for the same reason: an older core reads a missing one as January, a null not at all.
         data = handler(self)
         if isinstance(data, dict) and not data.get("ambiguities"):
             data.pop("ambiguities", None)
+        if isinstance(data, dict) and data.get("fiscal_year_start_month", 0) is None:
+            data.pop("fiscal_year_start_month")
+        if isinstance(data, dict) and not data.get("fiscal_year_start_confirmed", True):
+            data.pop("fiscal_year_start_confirmed")
         return data
+
+    def fiscal_year_start_unasked(self) -> bool:
+        return not self.fiscal_year_start_confirmed and self.fiscal_year_start_month in (None, 1)
 
     @field_validator("fiscal_year_start_month")
     @classmethod
-    def _fy_month(cls, v: int) -> int:
-        if not 1 <= v <= 12:
+    def _fy_month(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not 1 <= v <= 12:
             raise ValueError("fiscal_year_start_month must be 1..12")
         return v
 
