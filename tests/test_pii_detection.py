@@ -749,3 +749,96 @@ def test_introspect_leaves_coded_person_like_columns_alone(tmp_path):
     cols = org.subject_areas[0].defined_table("accounts").columns
     assert not any(c.sensitive for c in cols)
     assert not rep.suspected_columns
+
+
+# --- review of #675: a name repeated over many records is still a person -------------------------
+
+
+_MANY_TICKETS = [{"id": str(i), "opened_by": PEOPLE[i % 4], "assigned_to": PEOPLE[(i + 1) % 4],
+                  "end_user": "Yes" if i % 2 else "No",
+                  "sort_by": "Created Date" if i % 3 else "Updated Date"} for i in range(40)]
+
+
+def _many_runner():
+    return make_catalog_runner(
+        tables=["tickets"],
+        columns={"tickets": [col("id", "integer", nullable=False), col("opened_by", "text"),
+                             col("assigned_to", "text"), col("end_user", "text"), col("sort_by", "text")]},
+        sample=lambda sql: [dict(r) for r in _MANY_TICKETS], estimate="40")  # small: lists are read
+
+
+def _written(tmp_path) -> str:
+    return "".join(p.read_text() for p in (tmp_path / "desk").rglob("*") if p.is_file())
+
+
+def test_four_names_over_forty_tickets_are_people():
+    assert pii.looks_like_people([r["opened_by"] for r in _MANY_TICKETS])
+
+
+@pytest.mark.parametrize("name", ["assigned_to", "opened_for", "requested_for", "caller", "caller_name",
+                                  "owner", "account_manager", "requester", "assignee", "approver"])
+def test_role_names_are_person_references(name):
+    assert pii.person_ref_name(name)
+
+
+@pytest.mark.parametrize("name", ["valid_to", "used_for", "owner_id", "manager_count", "date_to"])
+def test_role_words_that_are_not_people_are_not_person_references(name):
+    assert not pii.person_ref_name(name)
+
+
+@pytest.mark.parametrize("name", ["assigned_to", "owner", "manager", "opened_for"])
+def test_role_names_wait_for_their_values_before_being_suspected(name):
+    assert not pii.suspected_pii(name)
+
+
+def test_names_repeated_over_a_small_table_are_flagged_and_never_written(tmp_path):
+    org, rep = I.introspect("desk", "postgres", runner=_many_runner(), artifacts_dir=tmp_path)
+    c = {x.name: x for x in org.subject_areas[0].defined_table("tickets").columns}
+    assert c["opened_by"].sensitive and c["assigned_to"].sensitive
+    assert c["opened_by"].choice_field is None and c["assigned_to"].choice_field is None
+    written = _written(tmp_path)
+    for v in PEOPLE:
+        assert v not in written, v
+    # the coded columns stay unflagged, and keep their lists
+    assert not c["end_user"].sensitive and not c["sort_by"].sensitive
+    assert set(c["end_user"].choice_field or {}) == {"Yes", "No"}
+
+
+def test_with_the_warehouse_enforcing_it_a_person_reference_still_gets_no_value_list(tmp_path):
+    _enforced(tmp_path)
+    org, _ = I.introspect("desk", "postgres", runner=_many_runner(), artifacts_dir=tmp_path)
+    c = {x.name: x for x in org.subject_areas[0].defined_table("tickets").columns}
+    assert not c["opened_by"].sensitive and not c["assigned_to"].sensitive
+    assert c["opened_by"].choice_field is None and c["assigned_to"].choice_field is None
+    written = _written(tmp_path)
+    for v in PEOPLE:
+        assert v not in written, v
+
+
+def test_no_curate_edit_writes_a_value_list_of_people(tmp_path):
+    # enrich-metadata, the review page and the cards all write a list through one curate edit
+    _enforced(tmp_path)
+    org, _ = I.introspect("desk", "postgres", runner=_many_runner(), artifacts_dir=tmp_path)
+    area = org.subject_areas[0].name
+    names = {v: "" for v in PEOPLE}
+    res = C.apply(tmp_path / "desk", [
+        {"op": "edit", "kind": "table", "area": area, "name": "tickets", "column": "opened_by",
+         "field": "choice_field", "value": names},
+        {"op": "edit", "kind": "table", "area": area, "name": "tickets", "column": "end_user",
+         "field": "choice_field", "value": {"Yes": "an end user", "No": "staff"}},
+    ])
+    assert [s["op"] for s in res.skipped] and "opened_by" in res.skipped[0]["op"]
+    assert len(res.applied) == 1
+    written = _written(tmp_path)
+    for v in PEOPLE:
+        assert v not in written, v
+    assert "an end user" in written
+
+
+def test_a_person_reference_holding_codes_keeps_its_list():
+    assert not pii.value_list_blocked("sort_by", ["Created Date", "Updated Date"])
+    assert not pii.value_list_blocked("end_user", ["Yes", "No"])
+    assert pii.value_list_blocked("opened_by", PEOPLE)
+    assert pii.value_list_blocked("opened_by", ["Yes", "Jane Doe"])
+    assert pii.value_list_blocked("status", ["Open"], sensitive=True)
+    assert not pii.value_list_blocked("status", ["Open", "Closed"])

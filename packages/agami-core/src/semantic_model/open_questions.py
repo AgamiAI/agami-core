@@ -55,6 +55,7 @@ from typing import Any, Callable, Optional
 from . import build as B
 from . import dialects as D
 from . import introspect as I
+from . import pii
 from .models import Column, Datasource, Table, table_key
 from .plain_names import plain_words
 from .units import CURRENCY_SYMBOLS
@@ -1221,6 +1222,8 @@ def _unread_columns(
             if not _readable(c):
                 continue
             current = dict(c.choice_field or {})
+            if current and pii.value_list_blocked(c.name, current, caveats=c.caveats):
+                continue  # a list of people, from a model written before the rule: never shown
             blank = [v for v, lbl in current.items() if not (lbl or "").strip()]
             where = {"table": labels[id(t)], "column": c.name}
             # From the table's label: it gains a schema, and so changes, if a same-named table appears in another.

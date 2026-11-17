@@ -253,8 +253,10 @@ below corresponds to one such version.
   line; `sm sensitive` reports the setting and the skills skip the personal-data question. The
   card's last option now reads "Keep them queryable". Detection improves too: a request, ticket or
   order number with phone-shaped digits is an identifier, a column that points at a person
-  (`assigned_user`, `opened_by`) is flagged only when its values look like names or login ids, and
-  `last_login` or `is_user` are not people.
+  (`assigned_user`, `opened_by`, `assigned_to`, `owner`) is flagged when its values look like names
+  or login ids, however often each one repeats, and `last_login` or `is_user` are not people. Such a
+  column never gets a value list unless every value is a code (Yes/No, "Created Date"), with the
+  setting on or off: the model files are not the warehouse.
 
 - **Review the open questions on a page that saves (#676).** `sm open-questions --all` lists every
   open item, uncapped, ordered by how much it changes answers, together with the build's own guesses

@@ -1209,3 +1209,14 @@ def test_a_completed_status_offers_the_value_called_completed_first(store):
         # the contradicting value is never a reading on its own, only something to also include
         ("Closed Complete, Completed or Fieldwork Completed, and also Closed Incomplete", 41),
     ]
+
+
+def test_a_list_of_people_from_an_older_model_is_never_shown(store):
+    # A model written before value lists of people were refused may still hold one: the cards
+    # must not put those logins in front of a person to label.
+    root, db = store
+    org = L.load_datasource(root)
+    col = next(c for c in _table(org, "tickets").columns if c.name == "opened_by")
+    col.type, col.choice_field = "string", {"JD1": "", "RP2": "", "MO3": ""}
+    coded = [q for q in _ask_org(org, db)["questions"] if q["kind"] == "coded_values"]
+    assert [(q["table"], q["column"]) for q in coded] == [("tickets", "priority")]

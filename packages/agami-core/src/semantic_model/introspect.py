@@ -1267,7 +1267,7 @@ def _personal_list(c: Column) -> bool:
     """`c`'s list keys are personal values themselves. Checked on the list, not only the sample:
     a declared list of digit-only phone numbers survives an empty or unreadable sample."""
     keys = list(c.choice_field or {})
-    return (any(pii.personal_value(v) or pii.phone_key(c.name, c.type, v) for v in keys)
+    return (pii.value_list_blocked(c.name, keys) or any(pii.phone_key(c.name, c.type, v) for v in keys)
             or pii.value_suspect_caveat(c.name, c.type, keys) is not None)
 
 
@@ -3719,8 +3719,10 @@ def _placeholder_size_ok(sample: list, est_rows: Optional[int]) -> bool:
 
 
 def _never_read(c: Column) -> bool:
-    """A personal column: its values would be written into the model and the report."""
-    return _personal_column(c) or bool(c.choice_field and _personal_list(c))
+    """A personal column, or one that names a person (`opened_by`, `owner`) whatever the build
+    flagged: its values would be written into the model and the report."""
+    return (_personal_column(c) or pii.person_ref_name(c.name)
+            or bool(c.choice_field and _personal_list(c)))
 
 
 def _placeholder_kinds(c: Column, sample: list, join_cols: set[str]) -> set[str]:
@@ -3965,6 +3967,8 @@ def _data_choice_candidate(c: Column) -> bool:
 def _set_choice(
     c: Column, choice: dict[str, str], *, case_insensitive: bool = False, accents: bool = False,
 ) -> None:
+    if pii.value_list_blocked(c.name, choice, sensitive=c.sensitive, caveats=c.caveats):
+        return  # its keys would be personal values written into the model
     c.choice_field = choice
     notes = [_lookalike_caveat(list(choice))]
     if case_insensitive:

@@ -34,6 +34,7 @@ from typing import Any, Iterator, Optional
 
 import yaml
 
+from . import pii
 from . import validator as V
 from .loader import _read_yaml as _load
 from .loader import load_datasource
@@ -2055,6 +2056,12 @@ def _description_source_of(table_doc: dict, column: Optional[str]) -> Optional[s
 def _set_column_field(table_doc: dict, col_name: str, op: dict, new_state, signer, role) -> Any:
     for c in table_doc.get("columns", []):
         if c.get("name") == col_name:
+            # Every list reaches the model here (enrich-metadata, the page, the cards), so a list of
+            # people is refused here, whatever the column's flags say.
+            if (op.get("op") == "edit" and op.get("field") == "choice_field" and op.get("value")
+                    and pii.value_list_blocked(col_name, op["value"], sensitive=bool(c.get("sensitive")),
+                                               caveats=c.get("caveats") or ())):
+                raise ValueError(f"no value list on {col_name}: its values would be personal data in the model")
             return _set_trust(c, op, new_state, signer, role, desc_source=True)  # column desc has provenance
     raise ValueError(f"column {col_name} not found")
 
