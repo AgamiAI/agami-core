@@ -148,7 +148,8 @@ def test_a_finding_is_only_a_question_until_a_person_answers(shop):
 
 def test_the_scan_is_bounded_and_skips_the_big_fact_table(shop):
     scans = _scans(shop["seen"])
-    assert scans and all(q.rstrip().endswith("LIMIT 10") for q in scans)
+    # a table's columns share a statement (`placeholder_scan_many_sql`), each its own bounded read
+    assert scans and all(q.count("LIMIT 10") == q.count("CROSS JOIN") for q in scans)
     assert not any('"sales"' in q for q in scans)
     assert not any(line.startswith("sales.") for line in shop["report"].placeholders)
     # one read per checked column, never a second sample of a table
@@ -519,7 +520,10 @@ def test_columns_whose_names_differ_only_by_case_keep_their_own_findings():
     rep = I.IntrospectReport(profile="shop", db_type="postgres", out_dir="", dry_run=True)
     I._scan_placeholders(D.get_dialect("postgres"), run, [t], [], {("public", "orders"): (sample, 60)},
                          I._ReadBudget(10), rep, None)
-    assert sum("STATUS" in q.upper() for q in seen) == 2
+    # this runner answers only one column at a time, so the combined read falls back to two
+    assert sum("UNION ALL" in q for q in seen) == 1
+    assert sum("STATUS" in q.upper() and "UNION ALL" not in q for q in seen) == 2
+    assert rep.read_column_by_column == ["orders"]
     assert [p.value for p in t.get_column("status").placeholders] == ["-"]
     assert [p.value for p in t.get_column("STATUS").placeholders] == ["N/A"]
 

@@ -426,6 +426,25 @@ class Dialect:
         return self.limited(
             f"SELECT DISTINCT {c} AS v FROM {self.qualified(schema, table)} WHERE {c} IS NOT NULL", n)
 
+    def distinct_many_sql(self, schema: Optional[str], table: str, columns: list[str], n: int) -> str:
+        """`distinct_sql` for several columns in one statement: each column's own read, unchanged, as
+        a derived table, tagged `c` (its position) and stacked with UNION ALL.
+
+        Column i's values come back in `v{i}` and are NULL in every other arm, so no column's values
+        are ever converted to share a type with another's: each arrives exactly as its own read
+        returns it. The row bound stays inside each arm, where every engine accepts it (TOP and
+        FETCH FIRST included). No `AS` before a table alias: Oracle refuses it."""
+        return tagged_union([self.distinct_sql(schema, table, col, n) for col in columns], ("v",))
+
+    def count_distinct_many_sql(self, schema: Optional[str], table: str, columns: list[str]) -> str:
+        """`count_distinct_sql` for several columns in one pass: the row count once, then each
+        column's distinct and filled counts (`distinct_count{i}`, `filled{i}`)."""
+        parts = ["COUNT(*) AS total"]
+        for i, col in enumerate(columns):
+            c = self.quote_ident(col)
+            parts += [f"COUNT(DISTINCT {c}) AS distinct_count{i}", f"COUNT({c}) AS filled{i}"]
+        return f"SELECT {', '.join(parts)} FROM {self.qualified(schema, table)}"
+
     def placeholder_value_expr(self, column: str, ctype: str) -> str:
         """How the placeholder scan reads a column (quoted `column`, its ColumnType)."""
         return column
@@ -443,10 +462,32 @@ class Dialect:
             f"CROSS JOIN (SELECT MIN({v}) AS lo, MAX({v}) AS hi, COUNT(*) AS total FROM {q}) m "
             f"ORDER BY g.n DESC, g.v", n)
 
+    def placeholder_scan_many_sql(self, schema: Optional[str], table: str, columns: list[tuple[str, str]],
+                                  n: int) -> str:
+        """`placeholder_scan_sql` for several (column, ColumnType) pairs in one statement, tagged as
+        `distinct_many_sql` is. Each arm keeps its own top-`n` read; the rows come back in each arm's
+        own order, since a column's later `v{j}` are NULL on every other arm's rows."""
+        arms = [self.placeholder_scan_sql(schema, table, col, ctype, n) for col, ctype in columns]
+        order = ", ".join(f"v{i}" for i in range(len(arms)))
+        return f"{tagged_union(arms, ('v', 'lo', 'hi'), ('n', 'total'))} ORDER BY c, n DESC, {order}"
+
     # --- type mapping ---
 
     def map_type(self, raw: str, numeric_scale: Optional[int] = None) -> ColumnType:
         return normalize_type(raw, numeric_scale=numeric_scale)
+
+
+def tagged_union(arms: list[str], own: tuple[str, ...], shared: tuple[str, ...] = ()) -> str:
+    """Several reads in one statement: each `arm` unchanged as a derived table, tagged `c` (its
+    position) and stacked with UNION ALL. Arm i's `own` columns come back as `{name}{i}` and are NULL
+    on every other arm's rows, so no read's values are converted to share a type with another's;
+    `shared` columns (counts) are one column for all. No `AS` before a table alias: Oracle refuses it."""
+    out = []
+    for i, arm in enumerate(arms):
+        picked = [f"b{i}.{k} AS {k}{j}" if j == i else f"NULL AS {k}{j}" for k in own for j in range(len(arms))]
+        picked += [f"b{i}.{k} AS {k}" for k in shared]
+        out.append(f"SELECT {i} AS c, {', '.join(picked)} FROM ({arm}) b{i}")
+    return " UNION ALL ".join(out)
 
 
 # ---------------------------------------------------------------------------
