@@ -101,8 +101,20 @@ Full flow: [docs/usage.md](docs/usage.md).
 Connecting your database is a short back-and-forth with agami, in the chat: each choice is a
 question card you answer with a click, and you can type your own answer in "Other".
 
+**Before you start**, it helps to have these to hand (none is required; agami asks for each at the
+right step):
+
+- what your organisation does, in a sentence or two;
+- what system the data comes from (a product such as ServiceNow, or your own application), and
+  anything about the database: when your fiscal year starts, what currency amounts are in;
+- definitions of the tables and columns (a data dictionary, a spec workbook, a dbt or LookML project);
+- definitions of your metrics and business terms;
+- the questions people ask. They become checked examples, and how many of them agami answers
+  correctly is how you can tell the model is right.
+
 1. **Start setup.** Run `/agami-connect` (or just say *"connect to my database"*).
-   agami asks which database you use and has you name the connection.
+   agami asks what your organisation does and where the data comes from, then which database
+   you use, and has you name the connection.
 2. **Give the connection details.** On macOS and Windows, a card asks for the host, port,
    database and user, and agami posts a one-time `localhost` link where you type the password;
    it goes to your OS keychain, never the chat. On Linux (and for Databricks) agami writes a

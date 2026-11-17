@@ -208,3 +208,22 @@ def test_record_without_the_rewrite_stamps_writes_as_before(tmp_path):
         "cross_datasource_relationships: []\n"
         "cross_datasource_metrics: []\n"
     )
+
+
+def test_set_org_cli_writes_fiscal_year_and_currency(tmp_path):
+    # #673: the source-system card's plain facts about the database land on the company record.
+    from semantic_model import cli
+
+    assert cli.main(["set-org", str(tmp_path), "--name", "Acme"]) == 0
+    assert cli.main(["set-org", str(tmp_path), "--fiscal-year-start-month", "7", "--currency", "USD"]) == 0
+    rec = OR.load_org_record(tmp_path)
+    assert rec.name == "Acme"  # untouched by the second call
+    assert rec.fiscal_year_start_month == 7 and rec.display_conventions.currency == "USD"
+
+
+def test_set_org_cli_refuses_a_month_out_of_range(tmp_path):
+    from semantic_model import cli
+
+    with pytest.raises(SystemExit):
+        cli.main(["set-org", str(tmp_path), "--fiscal-year-start-month", "13"])
+    assert OR.load_org_record(tmp_path) is None

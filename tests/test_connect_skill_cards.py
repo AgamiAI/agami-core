@@ -936,3 +936,54 @@ def test_1_6p_back_to_the_cards_goes_to_the_numbered_list():
     back = back[: back.index("\n")]
     assert back.index("TaskStop") < back.index("**The numbered list**")
     assert "`Tables` card again" not in back
+
+
+# --- #673: say up front what to have ready; ask the organisation and the source system first -----
+
+README = SKILL.parents[4] / "README.md"
+
+
+def test_0a_0_before_you_start_comes_before_the_database_card():
+    text = SKILL.read_text(encoding="utf-8")
+    assert text.index("### 0a.0 ") < text.index("### 0a.2 ")
+    s = _between("### 0a.0 ", "### 0a.1 ")
+    for item in (
+        "What your organisation does",
+        "What system the data comes from",
+        "when your fiscal year starts",
+        "what currency amounts are in",
+        "Definitions of the tables and columns",
+        "Definitions of your metrics and business terms",
+        "The questions people ask",
+    ):
+        assert item in s, item
+    # both paths through Phase 0a start here
+    top = _between("## Phase 0a:", "### 0a.1 ")
+    assert top.count("**0a.0** → 0a.1 → 0a.2") == 2
+
+
+def test_0a_0_asks_the_organisation_and_the_source_system_as_their_own_first_questions():
+    s = _between("### 0a.0 ", "### 0a.1 ")
+    assert "1.4 A's `Company` card" in s and "header `Source`" in s
+    assert s.index("1.4 A's `Company` card") < s.index("header `Source`")
+    # hints, never copied verbatim, that switch on product-specific help
+    assert "never copied verbatim" in s
+    assert "enrich-metadata" in s and "--preset servicenow" in s
+    assert 'sm" set-org "<artifacts_dir>" --fiscal-year-start-month' in s and "--currency" in s
+    # the questions people ask become checked examples, as they do today
+    assert "agami-asked-questions.txt" in s or "the `Questions people ask` option of 1.5" in s
+
+
+def test_1_4_and_1_5_do_not_ask_again_what_0a_0_asked():
+    four = _between("### 1.4 ", "### 1.5 ")
+    assert "already asked in 0a.0" in four
+    five = _between("### 1.5 ", "### 1.6 ")
+    assert "Don't ask the source system again" in five
+
+
+def test_readme_says_what_to_have_ready():
+    r = README.read_text(encoding="utf-8")
+    s = r[r.index("**Before you start**"): r.index("1. **Start setup.**")]
+    for item in ("organisation does", "system the data comes from", "fiscal year", "currency",
+                 "tables and columns", "metrics and business terms", "questions people ask"):
+        assert item in s, item

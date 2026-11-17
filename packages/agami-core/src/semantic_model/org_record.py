@@ -267,15 +267,22 @@ def set_org_fields(
     *,
     name: Optional[str] = None,
     description: Optional[str] = None,
+    fiscal_year_start_month: Optional[int] = None,
+    currency: Optional[str] = None,
 ) -> OrgRecord:
     """Set the human-authored company fields on the record, minting it first if absent. Only the fields
     passed (non-``None``) are updated; the rest are left untouched. Persists and returns the record.
     This is the write path onboarding uses to populate ``name``/``description`` (the record is otherwise
-    minted with just an ``org_id``)."""
+    minted with just an ``org_id``), and the fiscal year and currency the person states about the
+    database before the build (#673)."""
     record = ensure_org_record(artifacts_dir)
-    changes = {k: v for k, v in {"name": name, "description": description}.items() if v is not None}
+    changes = {k: v for k, v in {"name": name, "description": description,
+                                 "fiscal_year_start_month": fiscal_year_start_month}.items() if v is not None}
+    if currency is not None:
+        changes["display_conventions"] = record.display_conventions.model_copy(update={"currency": currency})
     if changes:
-        record = record.model_copy(update=changes)
+        # Validated again, so a month outside 1..12 is refused before it is written.
+        record = OrgRecord.model_validate({**record.model_dump(), **changes})
         write_org_record(artifacts_dir, record)
     return record
 

@@ -117,8 +117,34 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 
 **Two paths, chosen by the operating system** (`uname -s`: `Darwin` is macOS; `MINGW*` / `MSYS*` / `CYGWIN*`, or `$OS` = `Windows_NT`, is Windows):
 
-- **macOS and Windows: the password page.** 0a.1 → 0a.2 → **0a.4c** (connection fields card) → 0a.3 (the name, offering the database's own name) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.4k** (the password page) → Phase 1. No file to edit and nothing to paste. The page needs the interpreter, agami-core (with `keyring`) and the artifacts folder in place, which is why 0a.5–0a.8 run before it.
-- **Linux and anything else, and Databricks on every system** (its secret is a `token`, and the page stores a `password`): the file. 0a.1 → 0a.2 → 0a.3 → **0a.4** (`credentials.example`) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.9** (a card waits for the filled-in file) → 0a.10 → Phase 1.
+- **macOS and Windows: the password page.** **0a.0** → 0a.1 → 0a.2 → **0a.4c** (connection fields card) → 0a.3 (the name, offering the database's own name) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.4k** (the password page) → Phase 1. No file to edit and nothing to paste. The page needs the interpreter, agami-core (with `keyring`) and the artifacts folder in place, which is why 0a.5–0a.8 run before it.
+- **Linux and anything else, and Databricks on every system** (its secret is a `token`, and the page stores a `password`): the file. **0a.0** → 0a.1 → 0a.2 → 0a.3 → **0a.4** (`credentials.example`) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.9** (a card waits for the filled-in file) → 0a.10 → Phase 1.
+
+### 0a.0 — Before you start: what to have ready, then the organisation and the source system
+
+**First, before the database-type card**, say in one short message what helps to have to hand, so nobody is asked mid-build for something they could have fetched up front. None of it is required:
+
+> *Before we connect, it helps to have these to hand (none is required):*
+> 1. *What your organisation does, in a sentence or two.*
+> 2. *What system the data comes from (a product such as ServiceNow or Salesforce, or your own application), and anything about the database: when your fiscal year starts, what currency amounts are in.*
+> 3. *Definitions of the tables and columns: a data dictionary, a spec workbook, a dbt or LookML project.*
+> 4. *Definitions of your metrics and business terms.*
+> 5. *The questions people ask. They become checked examples, and how many of them agami answers correctly is how you can tell the model is right.*
+
+Then ask 1 and 2 as their own first questions, on one card (two questions; leave the Company one out when it was already authored, as 1.4 A says):
+
+- **The Company question** is 1.4 A's `Company` card, asked here instead of after the connection. 1.4 A says what to write.
+- **The Source question**, header `Source`: *"What system does this data come from? Add anything about the database too, e.g. "ServiceNow; fiscal year starts in July; amounts in USD". Type it in Other."* Options: **Our own application** (built in-house, no product dictionary) and **Not sure** (agami reads the database and works it out). No option is marked Recommended: it is a fact about their setup.
+
+**Both answers are hints, never copied verbatim into the model.** They steer the descriptions written in Phase 2 (a domain prior, like the narrative) and switch on product-specific help; no description, glossary entry or rule is the person's sentence pasted in. Bind the Source answer and act on it:
+
+- **A named product** → `$SOURCE_SYSTEM`. When agami has a metadata preset for it (ServiceNow: `servicenow`), 2a.0 passes `--preset servicenow` to `sm enrich-metadata`, 1.6 keeps the product's dictionary tables in the kept set (the command reads them only when they are in the model), and 1.5's published-product-schema path is already on. Say it in one line: *"ServiceNow: I'll read its own data dictionary for the column meanings."*
+- **A fiscal year start or a currency, stated plainly** → write it to the company record once: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-org "<artifacts_dir>" --fiscal-year-start-month <1-12> --currency <ISO code>` (either flag alone). The currency is also the default 2d offers for money columns. Anything vaguer ("our year is odd") is kept as a hint and asked in 2g when the data shows it matters.
+- **Our own application** / **Not sure** → nothing is written; the build works from the database.
+
+Items 3 to 5 are handed over on 1.5's context card (its `Definitions or a semantic layer` and `Questions people ask` options); the questions people ask go to `<artifacts_dir>/local/tmp/agami-asked-questions.txt` and become checked examples in Phase 5, as they do today. Don't ask for them here.
+
+**When Phase 0a is skipped** (the credentials already exist), ask this step at the start of 1.4 instead, on a first onboard of that database. Not on `reintrospect`.
 
 ### 0a.1 — Set up `<artifacts_dir>/local/`
 ```bash
@@ -606,9 +632,9 @@ Example to say BEFORE introspecting: *"Found 70 tables across 18 schemas. I'll m
 
 ### 1.4 — Datasource context (MANDATORY — ALWAYS ASK)
 
-Three cards, asked right after the connection works and before tables are listed: the company (once per deployment), what the person can share (1.5), and this database's one line. They are required state-gathering: "don't ask clarifying questions" does NOT cancel them, and the skill never decides skip for the person. Conventions: [`shared/question-cards.md`](../../shared/question-cards.md). The sample path skips all three (its model is ready-made).
+Three cards, asked right after the connection works and before tables are listed: the company (once per deployment; already asked in 0a.0 on the usual path), what the person can share (1.5), and this database's one line. They are required state-gathering: "don't ask clarifying questions" does NOT cancel them, and the skill never decides skip for the person. Conventions: [`shared/question-cards.md`](../../shared/question-cards.md). The sample path skips all three (its model is ready-made).
 
-**A. Company card — ONCE, on the first onboard into this deployment.** Decide "already authored" by content, not by file existence: done only if the root `<artifacts_dir>/organization.md` exists **or** `<artifacts_dir>/organization.yaml` has a non-empty `name`/`description`. Otherwise AskUserQuestion, one question, header `Company`:
+**A. Company card — ONCE, on the first onboard into this deployment.** Normally already asked in 0a.0, at the very start; don't ask it twice in one run. Decide "already authored" by content, not by file existence: done only if the root `<artifacts_dir>/organization.md` exists **or** `<artifacts_dir>/organization.yaml` has a non-empty `name`/`description`. Otherwise AskUserQuestion, one question, header `Company`:
 
 > *"What's your company called, and what does it do? Type a sentence or two in Other, name first. It's shared by every database you connect here."*
 
@@ -645,10 +671,12 @@ The context card (1.4 B). Same "required state-gathering" rule. AskUserQuestion,
 |---|---|---|
 | `Ask me as you go (Recommended)` | I'll answer what the data can't settle. Picked alone: build from the database and ask only that | Nothing now. After the descriptions, [2g](#2g--ask-what-the-data-cant-settle) asks on cards only what the data itself can't answer. |
 | `Definitions or a semantic layer` | A data dictionary, metrics list, ERD, spec workbook, or a dbt / LookML / Cube repo | A follow-up card: *"Type the file or folder path in Other, or attach the file to your next message."*, options **Skip this one** / **I'll attach it** (wait for the attachment). Then read it as the sections below say: a doc, a column dictionary, a model spec workbook, or a semantic-layer repo by what the path holds. |
-| `Questions people ask` | Real questions from your team; they become checked examples | A follow-up card: *"Type them in Other, one per line, or a file path."*, options **Skip this one** / **I'll attach a file**. Save them with the Write tool to `<artifacts_dir>/local/tmp/agami-asked-questions.txt`, one per line; Phase 5 writes SQL for each and checks them with the rest. |
+| `Questions people ask` | Real questions from your team; they become checked examples, and the measure of how right the model is | A follow-up card: *"Type them in Other, one per line, or a file path."*, options **Skip this one** / **I'll attach a file**. Save them with the Write tool to `<artifacts_dir>/local/tmp/agami-asked-questions.txt`, one per line; Phase 5 writes SQL for each and checks them with the rest. |
 | `Report SQL or dashboards` | SQL you trust, an export, or a screenshot; checked against the model after the build | A follow-up card: *"Type a path to a .sql or .csv file in Other, or attach a screenshot to your next message."*, options **Skip this one** / **I'll attach it**. Copy files or pasted SQL into `<artifacts_dir>/local/reconcile/inbox/` (SQL as `<ts>.sql`, a CSV as is; note a screenshot's path). Phase 6b hands them to `/agami-reconcile`. |
 
 `Ask me as you go` comes first because most people have no document to hand over, and a model built from the database alone guesses wherever the data has two readings: knowledge is asked for where the data shows a gap, not handed over up front. It goes with any of the others, and picked alone it is also the card's "nothing to hand over" answer, so the card can always be submitted. A person who wants neither documents nor questions types it in "Other" ("nothing", "don't ask me"): build from the database alone and leave 2g out.
+
+**This card is where the things 0a.0 listed are handed over.** Don't ask the source system again: when 0a.0's Source card named a product, the published-product-schema path below is already on.
 
 **"Other" on the context card** takes a named product ("it's ServiceNow", "this is our Salesforce") → the published-product-schema path below; or any of the above typed straight in (a path, questions, SQL), routed by what it is. A question about the options ("what's a semantic layer?") is answered first and the card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)).
 
@@ -920,7 +948,7 @@ AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" enrich-metadat
   --profile <profile> --db-type <db_type>
 ```
 
-It auto-detects a preset (e.g. `servicenow`) or takes `--preset`, reads the dictionary/lookup tables, and applies — in validated curate batches — **column descriptions** (stamped `description_source: metadata`, authoritative), **`choice_field` labels**, and **reference/FK relationships** (the `caller_id → sys_user` edges that `<x>_id` name-matching can't find). On ServiceNow this alone closes most of the column-coverage, enum-decode, and join-graph gaps deterministically. It prints what it enriched. **Then** hand-enrich only what it didn't cover (2a–2c below). `--skip-references` if you want descriptions/choices only.
+When 0a.0's Source card named a product with a preset, pass it as `--preset <name>`. It auto-detects a preset (e.g. `servicenow`) or takes `--preset`, reads the dictionary/lookup tables, and applies — in validated curate batches — **column descriptions** (stamped `description_source: metadata`, authoritative), **`choice_field` labels**, and **reference/FK relationships** (the `caller_id → sys_user` edges that `<x>_id` name-matching can't find). On ServiceNow this alone closes most of the column-coverage, enum-decode, and join-graph gaps deterministically. It prints what it enriched. **Then** hand-enrich only what it didn't cover (2a–2c below). `--skip-references` if you want descriptions/choices only.
 
 **The raised cap is not optional here — [why](#raised-cap).** A real `sys_dictionary` is tens of thousands of rows, so without the prefix this command doesn't degrade, it **dies**: the read is refused and the runner re-raises the refusal as `RuntimeError: {"refusal": … "rule": "resource_limit" …}`. Nothing is half-applied when that happens (the fetch is above the first `curate` write), so re-running with the prefix is clean. Two things when you run it: **never pipe it through `tail`** — that masks the exit code and a hard failure reads as success; and if the command still refuses even at 200,000, read the `fetched` counts, raise the prefix to clear the largest source table, and say so.
 

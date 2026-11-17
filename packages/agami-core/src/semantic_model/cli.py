@@ -205,10 +205,13 @@ def cmd_set_org(args) -> int:
     from . import org_record as OR
 
     record = OR.set_org_fields(
-        args.artifacts_dir, name=args.name, description=args.description
+        args.artifacts_dir, name=args.name, description=args.description,
+        fiscal_year_start_month=args.fiscal_year_start_month, currency=args.currency,
     )
     _print_json(
-        {"org_id": record.org_id, "name": record.name, "description": record.description}
+        {"org_id": record.org_id, "name": record.name, "description": record.description,
+         "fiscal_year_start_month": record.fiscal_year_start_month,
+         "currency": record.display_conventions.currency}
     )
     return 0
 
@@ -2066,6 +2069,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("artifacts_dir")
     sp.add_argument("--name", default=None)
     sp.add_argument("--description", default=None)
+    sp.add_argument("--fiscal-year-start-month", type=int, choices=range(1, 13), default=None,
+                    metavar="1-12", help="the month the company's fiscal year starts (7 = July)")
+    sp.add_argument("--currency", default=None, help="the currency amounts are in, an ISO code (USD)")
     sp.set_defaults(func=cmd_set_org)
 
     sp = sub.add_parser("examples", help="rank prompt examples for a query")
