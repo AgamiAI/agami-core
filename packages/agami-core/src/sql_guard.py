@@ -375,8 +375,10 @@ _DENY_KEYWORD_RE = re.compile(
 #   - straight after `name.` with no space: a qualified column. The qualifier must START with a
 #     letter or `_`, so `1.` and `1e5.` (numeric literals, after which `INTO` is the keyword) do not
 #     count.
-#   - alone as a select-list item: after `SELECT` / `DISTINCT` / `,` and before `,` / `FROM`. No
-#     statement or clause keyword sits there; `SELECT a INTO t` has `INTO` after a name, not a comma.
+#   - alone as a select-list item: after `SELECT` / `DISTINCT` / `,` and before `,` / an unquoted
+#     `FROM`. **Never `INTO`:** Postgres and Redshift accept an empty select list, so
+#     `SELECT INTO "from" FROM t` creates a table named `from`. A column named `into` is written
+#     `t.into` or quoted instead. No other denied keyword has a statement form in that position.
 # `WHERE notify = 1` and other positions still refuse — the narrow rule is the conservative one.
 _QUALIFIER_BEFORE_RE = re.compile(r"(?<![\w$])[A-Za-z_][\w$]*\.$")
 _SELECT_ITEM_BEFORE_RE = re.compile(r"(?:\bSELECT|\bDISTINCT|,)\s*$", re.IGNORECASE)
@@ -387,12 +389,19 @@ def _keyword_is_identifier(text: str, quoted: tuple[tuple[int, int], ...], start
     """Whether the deny match at `text[start:end]` stands where only an identifier can."""
     if any(q_start <= start and end <= q_end for q_start, q_end in quoted):
         return True
-    if text[start - 1 : start] == "`" and text[end : end + 1] == "`":
-        return True
     before = text[:start]
+    # Inside ONE backtick span: the keyword is its whole content, opened by an odd backtick. In
+    # `` `a`INTO`b` `` the backticks either side close one name and open the next.
+    if (text[start - 1 : start] == "`" and text[end : end + 1] == "`"
+            and before.count("`") % 2 == 1):
+        return True
     if _QUALIFIER_BEFORE_RE.search(before):
         return True
-    return bool(_SELECT_ITEM_BEFORE_RE.search(before) and _SELECT_ITEM_AFTER_RE.match(text, end))
+    if text[start:end].upper() == "INTO" or not _SELECT_ITEM_BEFORE_RE.search(before):
+        return False
+    after = _SELECT_ITEM_AFTER_RE.match(text, end)
+    # The FROM must be the clause, not a quoted name `"from"` that `_neutralize` unwrapped.
+    return bool(after and not any(q_start < after.end() <= q_end for q_start, q_end in quoted))
 
 
 def _denied_keyword(sql: str, stripped: str) -> re.Match[str] | None:

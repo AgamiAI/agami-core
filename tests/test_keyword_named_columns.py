@@ -19,8 +19,8 @@ ACCEPT = [
     *(f"SELECT `{w}` FROM some_dataset.some_table LIMIT 1" for w in _WORDS),
     *(f"SELECT t.{w} FROM some_schema.some_table AS t LIMIT 1" for w in _WORDS),
     *(f'SELECT t."{w}" FROM some_schema.some_table AS t' for w in _WORDS),
-    *(f"SELECT id, {w} FROM some_schema.some_table" for w in _WORDS),
-    *(f"SELECT {w}, id FROM some_schema.some_table" for w in _WORDS),
+    *(f"SELECT id, {w} FROM some_schema.some_table" for w in _WORDS if w != "into"),
+    *(f"SELECT {w}, id FROM some_schema.some_table" for w in _WORDS if w != "into"),
     "SELECT DISTINCT notify FROM incident",
     "SELECT i.number FROM incident AS i WHERE i.notify = 2 GROUP BY i.number ORDER BY i.lock",
     'SELECT COUNT(*) FROM incident WHERE "set" IS NOT NULL',
@@ -54,6 +54,17 @@ REJECT = [
     "SELECT notify FROM t FOR UPDATE",
     # A bare keyword not standing alone as a select-list item is still the keyword.
     "SELECT id FROM t WHERE notify = 1",
+    # An empty select list with INTO creates a table on Postgres / Redshift; `"from"` unwraps to a
+    # FROM, so INTO is never exempt as a bare select-list item.
+    'SELECT INTO "from" FROM t',
+    'SELECT INTO "FROM"',
+    'SELECT DISTINCT INTO "from" FROM t',
+    'SELECT INTO /*c*/ "from" FROM t',
+    "SELECT into, id FROM t",
+    "SELECT id, into FROM t",
+    # Two backtick names either side of a bare keyword are not one quoted name.
+    "SELECT `a`INTO`b` FROM t",
+    "SELECT `a`NOTIFY`b` FROM t",
 ]
 
 
