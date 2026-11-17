@@ -32,7 +32,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
 
@@ -406,10 +406,11 @@ def introspect(
     budget = _CountBudget(_COUNT_BUDGET_S)
     reads = _ReadBudget(DISTINCT_READ_CAP)
     keys_unread: set[tuple] = set()   # (schema, table) whose unique keys couldn't be read
+    repeats_unread: set[tuple] = set()   # (schema, table) whose repeat check settled nothing
     samples: dict[tuple, tuple] = {}   # (schema, table) -> (sample, est_rows), for the placeholder scan
     for i, (schema, table) in enumerate(pairs, 1):
         t = _build_table(dialect, runner, schema, table, conn_name, report, budget, reads,
-                         keys_unread, samples)
+                         keys_unread, samples, repeats_unread)
         built.append(t)
         if i % _step == 0 or i == len(pairs):
             _progress(pp, f"columns+grain {i}/{len(pairs)}")
@@ -495,7 +496,8 @@ def introspect(
             keys_read = (t.schema_name, t.name) not in keys_unread
             if not keys_read:
                 report.notes.append(f"unique keys not re-read for {_qualified(old)}: kept the stored ones")
-            m, change = _merge_table(old, t, keys_read=keys_read)
+            repeat_read = (t.schema_name, t.name) not in repeats_unread
+            m, change = _merge_table(old, t, keys_read=keys_read, repeat_read=repeat_read)
             # The merge keeps the saved flags and identity; the placeholder scan needs this run's
             # personal-data findings, and the sample filed under the merged table's (schema, name).
             ok = (old.schema_name, old.name)
@@ -512,7 +514,7 @@ def introspect(
             merged.append(m)
             for area, copy in copies[(old.schema_name, old.name)]:
                 per_area[(area, (old.schema_name, old.name))] = (
-                    m if copy is old else _merge_table(copy, t, keys_read=keys_read)[0])
+                    m if copy is old else _merge_table(copy, t, keys_read=keys_read, repeat_read=repeat_read)[0])
             for r in change.get("retyped", []):
                 retyped[((m.schema_name or "").lower(), m.name.lower(), r.split(":")[0].lower())] = _qualified(m)
             if change:
@@ -952,13 +954,15 @@ def _areas_untouched(prev: Datasource, root: Path) -> bool:
     return True
 
 
-def _merge_table(old: Table, fresh: Table, *, keys_read: bool = True) -> tuple[Table, dict[str, list[str]]]:
+def _merge_table(old: Table, fresh: Table, *, keys_read: bool = True,
+                 repeat_read: bool = True) -> tuple[Table, dict[str, list[str]]]:
     """`old` with the structure `fresh` read from the database, and the curation kept.
 
     A column the database still has keeps every field but its type; a new one arrives as
     introspection built it; one the database no longer has stays, marked `stale`, so a description or
     sign-off is never silently lost and a person decides. `keys_read` False keeps `old`'s unique keys,
-    since a failed read is not the database dropping them. Returns the merged table and what changed."""
+    since a failed read is not the database dropping them; `repeat_read` False likewise keeps a stored
+    repeat caveat. Returns the merged table and what changed."""
     fresh_by = {c.name.lower(): c for c in fresh.columns}
     old_names = {c.name.lower() for c in old.columns}
     cols: list[Column] = []
@@ -990,6 +994,20 @@ def _merge_table(old: Table, fresh: Table, *, keys_read: bool = True) -> tuple[T
                 group = "misc" if "misc" in groups else next(iter(groups))
             groups[group].append(f.name)
     cols, grain = _merged_key(old, fresh, cols, change)
+    caveats = list(old.caveats)
+    repeat = build.repeated_key(fresh)
+    if repeat or repeat_read:
+        # Measured now, so it replaces the stored one; a check that ran and found none removes it.
+        caveats = [c for c in caveats if not build.is_repeat_caveat(c)]
+    if repeat:
+        # The key alone is no longer one row per record. A composite grain holding it (a record and
+        # its stage) may still be, and is someone's statement: it stays.
+        key = repeat[0].lower()
+        caveats.append(build.repeat_caveat(*repeat))
+        if [g.lower() for g in grain] == [key]:
+            grain = []
+        if [c.name.lower() for c in cols if c.primary_key] == [key]:
+            cols = [c.model_copy(update={"primary_key": False}) if c.name.lower() == key else c for c in cols]
     restored_table = old.review_state == "stale"
     if restored_table:
         change.setdefault("table", []).append("back in the database")
@@ -998,6 +1016,7 @@ def _merge_table(old: Table, fresh: Table, *, keys_read: bool = True) -> tuple[T
         change.setdefault("unique keys", []).append(
             "; ".join(", ".join(k) for k in unique_keys) or "(none)")
     update = {"columns": cols, "column_groups": groups, "grain": grain, "unique_keys": unique_keys,
+              "caveats": caveats,
               "performance_hints": _merged_hints(old.performance_hints, fresh.performance_hints)}
     if restored_table:
         update["review_state"] = "approved"
@@ -1382,7 +1401,7 @@ def _build_table(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
     conn_name: str, report: IntrospectReport, budget: Optional[_CountBudget] = None,
     reads: Optional[_ReadBudget] = None, keys_unread: Optional[set] = None,
-    samples: Optional[dict] = None,
+    samples: Optional[dict] = None, repeats_unread: Optional[set] = None,
 ) -> Table:
     # columns: catalog first, probe fallback
     probe_sample: list = []
@@ -1403,6 +1422,12 @@ def _build_table(
             f"each id column. A composite/absent grain is expected for a fact table this "
             f"size; set it by hand if you know the key."
         )
+    checked = (None, 1.0) if grain else _repeat_check(dialect, runner, schema, table, cols, est_rows=est_rows)
+    if checked is None and repeats_unread is not None:
+        repeats_unread.add((schema, table))
+    repeat = checked if checked and checked[1] > 1 else None
+    if repeat:
+        report.notes.append(f"{table}: {build.repeat_caveat(*repeat)}")
     unique_keys = _unique_keys(dialect, runner, schema, table, cols, grain, est_rows=est_rows)
     if unique_keys is None:
         # Unknown, not none: a refresh keeps the stored keys rather than read this as their removal.
@@ -1467,8 +1492,70 @@ def _build_table(
         column_groups=column_groups,
         column_group_descriptions=column_group_descriptions,
         performance_hints=perf,
+        caveats=[build.repeat_caveat(*repeat)] if repeat else [],
         columns=cols,
     )
+
+
+# The bounds of the repeat check on a table above the grain probe's size guard: the records of a
+# recent window of its first date column, or else this many rows.
+_REPEAT_WINDOW_DAYS = 90
+_REPEAT_SAMPLE_ROWS = 1_000_000
+_VIEW_AFFIX = re.compile(r"^(v|vw|view)_|_(v|vw|view)$", re.IGNORECASE)
+
+
+def _today() -> date:
+    return date.today()
+
+
+def _record_key(table: str, cols: list[Column]) -> Optional[str]:
+    """The column that names the record a table is about: `id`, or the table's own name with `_id` /
+    `_key` / `_number`. A view's `v_`/`_view` affix is dropped first. Never a column named for
+    another record, which repeats by design: `customer_id` on `orders`, or `order_id` on
+    `order_items`, where counting rows is right."""
+    base = _VIEW_AFFIX.sub("", table.lower())
+    stems = [base, base[:-1] if base.endswith("s") else base]
+    wanted = ["id", "sys_id"] + [f"{s}_{x}" for s in stems if s for x in ("id", "key", "number")]
+    by_lower = {c.name.lower(): c for c in cols if c.type in ("integer", "string")}
+    return next((by_lower[w].name for w in wanted if w in by_lower), None)
+
+
+def _repeat_check(
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
+    *, est_rows: Optional[int] = None,
+) -> Optional[tuple[str, float]]:
+    """(key, factor) from one aggregate statement, COUNT(*) against COUNT(DISTINCT key): a factor
+    above 1 when the table holds each record on several rows, 1.0 when each record is one row. None
+    when nothing was settled: no record key, a failed read, or nothing read.
+
+    A table above the grain probe's guard is never read in full: a recent window of its first date
+    column, else (or when the window is empty) a bounded sample. Both can understate the factor: the
+    sample has no ORDER BY, so a record whose rows are scattered may have only some of them in it, and
+    a window cuts off a record's rows dated before it. A window with any rows ends the check, however
+    few. On BigQuery the LIMIT bounds the rows returned, not the bytes billed."""
+    key = _record_key(table, cols)
+    if key is None:
+        return None
+    q, k = dialect.qualified(schema, table), dialect.quote_ident(key)
+    head = f"SELECT COUNT(*) AS total, COUNT(DISTINCT {k}) AS distinct_count FROM "
+    statements = [head + q]
+    if est_rows is not None and est_rows >= _GRAIN_PROBE_MAX_ROWS:
+        dated = next((c.name for c in cols if c.type in ("date", "timestamp")), None)
+        since = (_today() - timedelta(days=_REPEAT_WINDOW_DAYS)).isoformat()
+        sample = head + f"({dialect.limited(f'SELECT {k} FROM {q}', _REPEAT_SAMPLE_ROWS)}) s"
+        # The window misses when the data stopped before it; the sample then reads what there is.
+        statements = ([f"{head}{q} WHERE {dialect.quote_ident(dated)} >= {dialect.date_literal(since)}"]
+                      if dated else []) + [sample]
+    for sql in statements:
+        res = _try(runner, sql)
+        try:
+            total = int(float(res[0]["total"])) if res else 0
+            distinct = int(float(res[0]["distinct_count"])) if res else 0
+        except (KeyError, TypeError, ValueError):
+            return None
+        if total and distinct:
+            return key, max(1.0, round(total / distinct, 1))
+    return None
 
 
 def _columns(

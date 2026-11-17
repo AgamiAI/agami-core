@@ -314,7 +314,8 @@ def test_ambiguities_come_first_ordered_by_how_far_the_readings_differ_and_are_c
     root, db = store
     out = _ask(root, db)
     kinds = [q["kind"] for q in out["questions"]]
-    assert kinds == sorted(kinds, key=lambda k: k != "ambiguity")
+    # an unasked fiscal start first, so the cap never cuts it (ACE-182); then the ambiguities
+    assert kinds == sorted(kinds, key=lambda k: (k != "fiscal_start", k != "ambiguity"))
     spreads = [q["spread"] for q in out["questions"] if q["kind"] == "ambiguity"]
     assert spreads == sorted(spreads, reverse=True)
     monkeypatch.setattr(OQ, "MAX_QUESTIONS", 2)
