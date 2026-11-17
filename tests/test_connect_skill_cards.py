@@ -1143,3 +1143,12 @@ def test_4a_skip_line_gives_the_kept_count_on_a_reload():
     skip = skip[: skip.index("\n\n")]
     assert "nothing was flagged or hidden" not in skip
     assert "`count` is above 0" in skip
+
+
+def test_a_presets_dictionary_tables_are_never_kept_as_model_tables():
+    """Since ACE-181 `enrich-metadata --preset` reads the platform's dictionary and choice tables
+    straight from the database; an older line told 1.6 to keep them, and a live run modelled them."""
+    text = SKILL.read_text(encoding="utf-8")
+    assert "keeps the product's dictionary tables in the kept set" not in text
+    assert "only when they are in the model" not in text
+    assert "never add the preset's source tables" in text
