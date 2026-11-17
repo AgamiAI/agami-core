@@ -10769,6 +10769,8 @@ def _group_by_items(sel: "exp.Select") -> "tuple | None":
     projections = sel.expressions
     out = []
     for g in group.expressions:
+        if isinstance(g, (exp.Rollup, exp.Cube, exp.GroupingSets)):
+            return None
         if isinstance(g, exp.Literal) and g.is_int:
             n = int(g.name)
             if not 0 < n <= len(projections) or any(

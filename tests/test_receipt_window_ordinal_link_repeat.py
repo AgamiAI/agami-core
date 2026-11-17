@@ -373,3 +373,45 @@ def test_the_query_skill_names_a_flag_the_cli_takes():
         cli.main(["examples", "--help"])
     for flag in ("--metric", "--query", "--area", "--top-k"):
         assert flag in parser_help.getvalue()
+
+
+# --- the helpers' fail-closed edges ------------------------------------------------------------
+
+
+def _expr(sql: str):
+    return rt.sqlglot.parse_one(sql, read="postgres").expressions[0]
+
+
+def test_window_parts_reads_only_windows_over_aggregates():
+    assert rt._window_parts(None) is None
+    assert rt._window_parts(_expr("SELECT SUM(x) FROM t")) is None
+    assert rt._window_parts(_expr("SELECT ROW_NUMBER() OVER (ORDER BY x) FROM t")) is None
+    # Only the outermost aggregate of a nest is a part.
+    (part,) = rt._window_parts(_expr("SELECT SUM(MAX(COUNT(x))) OVER () FROM t"))
+    assert part.sql() == "MAX(COUNT(x))"
+
+
+def test_group_by_items_edges():
+    def sel(sql: str):
+        return rt.sqlglot.parse_one(sql, read="postgres")
+
+    assert rt._group_by_items(sel("SELECT a FROM t")) == ()
+    assert rt._group_by_items(sel("SELECT a, b, SUM(c) FROM t GROUP BY ROLLUP (a, b)")) is None
+
+
+def test_distinct_count_of_reads_one_column_only():
+    assert rt._distinct_count_of(_expr("SELECT COUNT(DISTINCT a, b) FROM t")) is None
+    assert rt._distinct_count_of(_expr("SELECT SUM(a) FROM t")) is None
+    assert rt._distinct_count_of(_expr("SELECT COUNT(DISTINCT A) FROM t")) == "a"
+
+
+def test_a_link_beside_one_whose_columns_cannot_be_read_names_none(tmp_path):
+    odd = _rel("assets", "owned_by_id", "users", "id")
+    del odd["from_column"], odd["to_column"]
+    odd["on"] = "assets.owned_by_id = users.id AND users.active"
+    org = _audit(tmp_path, relationships=[_rel("assets", "assigned_to_id", "users", "id"), odd])
+    item = _join(org, "SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id")
+    assert item["status"] == rt.DECLARED
+    assert (item["via"], item["summary"]) == (None, None)
+    rels = [r for r in rt._cardinality_index(org) if r.on]
+    assert rt._link_columns(rels[0], [rels[0], *rt._cardinality_index(org)], None) is None
