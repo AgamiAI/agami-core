@@ -477,13 +477,16 @@ def _admin_username() -> str | None:
 
 def _admin_provider() -> str | None:
     """The admin's pinned OIDC provider (`AGAMI_ADMIN_PROVIDER`), or None — only when it's a provider
-    that's actually configured (client id/secret present)."""
+    that's actually configured (client id/secret present) and pinned to one organization, which
+    excludes Microsoft on `consumers` (`admin_oidc_start` refuses it too)."""
     key = os.environ.get("AGAMI_ADMIN_PROVIDER", "").strip().lower()
     if not key:
         return None
     import oidc  # lazy: the egress module, server-only
 
-    return key if key in oidc.available_providers() else None
+    if key not in oidc.available_providers():
+        return None
+    return key if oidc.provider(key).pinned else None
 
 
 def _admin_login_provider() -> str | None:

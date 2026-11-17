@@ -66,6 +66,15 @@ pinned to a single tenant id. It's off unless configured, and this basic
 single-provider login is **free**. Per-org (multi-tenant) SSO, SAML, and SCIM are hosted **Enterprise SSO**
 — see [what's free vs hosted](open-vs-hosted.md).
 
+**Personal Microsoft accounts.** For a server that anyone may sign in to, such as a public demo, set
+`AGAMI_OIDC_MICROSOFT_TENANT=consumers` instead of a tenant id. Only personal Microsoft accounts
+(`outlook.com`, `hotmail.com`, `live.com`, and addresses people signed up with at Microsoft) can then
+sign in, and their address is treated as proven; Microsoft turns work and school accounts away. The
+app registration must allow personal Microsoft accounts. `common` and `organizations` are refused,
+because Microsoft documents no claim that proves a work account's address. A company server should
+keep its tenant id. The admin can't sign in with Microsoft on `consumers`, so keep
+`AGAMI_ADMIN_PASSWORD` set or use Google for the admin; with neither, no admin login works.
+
 > **Serverless note:** on a managed-container platform (Cloud Run, ECS/Fargate, Container Apps) the server
 > runs under a cloud identity — scope it to a dedicated least-privilege one, not the platform default. See
 > [Runtime identity on serverless platforms](../deploy/README.md#runtime-identity-on-serverless-platforms).

@@ -12,7 +12,7 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
-## [0.9.23] — 2026-11-17
+## [0.9.24] — 2026-11-17
 
 ### Security
 
@@ -140,11 +140,13 @@ below corresponds to one such version.
   RECURSIVE` sibling defined later could bind, and `DISTINCT ON`. A step body is entered once per
   number, so steps that fan out stay linear. `joins_not_declared` lists are capped and charged to
   the receipt's condition budget, a cut list counted on the section's marker.
+
 - **A metric matches only a number that read all its tables (#630).** The expression alone matched
   `SUM(amount) FROM orders` to a metric declared on `payments`. A metric whose `source_tables` the
   number did not all read is not its match, and `missing_tables` names the metric and the table. A
   number that read an extra table can still match, with that table's joins and conditions shown;
   of a one-table metric and its two-table twin, the twin wins when both tables were read.
+
 - **The joins, aggregates and tables sections read a WITH step by one rule (#204, #200, #462,
   #429).** Each section answered "what does this name read" its own way, so one receipt could
   describe one step two ways. Every section now binds a WITH name where it is written, by the scope
@@ -201,6 +203,7 @@ below corresponds to one such version.
   recursive or nests too deep. `joins_not_declared` names tables, never a step's alias. Read
   `undetermined`: a join key a step hands on renamed, arms matched BY NAME, an anti-join, an outer
   join keyed by something other than a plain `=` or required beside a RIGHT join.
+
 - **A matched metric says which rows it was counted over (#656).** The receipt's `columns`
   section compared an output column's expression with each metric's binding and nothing else, so
   `COUNT(DISTINCT number) … WHERE state = 'open'` read `matched` to the metric counting every row,
@@ -223,65 +226,6 @@ below corresponds to one such version.
   does not model: a FULL join, a window over filtered rows, an outer-join condition its aggregate
   lets NULL rows past, or two references whose names differ only by case. The receipt's echo bound also strips
   invisible characters (zero-width, word joiner, byte-order mark, tag characters).
-
-- **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
-  "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm
-  suggest-units`, `sm set-units`, `sm sensitive` and placeholder findings give each column a
-  `label`, `sm suggest-metrics` gives `flag_rates.labels`, and `sm review-items` gives each item a
-  `plain_name`, so every card uses the same words (question-cards rule 3b). An example's sign-off
-  card shows its SQL in the preview, as a metric's does. The sign-off, examples and summary cards
-  offer **Show the full view**, which had to be typed in "Other" before.
-
-- **Onboarding asks for context on cards.** Right after connecting, three cards: the company
-  (once per deployment, or drafted from the database), what the person can share (definitions or a
-  semantic layer, the questions people ask, report SQL or dashboards), and the database's one line.
-  The questions become examples checked with the rest; the reports go to agami-reconcile after the
-  build.
-
-- **Charts drawn in the chat.** "Show as a chart" on the answer card now draws horizontal bars as
-  text in the chat (`scripts/text_chart.py`), from the same sections file the HTML chart reads, so
-  the bars, the table and the page agree. The HTML report is the full view, served only when asked.
-
-- **Read-only full views.** Every page renderer takes `--read-only`, and the skills pass it: the
-  page's change controls and its copy-and-paste dialog are hidden and a banner says to decide on
-  the cards. The password page lists the host, port, database and user it is for.
-
-- **Cards answer questions.** A question typed in "Other" ("show me the SQL", "why?") is answered
-  and the same card asked again (question-cards rule 5a); a value to type, such as the sign-off
-  email, is asked for in the question rather than offered as an option.
-
-- **`scripts/serve_page.py`: an agami page served from localhost for a short while.** It serves
-  one HTML file and the web assets beside it on `127.0.0.1` at a random port, prints
-  `{"url": "http://localhost:<port>/<name>"}`, and exits when its time is up (`--minutes`, 30 by
-  default). It refuses a request whose Host is not its own address. Every skill's optional full view
-  (the model explorer, the table picker, the reconcile pages, the chart) is now served this way
-  instead of opened as a `file://` page, which the Desktop Code tab's built-in browser shows as a
-  frozen snapshot when the file sits outside the project folder.
-
-- **Database passwords in the OS credential store on macOS and Windows.** A credentials-file
-  profile can hold `password = keyring:agami/<profile>`, which agami resolves from Keychain or
-  Credential Manager when it connects (`sm install` adds the `agami-core[keyring]` extra on those two
-  systems). A new one-time local page, `scripts/connect_helper.py`, takes the password on `127.0.0.1`
-  and stores it there, so it never reaches the chat, a command line or a plain-text file. Its refusals
-  carry a machine-readable `reason`, a missing database driver is reported as `missing_driver` with the
-  package to install, and a run that fails or is stopped removes what it stored. `setup_pgauth.py`
-  never writes such a profile's password to `.pgpass` / `.mysql.cnf`. Plain-text profiles work as before.
-  The password goes only to Keychain or Credential Manager themselves, never to another keyring
-  backend such as `keyrings.alt`'s plain-text file. `connect_helper.py --replace` changes a saved
-  password and puts the old one back if the new one does not connect; a non-UTF-8 credentials file
-  is refused as `unreadable_credentials`, and a submit after the page expired gets a 404.
-
-- **`organization.yaml` may carry `written_by` and `rewrite_needs` (#635).** These keys record
-  which agami-core wrote the file and the oldest one allowed to rewrite it. agami-core 0.9.22 and
-  older refuse to load an `organization.yaml` with keys they do not know, so a core that wrote them
-  would break every older one. This release accepts the keys and keeps them on a rewrite, but does
-  not write them yet; a later release will, once no supported core predates this one.
-- **`sm curate` can reject prompt examples in the same ops file as model edits (#608).**
-  `{"op": "reject", "kind": "example", "area": "<area>", "question": "<question>"}` rejects that
-  example as `sm remove-example` does (kept for audit, dropped from the runtime ranker) and is part
-  of the batch: a batch that fails validation or errors undoes the example change too. An unknown
-  area or a question that matches nothing is skipped with a reason; any other op on an example is
-  refused.
 
 - **Reference joins found on a ServiceNow warehouse exported as renamed views (#670).** A build of
   such a warehouse (link columns ending `_sys_id`) found few of its joins: the preset knew only the
@@ -349,18 +293,6 @@ below corresponds to one such version.
   that is installed but raises when imported, on a call with no model, is now reported as "no
   model" rather than "could not be built", because the module is no longer run to find out.
 
-- **Every agami decision is a question card in the chat; no page opens on its own and nothing is
-  pasted back.** agami-connect, agami-model, agami-query, agami-reconcile, agami-save-golden and
-  agami-eval used to open an HTML page and wait for a block the person generated there and pasted
-  into the chat. Each now shows the result as a short table in the chat and asks with Claude's own
-  question cards (AskUserQuestion): picking tables, the connection fields, signing off definitions
-  one by one or all at once, hiding personal-data columns, keeping the seed examples, the answer
-  card after a query, the reconcile intake, mismatches and keep offer, a golden import. The rules
-  are in `shared/question-cards.md`. The pages stay as an optional "Show the full view", served
-  from localhost, and a block pasted from one is still accepted. Where the card tool is missing
-  (`claude -p`), the same question is asked as a numbered list. `tests/test_skills_no_paste_back.py`
-  fails if a skill's default path opens a page or waits for a paste again.
-
 - **"Ask me as you go" reaches the large tables and asks in business words (#672).** It skipped
   every table above the size guard, so the busiest tables got no questions; it stopped at 12; it
   offered readings no one would mean (a "completed" status that says the work failed); and some
@@ -389,13 +321,6 @@ below corresponds to one such version.
   catalog cannot size now gets one `COUNT` that stops at 5,000,001 rows; past that it is treated as
   "at least 5,000,000", and a count that fails or runs out of time is treated as large. The model
   page shows such a view as "≥ 5M", and the schema reply says "at least 5,000,000".
-
-### Removed
-
-- **The old table-pruning page.** It is replaced by the list picker above (#654). `sm discover` writes only the inventory (`--out` is accepted and
-  ignored); tables, a schema's list, a table's columns and columns to leave out are all handled in
-  the chat (`inventory_summary.py --show` and `--check-columns`). `render_prune.py`,
-  `prune-template.html` and `parse_prune_block.py` are gone.
 
 ### Fixed
 
@@ -428,6 +353,135 @@ below corresponds to one such version.
   would be refused and is missing from the list. When the guard refuses discovery's schema or table
   list, discovery now fails with the rule and the workaround (an explicit `schema.table` list)
   instead of reporting an empty catalog.
+
+- **A build in several batches checks only the new joins, and keeps what earlier batches found
+  (#669).** Each `introspect --append` batch re-checked every join in the model, so each batch took
+  longer than the last, and each one replaced the join candidates found before it, so a build could
+  report "0 joins found" while candidates existed. An append now checks only pairs that touch a
+  table it read; a table read again is re-tested; candidates are merged across batches. A table's
+  own key is no longer paired with another table's own key, and a generic id shared by several
+  tables counts as a reference only when it names the table it points at (`customer_id` →
+  `customers`). When the check cap stops the scan, the report and `join_candidates.json` name the
+  tables left unchecked, and the report shows candidates found beside joins written.
+
+- **The build no longer guesses three facts that change answers (#671).** A table that repeats each
+  record several times per key was modelled as one row per record, so every plain count was too
+  high. A table with no grain is now checked once, comparing its rows with its distinct keys (on
+  recent rows or a sample when it is large); a repeat becomes a caveat to count distinct keys, and
+  proposed metrics count distinct records. The fiscal year start is no longer written as January
+  unasked: it is asked on a card, January included, recorded once answered, and kept on a rebuild;
+  `sm set-fiscal-year --month N` sets it. Two amount columns in different units are recorded as each
+  column's unit, never as a per-question ambiguity. `datasource.yaml` gains
+  `fiscal_year_start_confirmed`; an older agami-core refuses a stored model that has it, so take
+  care rolling back past this release.
+
+- **A column named like a refused keyword is no longer refused (#492).** A column called `notify`,
+  `lock`, `set` or `into`, quoted, qualified (`t.notify`) or a plain item in the select list, was
+  refused as a write. It is now read as the column it is. `NOTIFY chan`, `LOCK TABLE`, `SET x` and
+  `SELECT … INTO` stay refused, and `SELECT INTO "from" FROM t`, which creates a table on Postgres
+  and Redshift, is refused too; write `t.into` or quote the name.
+
+- **Small fixes from a large build (#678).** Value labels from the platform's choice list match the
+  values a column holds ignoring case (`EMAIL` and `Email`). `sm describe-file` and `sm curate`
+  report what they applied under the same keys, so a successful write no longer reads as a no-op.
+  On Redshift, a read-only login gets row estimates in the table list, and a table with none says
+  "size unknown". A join from a record to its parent-class record on the same id is labelled
+  one-to-one, not many-to-one. `sm add` test-runs a derived metric's resolved SQL, not its
+  `{placeholder}`. `sm remove-example` resolves an `<area>/<question>` name to that area and reports
+  an example it skips.
+
+## [0.9.23] — 2026-11-17
+
+### Added
+
+- **Microsoft sign-in for personal accounts.** `AGAMI_OIDC_MICROSOFT_TENANT=consumers` lets
+  personal Microsoft accounts sign in, for a server anyone may use. A token is accepted only when
+  its `tid` is Microsoft's personal-accounts tenant, and the address is then treated as proven
+  (`require_email_verified` is true). `common` and `organizations` stay refused, and a tenant id
+  behaves as before. `Provider` gains `pinned`, false only on `consumers`, so a caller can refuse
+  role or group claims from it. The admin Microsoft sign-in needs a pinned tenant.
+
+- **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
+  "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm
+  suggest-units`, `sm set-units`, `sm sensitive` and placeholder findings give each column a
+  `label`, `sm suggest-metrics` gives `flag_rates.labels`, and `sm review-items` gives each item a
+  `plain_name`, so every card uses the same words (question-cards rule 3b). An example's sign-off
+  card shows its SQL in the preview, as a metric's does. The sign-off, examples and summary cards
+  offer **Show the full view**, which had to be typed in "Other" before.
+
+- **Onboarding asks for context on cards.** Right after connecting, three cards: the company
+  (once per deployment, or drafted from the database), what the person can share (definitions or a
+  semantic layer, the questions people ask, report SQL or dashboards), and the database's one line.
+  The questions become examples checked with the rest; the reports go to agami-reconcile after the
+  build.
+
+- **Charts drawn in the chat.** "Show as a chart" on the answer card now draws horizontal bars as
+  text in the chat (`scripts/text_chart.py`), from the same sections file the HTML chart reads, so
+  the bars, the table and the page agree. The HTML report is the full view, served only when asked.
+
+- **Read-only full views.** Every page renderer takes `--read-only`, and the skills pass it: the
+  page's change controls and its copy-and-paste dialog are hidden and a banner says to decide on
+  the cards. The password page lists the host, port, database and user it is for.
+
+- **Cards answer questions.** A question typed in "Other" ("show me the SQL", "why?") is answered
+  and the same card asked again (question-cards rule 5a); a value to type, such as the sign-off
+  email, is asked for in the question rather than offered as an option.
+
+- **`scripts/serve_page.py`: an agami page served from localhost for a short while.** It serves
+  one HTML file and the web assets beside it on `127.0.0.1` at a random port, prints
+  `{"url": "http://localhost:<port>/<name>"}`, and exits when its time is up (`--minutes`, 30 by
+  default). It refuses a request whose Host is not its own address. Every skill's optional full view
+  (the model explorer, the table picker, the reconcile pages, the chart) is now served this way
+  instead of opened as a `file://` page, which the Desktop Code tab's built-in browser shows as a
+  frozen snapshot when the file sits outside the project folder.
+
+- **Database passwords in the OS credential store on macOS and Windows.** A credentials-file
+  profile can hold `password = keyring:agami/<profile>`, which agami resolves from Keychain or
+  Credential Manager when it connects (`sm install` adds the `agami-core[keyring]` extra on those two
+  systems). A new one-time local page, `scripts/connect_helper.py`, takes the password on `127.0.0.1`
+  and stores it there, so it never reaches the chat, a command line or a plain-text file. Its refusals
+  carry a machine-readable `reason`, a missing database driver is reported as `missing_driver` with the
+  package to install, and a run that fails or is stopped removes what it stored. `setup_pgauth.py`
+  never writes such a profile's password to `.pgpass` / `.mysql.cnf`. Plain-text profiles work as before.
+  The password goes only to Keychain or Credential Manager themselves, never to another keyring
+  backend such as `keyrings.alt`'s plain-text file. `connect_helper.py --replace` changes a saved
+  password and puts the old one back if the new one does not connect; a non-UTF-8 credentials file
+  is refused as `unreadable_credentials`, and a submit after the page expired gets a 404.
+
+- **`organization.yaml` may carry `written_by` and `rewrite_needs` (#635).** These keys record
+  which agami-core wrote the file and the oldest one allowed to rewrite it. agami-core 0.9.22 and
+  older refuse to load an `organization.yaml` with keys they do not know, so a core that wrote them
+  would break every older one. This release accepts the keys and keeps them on a rewrite, but does
+  not write them yet; a later release will, once no supported core predates this one.
+- **`sm curate` can reject prompt examples in the same ops file as model edits (#608).**
+  `{"op": "reject", "kind": "example", "area": "<area>", "question": "<question>"}` rejects that
+  example as `sm remove-example` does (kept for audit, dropped from the runtime ranker) and is part
+  of the batch: a batch that fails validation or errors undoes the example change too. An unknown
+  area or a question that matches nothing is skipped with a reason; any other op on an example is
+  refused.
+
+### Changed
+
+- **Every agami decision is a question card in the chat; no page opens on its own and nothing is
+  pasted back.** agami-connect, agami-model, agami-query, agami-reconcile, agami-save-golden and
+  agami-eval used to open an HTML page and wait for a block the person generated there and pasted
+  into the chat. Each now shows the result as a short table in the chat and asks with Claude's own
+  question cards (AskUserQuestion): picking tables, the connection fields, signing off definitions
+  one by one or all at once, hiding personal-data columns, keeping the seed examples, the answer
+  card after a query, the reconcile intake, mismatches and keep offer, a golden import. The rules
+  are in `shared/question-cards.md`. The pages stay as an optional "Show the full view", served
+  from localhost, and a block pasted from one is still accepted. Where the card tool is missing
+  (`claude -p`), the same question is asked as a numbered list. `tests/test_skills_no_paste_back.py`
+  fails if a skill's default path opens a page or waits for a paste again.
+
+### Removed
+
+- **The table-picker page.** `sm discover` writes only the inventory (`--out` is accepted and
+  ignored); tables, a schema's list, a table's columns and columns to leave out are all handled in
+  the chat (`inventory_summary.py --show` and `--check-columns`). `render_prune.py`,
+  `prune-template.html` and `parse_prune_block.py` are gone.
+
+### Fixed
 
 - **Rebuilding a model keeps `datasource.yaml` keys this agami-core does not know (#589).**
   Re-introspection and applying a model spec rewrote `datasource.yaml` from the fields this core
@@ -496,42 +550,6 @@ below corresponds to one such version.
 - **The built wheel ships `credential_store`.** It was missing from `py-modules`, so an installed
   (non-editable) agami-core could not import `execute_sql`. A test now checks every top-level module
   reaches the wheel.
-
-- **A build in several batches checks only the new joins, and keeps what earlier batches found
-  (#669).** Each `introspect --append` batch re-checked every join in the model, so each batch took
-  longer than the last, and each one replaced the join candidates found before it, so a build could
-  report "0 joins found" while candidates existed. An append now checks only pairs that touch a
-  table it read; a table read again is re-tested; candidates are merged across batches. A table's
-  own key is no longer paired with another table's own key, and a generic id shared by several
-  tables counts as a reference only when it names the table it points at (`customer_id` →
-  `customers`). When the check cap stops the scan, the report and `join_candidates.json` name the
-  tables left unchecked, and the report shows candidates found beside joins written.
-
-- **The build no longer guesses three facts that change answers (#671).** A table that repeats each
-  record several times per key was modelled as one row per record, so every plain count was too
-  high. A table with no grain is now checked once, comparing its rows with its distinct keys (on
-  recent rows or a sample when it is large); a repeat becomes a caveat to count distinct keys, and
-  proposed metrics count distinct records. The fiscal year start is no longer written as January
-  unasked: it is asked on a card, January included, recorded once answered, and kept on a rebuild;
-  `sm set-fiscal-year --month N` sets it. Two amount columns in different units are recorded as each
-  column's unit, never as a per-question ambiguity. `datasource.yaml` gains
-  `fiscal_year_start_confirmed`; an older agami-core refuses a stored model that has it, so take
-  care rolling back past this release.
-
-- **A column named like a refused keyword is no longer refused (#492).** A column called `notify`,
-  `lock`, `set` or `into`, quoted, qualified (`t.notify`) or a plain item in the select list, was
-  refused as a write. It is now read as the column it is. `NOTIFY chan`, `LOCK TABLE`, `SET x` and
-  `SELECT … INTO` stay refused, and `SELECT INTO "from" FROM t`, which creates a table on Postgres
-  and Redshift, is refused too; write `t.into` or quote the name.
-
-- **Small fixes from a large build (#678).** Value labels from the platform's choice list match the
-  values a column holds ignoring case (`EMAIL` and `Email`). `sm describe-file` and `sm curate`
-  report what they applied under the same keys, so a successful write no longer reads as a no-op.
-  On Redshift, a read-only login gets row estimates in the table list, and a table with none says
-  "size unknown". A join from a record to its parent-class record on the same id is labelled
-  one-to-one, not many-to-one. `sm add` test-runs a derived metric's resolved SQL, not its
-  `{placeholder}`. `sm remove-example` resolves an `<area>/<question>` name to that area and reports
-  an example it skips.
 
 ## [0.9.22] — 2026-11-05
 
