@@ -58,6 +58,41 @@ def test_choice_field_ops_groups_and_skips_blanks():
     assert all(o["op"] == "edit" and o["field"] == "choice_field" for o in ops)
 
 
+_CONTACT = [
+    {"name": "incident", "element": "contact_type", "value": "email", "label": "Email"},
+    {"name": "incident", "element": "contact_type", "value": "phone", "label": "Phone"},
+    {"name": "incident", "element": "contact_type", "value": "walk-in", "label": "Walk-in"},
+]
+
+
+def _contact_ops(held):
+    ops = M.choice_field_ops(_CONTACT, table_col="name", column_col="element", value_col="value",
+                             label_col="label")
+    return M.key_choices_on_held_values(ops, held or {})
+
+
+def test_choice_labels_key_on_the_values_the_column_holds_ignoring_case():
+    """#678: an export that wrote `EMAIL` (or the label `Email`) where the platform stores `email`
+    got a list keyed `email`, which no row holds. The column's own values now key the labels,
+    matched to a choice's value or label ignoring case; one nothing matches stays unlabelled."""
+    (op,) = _contact_ops({("incident", "contact_type"): ["EMAIL", "Phone", "Self-service"]})
+    assert op["value"] == {"EMAIL": "Email", "Phone": "Phone", "Self-service": ""}
+    # another column's op, and a column with nothing held, pass through untouched
+    other = {"op": "edit", "kind": "table", "name": "incident", "column": "state",
+             "field": "description", "value": "x"}
+    assert M.key_choices_on_held_values([other], {("incident", "state"): ["1"]}) == [other]
+
+
+def test_choice_labels_keep_the_choice_values_when_no_held_value_matches():
+    (op,) = _contact_ops({("incident", "contact_type"): ["x1", "x2"]})
+    assert op["value"] == {"email": "Email", "phone": "Phone", "walk-in": "Walk-in"}
+
+
+def test_choice_labels_without_held_values_are_unchanged():
+    (op,) = _contact_ops(None)
+    assert op["value"] == {"email": "Email", "phone": "Phone", "walk-in": "Walk-in"}
+
+
 def test_choice_field_ops_valid_filter_restricts_to_model_columns():
     ops = M.choice_field_ops(SYS_CHOICE, table_col="name", column_col="element",
                              value_col="value", label_col="label",
@@ -292,6 +327,31 @@ def test_cmd_enrich_metadata_applies_from_canned_db(tmp_path, monkeypatch):
     assert edge.from_subject_area == "itsm" and edge.to_subject_area == "sys"
     assert edge.review_state == "approved" and edge.confidence == "confirmed"
     assert edge.signed_off_role == "system"
+
+
+
+def test_enrich_metadata_keys_labels_on_the_values_the_data_holds(tmp_path, monkeypatch):
+    """#678 end to end: introspection listed the column's data values (`EMAIL`, `PHONE`); the
+    sys_choice labels land on those keys rather than replacing them with the platform's `email`."""
+    _servicenow_model(tmp_path)
+    path = tmp_path / "subject_areas" / "itsm" / "tables" / "incident.yaml"
+    doc = yaml.safe_load(path.read_text())
+    doc["columns"].append({"name": "contact_type", "type": "string",
+                           "choice_field": {"EMAIL": "", "PHONE": ""}})
+    path.write_text(yaml.safe_dump(doc))
+    from semantic_model import introspect as INTRO
+
+    monkeypatch.setattr(INTRO, "make_execute_sql_runner", lambda profile, python=None: (
+        lambda sql: _CONTACT if "sys_choice" in sql.lower() else []))
+    from semantic_model import cli
+
+    ns = cli.build_parser().parse_args(
+        ["enrich-metadata", str(tmp_path), "--profile", "servicenow", "--db-type", "redshift"])
+    assert ns.func(ns) == 0
+    incident = next(t for sa in loader.load_datasource(tmp_path).subject_areas
+                    for t in sa.tables_defined if t.name == "incident")
+    contact = next(c for c in incident.columns if c.name == "contact_type")
+    assert contact.choice_field == {"EMAIL": "Email", "PHONE": "Phone"}
 
 
 def test_enrich_metadata_reports_a_description_whose_provenance_it_replaced(tmp_path, monkeypatch, capsys):

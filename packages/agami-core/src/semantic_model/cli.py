@@ -1819,6 +1819,10 @@ def cmd_enrich_metadata(args) -> int:
                                     "field": "description", "value": d, "source": "metadata"})
                         inherited += 1
 
+    # sys_choice keys a list by the platform's value; the column's own data values key it instead (#678)
+    ops = MS.key_choices_on_held_values(ops, {
+        (t.name.lower(), c.name.lower()): [str(v) for v in c.choice_field]
+        for sa in org.subject_areas for t in sa.tables_defined for c in t.columns if c.choice_field})
     # 1) descriptions + choice_field — one validated curate batch
     cols_applied = 0
     errors: list[str] = []

@@ -146,6 +146,30 @@ def choice_field_ops(
     ]
 
 
+def key_choices_on_held_values(ops: list[dict], held: dict[ColKey, list[str]]) -> list[dict]:
+    """Re-key each `choice_field` op on the values its column already lists (`held`: lower-cased
+    (table, column) -> the values introspection read from the data), matched to a choice's value or
+    its label ignoring case. An export that wrote `EMAIL` or `Email` where the platform stores
+    `email` otherwise got a list keyed `email` that no row holds (#678). A held value nothing matches
+    stays in the list unlabelled, so the list is still every value; a column none of whose values
+    match keeps the choice table's own keys, as before. Every other op passes through untouched."""
+    out = []
+    for op in ops:
+        values = held.get((op["name"].lower(), (op.get("column") or "").lower())) or []
+        if op.get("field") != "choice_field" or not values:
+            out.append(op)
+            continue
+        labels: dict[str, str] = {}
+        for val, lab in op["value"].items():
+            labels.setdefault(str(val).lower(), lab)
+            labels.setdefault(str(lab).lower(), lab)
+        if not any(str(v).lower() in labels for v in values):
+            out.append(op)
+            continue
+        out.append({**op, "value": {str(v): labels.get(str(v).lower(), "") for v in values}})
+    return out
+
+
 def description_ops(
     rows: Iterable[dict], *, table_col: str, column_col: str,
     label_col: Optional[str] = None, comment_col: Optional[str] = None,
