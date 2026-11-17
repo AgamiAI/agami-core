@@ -397,6 +397,8 @@ def test_group_by_items_edges():
 
     assert rt._group_by_items(sel("SELECT a FROM t")) == ()
     assert rt._group_by_items(sel("SELECT a, b, SUM(c) FROM t GROUP BY ROLLUP (a, b)")) is None
+    all_ = rt.sqlglot.parse_one("SELECT a, SUM(c) FROM t GROUP BY ALL", read="duckdb")
+    assert rt._group_by_items(all_) is None
 
 
 def test_distinct_count_of_reads_one_column_only():
