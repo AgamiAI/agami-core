@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.23] — 2026-11-17
+
 ### Security
 
 - **A stricter read-only check.** It now reads quotes, comments and names the same way on every
@@ -281,6 +283,53 @@ below corresponds to one such version.
   area or a question that matches nothing is skipped with a reason; any other op on an example is
   refused.
 
+- **Reference joins found on a ServiceNow warehouse exported as renamed views (#670).** A build of
+  such a warehouse (link columns ending `_sys_id`) found few of its joins: the preset knew only the
+  platform's own table names and keyed a reference field by name alone, so a field two classes point
+  at different tables was dropped. The build now finds the platform's dictionary tables in any
+  schema, renamed or not, maps each modelled view to its platform class, and proposes joins from the
+  dictionary, from parent classes and from a scan of link columns nothing explains. Every one is
+  checked on the data, within a cap. A declared join that checks out is written approved; one the
+  data confirms but the dictionary does not declare is written usable and unreviewed; only a
+  borderline match (70–95%), a column that fits two targets, or two links between the same pair goes
+  to the review list, with its reason. Renamed views also get descriptions and value labels. The
+  dictionary tables are read, never added to the model, and only when the model has the platform's
+  shape (a `sys_id` column) or `--preset` is given.
+
+- **Connect says what to have ready, then asks about the organisation and the source system first
+  (#673).** A before-you-start checklist opens `/agami-connect` and the README. The company and the
+  source system are the first two questions; they steer descriptions and switch on a named
+  product's metadata preset, and are never copied into the model as text. A fiscal year start given
+  up front is held and recorded after the build, so it is not asked again.
+
+- **Personal data the warehouse already protects (#675).** When the warehouse's own row- and
+  column-level security keeps people from personal values, `sm set-personal-data` records that as a
+  local build setting (not part of the deployed model). A build then clears the personal-data flags
+  it found, after every value read has run, keeps flags the model already had, and says so in one
+  line; `sm sensitive` reports the setting and the skills skip the personal-data question. The
+  card's last option now reads "Keep them queryable". Detection improves too: a request, ticket or
+  order number with phone-shaped digits is an identifier, a column that points at a person
+  (`assigned_user`, `opened_by`) is flagged only when its values look like names or login ids, and
+  `last_login` or `is_user` are not people.
+
+- **Review the open questions on a page that saves (#676).** `sm open-questions --all` lists every
+  open item, uncapped, ordered by how much it changes answers, together with the build's own guesses
+  to confirm: a code list it labelled alone, or a column it described alone (never one a person
+  signed). The page shows each question with its evidence and a choice of readings, "Ask each time"
+  or "Don't know"; a code list with the guess filled in; an unclear column with up to five sample
+  values. Saving applies one `sm curate` batch signed by the person who saved, and the file with
+  the sample values is deleted afterwards. Yes/No flags, plain numbers and codes that carry their
+  own label are no longer asked.
+
+- **Build progress you can see (#677).** Every progress line starts with its UTC time. A step that
+  writes nothing for a minute adds "waiting on the database for N min: …", and join checks log
+  "joins checked k/N", so a slow step no longer looks hung. Long builds open a live, read-only
+  progress page on `127.0.0.1` (batch n of N, stages, tables read, elapsed time); `sm introspect
+  --batch n/N` names the batch. Columns, keys and samples are read for up to four tables at once
+  (one at a time for a sign-in that prompts, such as a browser or MFA login) and folded in table
+  order, so the model is the same as a one-at-a-time build. A failing table or Ctrl-C cancels the
+  tables still queued.
+
 ### Changed
 
 - **Connect no longer guesses how long a build takes.** The per-database time table and every
@@ -312,9 +361,38 @@ below corresponds to one such version.
   (`claude -p`), the same question is asked as a numbered list. `tests/test_skills_no_paste_back.py`
   fails if a skill's default path opens a page or waits for a paste again.
 
+- **"Ask me as you go" reaches the large tables and asks in business words (#672).** It skipped
+  every table above the size guard, so the busiest tables got no questions; it stopped at 12; it
+  offered readings no one would mean (a "completed" status that says the work failed); and some
+  questions named a table. A large table is now read on its recent rows (since the first of the
+  month three months back), the largest tables go first, every question is returned in order of
+  how much its readings' answers differ, a failure-like status is offered only as "also include",
+  and questions name rows by what they are. Cards come four at a time, each page with its evidence,
+  and the skill says which tables it did not check and which it read on recent rows. In the
+  `open-questions` output, `more` is gone and `windowed` is new.
+
+- **Connect cards ask business questions only (#674).** A card asks what the data means, in plain
+  words with an example. Safety flags, appending, batches and mapping thresholds are decided
+  conservatively and reported in one line, and a card never names a file or table without saying
+  what it is. Answers that come back the same for a whole column are confirmed in one line before
+  they are signed. The examples card reads "Mark them on a page (Recommended) / Review one by one /
+  Add my own / Keep all", and "Keep all" lists every example not yet seen before signing.
+
+- **Builds send far fewer statements.** A table's per-column reads (value lists, grain and key
+  checks, the placeholder scan) went one statement per column, each a new process and connection,
+  and on a view the view ran again each time. They now go up to 25 columns to a statement, falling
+  back to one column at a time when a combined read fails or times out. Columns of a type a database
+  cannot compare (CLOB, arrays, JSON) are still read alone.
+
+- **A view is sized with one capped count.** A view has no row estimate, so every cost guard read it
+  as small, and grain checks, value reads and overlap probes ran over the biggest views. A table the
+  catalog cannot size now gets one `COUNT` that stops at 5,000,001 rows; past that it is treated as
+  "at least 5,000,000", and a count that fails or runs out of time is treated as large. The model
+  page shows such a view as "≥ 5M", and the schema reply says "at least 5,000,000".
+
 ### Removed
 
-- **The table-picker page.** `sm discover` writes only the inventory (`--out` is accepted and
+- **The old table-pruning page.** It is replaced by the list picker above (#654). `sm discover` writes only the inventory (`--out` is accepted and
   ignored); tables, a schema's list, a table's columns and columns to leave out are all handled in
   the chat (`inventory_summary.py --show` and `--check-columns`). `render_prune.py`,
   `prune-template.html` and `parse_prune_block.py` are gone.
@@ -418,6 +496,42 @@ below corresponds to one such version.
 - **The built wheel ships `credential_store`.** It was missing from `py-modules`, so an installed
   (non-editable) agami-core could not import `execute_sql`. A test now checks every top-level module
   reaches the wheel.
+
+- **A build in several batches checks only the new joins, and keeps what earlier batches found
+  (#669).** Each `introspect --append` batch re-checked every join in the model, so each batch took
+  longer than the last, and each one replaced the join candidates found before it, so a build could
+  report "0 joins found" while candidates existed. An append now checks only pairs that touch a
+  table it read; a table read again is re-tested; candidates are merged across batches. A table's
+  own key is no longer paired with another table's own key, and a generic id shared by several
+  tables counts as a reference only when it names the table it points at (`customer_id` →
+  `customers`). When the check cap stops the scan, the report and `join_candidates.json` name the
+  tables left unchecked, and the report shows candidates found beside joins written.
+
+- **The build no longer guesses three facts that change answers (#671).** A table that repeats each
+  record several times per key was modelled as one row per record, so every plain count was too
+  high. A table with no grain is now checked once, comparing its rows with its distinct keys (on
+  recent rows or a sample when it is large); a repeat becomes a caveat to count distinct keys, and
+  proposed metrics count distinct records. The fiscal year start is no longer written as January
+  unasked: it is asked on a card, January included, recorded once answered, and kept on a rebuild;
+  `sm set-fiscal-year --month N` sets it. Two amount columns in different units are recorded as each
+  column's unit, never as a per-question ambiguity. `datasource.yaml` gains
+  `fiscal_year_start_confirmed`; an older agami-core refuses a stored model that has it, so take
+  care rolling back past this release.
+
+- **A column named like a refused keyword is no longer refused (#492).** A column called `notify`,
+  `lock`, `set` or `into`, quoted, qualified (`t.notify`) or a plain item in the select list, was
+  refused as a write. It is now read as the column it is. `NOTIFY chan`, `LOCK TABLE`, `SET x` and
+  `SELECT … INTO` stay refused, and `SELECT INTO "from" FROM t`, which creates a table on Postgres
+  and Redshift, is refused too; write `t.into` or quote the name.
+
+- **Small fixes from a large build (#678).** Value labels from the platform's choice list match the
+  values a column holds ignoring case (`EMAIL` and `Email`). `sm describe-file` and `sm curate`
+  report what they applied under the same keys, so a successful write no longer reads as a no-op.
+  On Redshift, a read-only login gets row estimates in the table list, and a table with none says
+  "size unknown". A join from a record to its parent-class record on the same id is labelled
+  one-to-one, not many-to-one. `sm add` test-runs a derived metric's resolved SQL, not its
+  `{placeholder}`. `sm remove-example` resolves an `<area>/<question>` name to that area and reports
+  an example it skips.
 
 ## [0.9.22] — 2026-11-05
 
