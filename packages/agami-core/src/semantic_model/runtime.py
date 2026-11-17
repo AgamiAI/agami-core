@@ -4891,7 +4891,8 @@ def assemble_receipt(
             "alias": _echo_name(r.alias) if r.alias else r.alias,
             "qname": (f"{t.schema_name}.{t.name}" if t.schema_name else t.name) if t else None,
             "declared": t is not None,
-            "rows": (ph.estimated_row_count if ph else None),
+            # A size the build could not count is the cap's stand-in for the cost guards, not a count.
+            "rows": (ph.estimated_row_count if ph and ph.estimated_row_count_kind != "unknown" else None),
             "rows_as_of": (ph.estimated_row_count_at if ph else None),
             # Advisory: this table is large and the statement reads it from the outer side of a join
             # (#451). Null otherwise, or when its size is unknown.

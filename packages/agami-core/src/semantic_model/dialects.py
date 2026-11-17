@@ -392,6 +392,15 @@ class Dialect:
         engine has never analysed). Read-only, and bounded like every other introspection read."""
         return f"SELECT COUNT(*) AS estimated_rows FROM {self.qualified(schema, table)}"
 
+    def sql_row_count_capped(self, schema: str, table: str, cap: int) -> Optional[str]:
+        """A count that stops at `cap + 1` rows, for an object the catalog cannot size (a view): an
+        answer over `cap` says only "more than the cap", which is all a size guard asks, and it never
+        reads a 100M-row view to the end. None where the engine gets no count at all (#459)."""
+        if self.sql_row_count(schema, table) is None:
+            return None
+        inner = self.limited(f"SELECT 1 AS one FROM {self.qualified(schema, table)}", cap + 1)
+        return f"SELECT COUNT(*) AS estimated_rows FROM ({inner}) capped"
+
     def sql_row_estimates_bulk(self, schemas: list[str]) -> Optional[str]:
         """Every table's row estimate across `schemas` from the catalog statistics, in ONE query
         (`table_schema, table_name, estimated_rows`), for the table picker (#654). Never a count:

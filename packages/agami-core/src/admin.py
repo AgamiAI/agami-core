@@ -1071,7 +1071,7 @@ def model_area_html(
         f'<span class="nm">{ui.esc(t.name)}</span>'
         f'<span class="d">{ui.esc(t.description or "")}</span>'
         f'<span class="meta">{len(t.columns)} cols · '
-        f"{ui.esc(_human_count(_est_rows_obj(t)))}</span>{_conf_badge(t.confidence)}"
+        f"{ui.esc(_table_size(t))}</span>{_conf_badge(t.confidence)}"
         '<span class="chev">›</span></a>'
         for t in area.tables_defined
     )
@@ -1103,6 +1103,19 @@ def model_area_html(
 def _est_rows_obj(table: Any) -> int | None:
     ph = getattr(table, "performance_hints", None)
     return getattr(ph, "estimated_row_count", None) if ph is not None else None
+
+
+def _table_size(table: Any) -> str:
+    """The table's size for the page: `≈ 6.6k`, `≥ 5M` when the build counted it only up to its cap
+    (a view keeps no estimate), `size unknown` when even that count failed, '' when never sized."""
+    ph = getattr(table, "performance_hints", None)
+    kind = getattr(ph, "estimated_row_count_kind", None) if ph is not None else None
+    n = _est_rows_obj(table)
+    if kind == "unknown":
+        return "size unknown"
+    if kind == "at_least" and n:
+        return "≥ " + _human_count(n - 1).removeprefix("≈ ")   # recorded as the cap + 1
+    return _human_count(n)
 
 
 # --- the table (dataset) page ------------------------------------------------
@@ -1241,7 +1254,7 @@ def model_table_html(
     schema = (
         f'<span class="schema">{ui.esc(table.schema_name)}.</span>' if table.schema_name else ""
     )
-    rows = _human_count(_est_rows_obj(table))
+    rows = _table_size(table)
     grain = ", ".join(table.grain) if table.grain else ""
     aichip = (
         ' <span class="descsrc">AI-described · unvalidated</span>'

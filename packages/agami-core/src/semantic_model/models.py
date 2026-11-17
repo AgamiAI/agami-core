@@ -559,6 +559,11 @@ class PerformanceHints(_Base):
     # time). Lets the trust receipt show "≈N rows (estimated as of <date>)" so a reader knows
     # the count is a point-in-time estimate, not a live COUNT(*).
     estimated_row_count_at: Optional[str] = None
+    # How `estimated_row_count` was read when the catalog had no figure (a view keeps none) and the
+    # count stopped at the size guards' cap: `at_least` means the table holds at least that many rows;
+    # `unknown` means even that count failed, and the figure is the cap's, so every cost guard treats
+    # the table as large rather than scan it. None: a catalog estimate or an exact count.
+    estimated_row_count_kind: Optional[Literal["at_least", "unknown"]] = None
     recommended_filters: list[str] = Field(default_factory=list)
     indexes: list[IndexHint] = Field(default_factory=list)
 
