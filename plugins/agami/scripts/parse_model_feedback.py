@@ -57,6 +57,10 @@ _JSON_KEYS = {"curate-ops", "new-metrics", "key-terminology", "example-edits", "
 _KEYS = _LIST_KEYS | _JSON_KEYS | {"profile", "signed-off-by", "datasource-md"}
 _TABLE_QNAME = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
 _COLUMN_QNAME = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
+# A new definition's sign-off and provenance. The block only proposes: `sm add` stores what it is given,
+# so a field left here would let a page (or a pasted block) store a metric as approved by anyone it
+# names. Approval comes from an `approve` op, signed with --signer, and nothing else.
+_TRUST_FIELDS = ("review_state", "signed_off_by", "signed_off_at", "signed_off_role", "migrated_from")
 
 
 def _key_of(line: str):
@@ -86,6 +90,18 @@ def _sections(text: str) -> dict:
         # lines before the first key (headers) are ignored
     if cur_key:
         out[cur_key] = "\n".join(cur_val).strip()
+    return out
+
+
+def _proposed(item: dict, also: tuple, anomalies: list, kind: str) -> dict:
+    """`item` without any sign-off it claims (and the `also` provenance fields), so a metric lands
+    `proposed` (a `confidence` it sends is kept only when it says that, the default). What was dropped
+    is an anomaly, so a forged claim is visible rather than silently fixed."""
+    dropped = sorted(k for k in (*_TRUST_FIELDS, *also)
+                     if k in item and not (k == "confidence" and item[k] == "proposed"))
+    out = {k: v for k, v in item.items() if k not in dropped}
+    if dropped:
+        anomalies.append({"kind": kind, "detail": f"{item.get('name') or item.get('question')}: {', '.join(dropped)}"})
     return out
 
 
@@ -151,14 +167,16 @@ def parse(text: str) -> tuple[dict, list, dict | None]:
                 if not area:
                     anomalies.append({"kind": "metric_missing_area", "detail": str(m.get("name"))})
                     continue
-                data["new_metrics_by_area"].setdefault(area, []).append(m)
+                data["new_metrics_by_area"].setdefault(area, []).append(
+                    _proposed(m, ("confidence", "source"), anomalies, "metric_trust_fields_dropped"))
         elif jk in ("example-edits", "new-examples"):  # both apply via sm add-example
             for ex in (parsed or []):
                 area = ex.get("area")
                 if not area:
                     anomalies.append({"kind": "example_missing_area", "detail": str(ex.get("question"))})
                     continue
-                data["examples_by_area"].setdefault(area, []).append(ex)
+                data["examples_by_area"].setdefault(area, []).append(
+                    _proposed(ex, (), anomalies, "example_trust_fields_dropped"))
         elif jk == "key-terminology":
             data["key_terminology"] = parsed
         elif jk == "datasource-md":

@@ -16,6 +16,11 @@ below corresponds to one such version.
 
 ### Security
 
+- **A new metric from the model explorer is always a proposal.** A saved page, or a pasted block,
+  could send a new metric already marked approved and signed by anyone it named, and it was stored
+  that way. The parser now drops a new metric's or example's sign-off and provenance fields (and any
+  confidence other than proposed) and lists what it dropped. Approval comes only from an approve,
+  signed as the saved reviewer.
 - **A stricter read-only check.** It now reads quotes, comments and names the same way on every
   database it supports, and refuses the few forms that databases read differently. A `;` is
   allowed only at the end of a statement. Each refusal says how to rewrite the SQL: a `;` inside a

@@ -246,7 +246,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_model_feedback.py --block-file "<a
 It prints `{data, anomalies, needs_judgment}`:
 - `data.profile` — the page's target model. **Use it, overriding the active-profile default** (a page was rendered for THAT model; never apply it to whatever's active).
 - `data.ops` — the merged curate ops array (exclude/include for tables/columns, translated, **plus** the `curate-ops` approve/reject/edit/add/move verbatim, with `move` ops last). Apply in one `sm curate "$ROOT" --ops-file <json>` call (Phase 6).
-- `data.new_metrics_by_area` — `{area: [metric…]}` → one `sm add "$ROOT" --kind metric --area <area> --file <json>` per area.
+- `data.new_metrics_by_area` — `{area: [metric…]}` → one `sm add "$ROOT" --kind metric --area <area> --file <json>` per area. Each lands unreviewed: the parser drops any sign-off a new metric carries (an `anomalies` entry names it), so approving one is a separate `approve` op.
 - `data.examples_by_area` — edited + new NL→SQL examples `{area: [example…]}` → one `sm add-example "$ROOT" --area <area> --file <json>` per area (dedups by question).
 - An example the person wants dropped rather than edited → a `{"op": "reject", "kind": "example", "area": "<area>", "question": "<question>"}` op in the same `sm curate` batch (Phase 6), or `sm remove-example "$ROOT" --question "<area>/<question>"` (repeat `--question`; with no `--area` one call covers every area, and a bare question found in more than one area is refused, not rejected everywhere).
 - `data.key_terminology` — the complete glossary object → `sm set-terminology "$ROOT" --file <json> --replace`.

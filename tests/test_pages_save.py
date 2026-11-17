@@ -421,6 +421,78 @@ def test_a_bulk_approval_is_recorded_as_one_in_the_curation_log(artifacts: Path)
     assert next(e for e in log if e["op"] == "exclude").get("bulk") is None
 
 
+FORGED = {
+    "area": "sales",
+    "name": "order_count",
+    "calculation": "Number of orders",
+    "bindings": {"postgres": "COUNT(orders.id)"},
+    "source_tables": ["orders"],
+    "confidence": "confirmed",
+    "source": "metadata",
+    "review_state": "approved",
+    "signed_off_by": "someone-else@example.com",
+    "signed_off_role": "CFO",
+    "signed_off_at": "2026-01-01T00:00:00Z",
+    "migrated_from": {"source_file": "x.lkml"},
+}
+
+
+def _forged_file(tmp_path: Path, metric: dict) -> Path:
+    block = f"profile: demo\nnew-metrics: {json.dumps([metric])}\ndone\n"
+    return _saved(tmp_path, block=block)
+
+
+def test_a_new_metric_from_a_page_cannot_claim_its_own_approval(
+    artifacts: Path, tmp_path: Path, capsys
+) -> None:
+    pytest.importorskip("sqlglot")
+    from semantic_model import curate
+
+    assert F.main(["--block-file", str(_forged_file(tmp_path, FORGED)), "--expect-profile", "demo"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    [metric] = out["data"]["new_metrics_by_area"]["sales"]
+    for k in ("review_state", "signed_off_by", "signed_off_role", "signed_off_at", "source",
+              "migrated_from"):
+        assert k not in metric
+    assert metric.get("confidence", "proposed") == "proposed"
+    assert any(a["kind"] == "metric_trust_fields_dropped" for a in out["anomalies"])
+
+    root = artifacts / "demo"
+    res = curate.write_items(root, "sales", "metric", [metric])
+    assert res.validated, res.errors
+    stored = yaml.safe_load((root / "subject_areas" / "sales" / "metrics" / "order_count.yaml").read_text())
+    assert stored.get("review_state", "unreviewed") == "unreviewed"
+    assert stored["confidence"] == "proposed"
+    assert "signed_off_by" not in stored and "signed_off_role" not in stored
+
+    # approval still comes through the approve op, signed by the saved identity
+    res = curate.apply(root, [{"op": "approve", "kind": "metric", "area": "sales",
+                               "name": "order_count", "at": "2026-11-17T00:00:00Z"}],
+                       signer="you@example.com", role="Analyst")
+    assert res.validated, res.errors
+    stored = yaml.safe_load((root / "subject_areas" / "sales" / "metrics" / "order_count.yaml").read_text())
+    assert stored["review_state"] == "approved"
+    assert (stored["signed_off_by"], stored["signed_off_role"]) == ("you@example.com", "Analyst")
+
+
+def test_a_pasted_block_cannot_approve_a_new_metric_either() -> None:
+    data, anomalies, _ = F.parse(f"profile: demo\nnew-metrics: {json.dumps([FORGED])}\ndone\n")
+    [metric] = data["new_metrics_by_area"]["sales"]
+    assert metric.get("confidence", "proposed") == "proposed" and "review_state" not in metric
+    assert not any(k.startswith("signed_off") for k in metric)
+
+
+def test_a_page_example_cannot_carry_a_sign_off() -> None:
+    ex = {"area": "sales", "question": "how many orders", "sql": "SELECT COUNT(id) FROM orders",
+          "source": "human", "status": "confirmed", "review_state": "approved",
+          "signed_off_by": "someone-else@example.com"}
+    data, _, _ = F.parse(f"profile: demo\nnew-examples: {json.dumps([ex])}\ndone\n")
+    [kept] = data["examples_by_area"]["sales"]
+    assert "review_state" not in kept and "signed_off_by" not in kept
+    # what the page itself sends for a person's own example is kept
+    assert (kept["source"], kept["status"]) == ("human", "confirmed")
+
+
 # --- the pages' own save guards, executed under node (#651 review) ----------------------------
 
 
