@@ -1009,7 +1009,10 @@ def record_count_name(table: str, key: str) -> str:
 # row count, so the measured-figure check does not read it as one.
 _REPEAT_CAVEAT = ("Rows repeat about {factor} times per {key}: count records with COUNT(DISTINCT {key}), "
                   "never COUNT(*).")
-_REPEAT_RE = re.compile(r"^Rows repeat about (\d+(?:\.\d+)?) times per (\S+?): ")
+# Read back by the caveat's whole fixed wording, the key captured where it stands and matched again
+# inside COUNT(DISTINCT …): a key with spaces, quotes, dots or ": " round-trips exactly (ACE-182).
+_REPEAT_RE = re.compile(r"Rows repeat about (\d+(?:\.\d+)?) times per (.+): count records with "
+                        r"COUNT\(DISTINCT \2\), never COUNT\(\*\)\.", re.DOTALL)
 
 
 def repeat_caveat(key: str, factor: float) -> str:
@@ -1018,13 +1021,13 @@ def repeat_caveat(key: str, factor: float) -> str:
 
 
 def is_repeat_caveat(text: str) -> bool:
-    return bool(_REPEAT_RE.match(text))
+    return bool(_REPEAT_RE.fullmatch(text))
 
 
 def repeated_key(table: Table) -> Optional[tuple[str, float]]:
     """(key, factor) when the table's rows repeat each record, from its repeat caveat; else None."""
     for c in table.caveats:
-        m = _REPEAT_RE.match(c)
+        m = _REPEAT_RE.fullmatch(c)
         if m:
             return m.group(2), float(m.group(1))
     return None

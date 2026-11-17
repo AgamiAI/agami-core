@@ -232,6 +232,38 @@ def test_no_duration_average_is_proposed_on_a_repeating_table():
     ]
 
 
+@pytest.mark.parametrize(
+    "key",
+    ["Work Order_ID", 'o\'brien "id"', "sales.order_id", "a: b", "ticket_id"],
+)
+@pytest.mark.parametrize("factor", [1.5, 4.0])
+def test_the_repeat_caveat_round_trips_any_key(key, factor):
+    # Read back by the caveat's fixed wording, not by whitespace: a key with spaces or punctuation
+    # once came back None, so the distinct count was dropped and a row-weighted average proposed.
+    text = B.repeat_caveat(key, factor)
+    assert B.is_repeat_caveat(text)
+    from semantic_model.models import Table
+
+    assert B.repeated_key(Table(name="t", columns=[], caveats=[text])) == (key, factor)
+
+
+def test_a_repeating_table_whose_key_has_spaces_gets_its_distinct_count():
+    from semantic_model.models import Column, Table
+
+    key = "Work Order_ID"
+    t = Table(
+        name="Work Orders",
+        columns=[
+            Column(name=key, type="integer"),
+            Column(name="started_at", type="timestamp"),
+            Column(name="ended_at", type="timestamp"),
+        ],
+        caveats=[B.repeat_caveat(key, 3.0)],
+    )
+    names = [m["name"] for m in B.suggest_metrics(t, D.get_dialect("sqlite"))]
+    assert names == [B.record_count_name("Work Orders", key)]
+
+
 def test_a_distinct_rate_binding_runs_and_counts_each_record_once(tmp_path, db):
     org, _ = I.introspect(
         "demo", "sqlite", runner=_runner(db), artifacts_dir=tmp_path, dry_run=True

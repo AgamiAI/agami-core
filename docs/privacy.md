@@ -95,8 +95,8 @@ in your browser instead of in the chat. `scripts/connect_helper.py` serves that 
 - **What it calls:** after saving, it runs `SELECT 1` against your own database through `execute_sql`, the
   same local connection every query uses.
 
-`tests/test_privacy_no_network.py` pins this: the helper and the page server below are the only shipped
-scripts that listen, and both bind the loopback address. On Linux, and wherever no credential store is available, the helper refuses
+`tests/test_privacy_no_network.py` pins this: the helper, the page server and the build-progress page
+below are the only shipped scripts that listen, and all three bind the loopback address. On Linux, and wherever no credential store is available, the helper refuses
 and you use the manual credentials file step instead.
 
 ---
@@ -130,8 +130,31 @@ mark decisions on sends them back by itself instead of asking you to copy and pa
 
 Pages that only show something (the full view of a chart, say) are served by the same script
 without `--decisions`: every post to them is refused, and their banner says nothing on them is saved.
-`tests/test_privacy_no_network.py` pins both listeners (this one and the password page) to the
-loopback address, and `tests/test_serve_page.py` tests each refusal.
+`tests/test_privacy_no_network.py` pins this listener, the password page and the build-progress page
+below to the loopback address, and `tests/test_serve_page.py` tests each refusal.
+
+---
+
+## The build-progress page only shows, on this computer only
+
+While a model is being built, agami can show how the build is getting on in a page in your browser.
+`scripts/progress_page.py` serves that page:
+
+- **What it binds:** `127.0.0.1` only, on a random port, behind a random token of 43 characters in the
+  URL. It answers GET and HEAD for exactly two paths, the page and its status summary; any other path,
+  a wrong token, or a request addressed to another host name gets a 404, and every POST, PUT, PATCH or
+  DELETE is refused. An idle request is dropped after 10 seconds. The page loads nothing from anywhere
+  else; its content security policy runs only the page's own script (allowed by its hash) and lets it
+  talk only to the server that served it.
+- **For how long:** 4 hours by default (`--minutes 240`), then it stops listening and exits. It does
+  not stop when the build finishes: the page then says the model is built until the time is up.
+- **What it reads and shows:** the build's own progress log (`<artifacts_dir>/<profile>/.introspect/progress.log`),
+  which holds stage names, table and join counts and timestamps only; the engine writes no value read
+  from your data into it, and the page shows nothing else.
+- **What it writes and calls:** nothing. It takes nothing from the page and makes no connection of its own.
+
+`tests/test_privacy_no_network.py` pins it to the loopback address and checks it takes nothing from
+the page, and `tests/test_introspect_progress.py` tests its refusals.
 
 ---
 

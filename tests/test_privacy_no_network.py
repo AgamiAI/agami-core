@@ -126,6 +126,14 @@ def test_only_the_local_helpers_listen_and_only_on_loopback():
         assert not re.search(r"""["'](?:0\.0\.0\.0|::|localhost)?["']\s*,\s*\d""", text.replace('"127.0.0.1"', "")), name
 
 
+def test_every_listener_is_in_the_privacy_inventory():
+    # docs/privacy.md is where a person learns what listens on their machine; a new listener that
+    # the scan above allows must be described there too, with its address and lifetime.
+    doc = (REPO_ROOT / "docs" / "privacy.md").read_text()
+    missing = [name for name in sorted(LISTENERS) if f"scripts/{name}" not in doc]
+    assert not missing, f"listener(s) missing from docs/privacy.md: {missing}"
+
+
 def test_the_page_server_takes_decisions_only_behind_its_checks():
     text = (SCRIPTS_DIR / "serve_page.py").read_text()
     # one post, size-capped, from the page's own origin, at the token's path, written and nothing more
