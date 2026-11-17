@@ -477,7 +477,7 @@ def test_the_numbered_list_numbers_what_pick_reads(tmp_path, capsys):
     assert got["shown"] == 10 and got["more"] == 0
     assert lines[0] == "sales: 3 tables"
     assert lines[1] == "   1. orders (1 column, about 1,200 rows)"
-    assert lines[3] == "   3. orders_bak (3 columns)  [likely copy of sales.orders]"
+    assert lines[3] == "   3. orders_bak (3 columns, size unknown)  [likely copy of sales.orders]"
     assert lines[4] == "staging: 1 table"
     # the number a line shows is the one pick reads
     n = int(re.search(r"(\d+)\. orders_bak", got["list"]).group(1))
@@ -685,3 +685,18 @@ def test_the_list_numbers_schemas_together_even_when_the_inventory_interleaves_t
     assert IS.pick(inv, "2", shown=got["shown"])[0] == ["a.z"]
     # the kept file stays in inventory order, whatever the numbering
     assert IS.pick(inv, "1-3", shown=3)[0] == ["a.x", "b.y", "a.z"]
+
+
+def test_the_numbered_list_says_size_unknown_when_other_tables_have_one():
+    """#678: once any table carries an estimate, one without (a view, say) says so rather than
+    showing nothing, which read as if sizes had not been asked for."""
+    inv = {"tables": [{"schema": "s", "table": "orders", "columns": [{"name": "id"}], "rows": 10},
+                      {"schema": "s", "table": "orders_v", "columns": [{"name": "id"}]}]}
+    lines = IS.numbered(inv)["list"].splitlines()
+    assert lines[1] == "  1. orders (1 column, about 10 rows)"
+    assert lines[2] == "  2. orders_v (1 column, size unknown)"
+
+
+def test_the_numbered_list_says_nothing_about_size_when_no_estimates_were_read():
+    inv = {"tables": [{"schema": "s", "table": "orders", "columns": [{"name": "id"}]}]}
+    assert IS.numbered(inv)["list"].splitlines()[1] == "  1. orders (1 column)"

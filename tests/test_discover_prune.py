@@ -217,3 +217,56 @@ def test_discover_passes_row_estimates_on(tmp_path, monkeypatch, capsys):
             "--row-estimates"]
     args = cli.build_parser().parse_args(argv)
     assert args.func(args) == 0 and seen["row_estimates"] is True
+
+
+
+def _routing_runner(calls, by_source):
+    """Answers an estimate read from whichever catalog it names (`svv_table_info` or `pg_class`)."""
+    def run(sql):
+        calls.append(" ".join(sql.split()))
+        for source, rows in by_source.items():
+            if source in sql:
+                if isinstance(rows, Exception):
+                    raise rows
+                return rows
+        return []
+    return run
+
+
+def _redshift_sizes(runner):
+    tables = [{"schema": "public", "table": "orders"}, {"schema": "public", "table": "customers"}]
+    I._add_row_estimates(D.get_dialect("redshift"), runner, ["public"], tables)
+    return {t["table"]: t.get("rows") for t in tables}
+
+
+def test_redshift_falls_back_to_pg_class_for_what_svv_table_info_hides():
+    """#678: `svv_table_info` shows a non-superuser only the tables it owns, so a read-only role got
+    no rows and the picker showed no sizes. `pg_class.reltuples` is readable by any role."""
+    calls = []
+    runner = _routing_runner(calls, {
+        "svv_table_info": [],
+        "pg_class": [{"table_schema": "public", "table_name": "orders", "estimated_rows": 1200.0}],
+    })
+    assert _redshift_sizes(runner) == {"orders": 1200, "customers": None}
+    assert len(calls) == 2 and "svv_table_info" in calls[0] and "reltuples" in calls[1]
+    assert "COUNT(" not in calls[1].upper()
+
+
+def test_redshift_keeps_svv_table_info_figures_and_skips_the_fallback_when_all_are_sized():
+    calls = []
+    runner = _routing_runner(calls, {
+        "svv_table_info": [{"table_schema": "public", "table_name": "orders", "estimated_rows": 5},
+                           {"table_schema": "public", "table_name": "customers", "estimated_rows": 7}],
+        "pg_class": RuntimeError("must not be read"),
+    })
+    assert _redshift_sizes(runner) == {"orders": 5, "customers": 7} and len(calls) == 1
+
+
+def test_redshift_fallback_refused_leaves_sizes_unknown():
+    runner = _routing_runner([], {"svv_table_info": RuntimeError("denied"),
+                                  "pg_class": RuntimeError("denied")})
+    assert _redshift_sizes(runner) == {"orders": None, "customers": None}
+
+
+def test_postgres_offers_no_second_estimate_read():
+    assert D.get_dialect("postgres").sql_row_estimates_bulk_fallback(["public"]) is None
