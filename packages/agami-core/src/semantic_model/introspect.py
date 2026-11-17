@@ -955,7 +955,7 @@ def _introspect(
         _backup_legacy_model(out)
     if prev is not None and prev_for_areas is None and not dry_run:
         _remove_moved_table_files(org, out)
-    wr = build.write_tree(org, out, dry_run=dry_run)
+    wr = build.write_tree(_without_unknown_sizes(org, report), out, dry_run=dry_run)
     report.files_written = wr.files_written
     report.files_unchanged = len(wr.files_unchanged)
     if not dry_run:
@@ -2062,6 +2062,25 @@ def _estimate_rows(
     if rows is None:
         return _Counted(_SIZE_COUNT_CAP + 1, "unknown")
     return _Counted(_SIZE_COUNT_CAP + 1, "at_least") if rows > _SIZE_COUNT_CAP else _Counted(rows)
+
+
+def _without_unknown_sizes(org: Datasource, report: IntrospectReport) -> Datasource:
+    """The model as written: a table whose capped count failed keeps no size. The build read it as
+    large (`ROW_COUNT_CAP + 1`) so every guard stayed conservative, but a failed count says nothing
+    about the size, and written it would show a small view as "at least 5,000,000 rows". A count past
+    the cap is a real lower bound and is kept. No new key: the kind stays in this run's report."""
+    unknown = {q.lower() for q, (_, kind) in report.counted_sizes.items() if kind == "unknown"}
+    if not unknown:
+        return org
+    out = org.model_copy(deep=True)
+    for sa in out.subject_areas:
+        for t in sa.tables_defined:
+            ph = t.performance_hints
+            if (ph is not None and ph.estimated_row_count == _SIZE_COUNT_CAP + 1
+                    and _qualified_name(t.schema_name, t.name).lower() in unknown):
+                t.performance_hints = ph.model_copy(
+                    update={"estimated_row_count": None, "estimated_row_count_at": None})
+    return out
 
 
 def _qualified_name(schema: Optional[str], table: str) -> str:

@@ -554,9 +554,10 @@ class IndexHint(_Base):
 
 
 # A table the catalog cannot size (a view keeps no statistics) is counted by the build only up to this
-# many rows, the largest line any size guard draws. Past it, or when that count fails, the model records
-# ROW_COUNT_CAP + 1: a lower bound, never a measured size, so every guard reads the table as large and
-# nothing says it holds exactly that many rows. No key of its own, so an older reader takes the model.
+# many rows, the largest line any size guard draws. Past it, the model records ROW_COUNT_CAP + 1: a lower
+# bound, never a measured size, so every guard reads the table as large and nothing says it holds exactly
+# that many rows. When the count fails, the build treats the table as large but writes no size, so it
+# reads as "size unknown" rather than "at least". No key of its own, so an older reader takes the model.
 ROW_COUNT_CAP = 5_000_000
 
 

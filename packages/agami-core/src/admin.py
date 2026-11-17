@@ -1112,11 +1112,14 @@ def _est_rows_obj(table: Any) -> int | None:
 
 
 def _table_size(table: Any) -> str:
-    """The table's size for the page: `≈ 6.6k`, or `≥ 5M` when the build counted it only up to its
-    cap (a view keeps no estimate, `ROW_COUNT_CAP`), '' when never sized."""
+    """The table's size for the page: `≈ 6.6k`, `≥ 5M` when the build counted it only up to its cap (a
+    view keeps no estimate, `ROW_COUNT_CAP`), or `size unknown` when it has no size (never sized, or
+    its count failed)."""
     from semantic_model.models import ROW_COUNT_CAP
 
     n = _est_rows_obj(table)
+    if n is None:
+        return "size unknown"
     if n == ROW_COUNT_CAP + 1:
         return "≥ " + _human_count(ROW_COUNT_CAP).removeprefix("≈ ")
     return _human_count(n)
@@ -1276,7 +1279,7 @@ def model_table_html(
         f"<span>{s}</span>"
         for s in (
             f"<b>{len(table.columns)}</b> columns",
-            f"<b>{ui.esc(rows)}</b> rows" if rows else "",
+            f"<b>{ui.esc(rows)}</b> rows" if _est_rows_obj(table) is not None else ui.esc(rows),
             f'grain · <b class="mono">{ui.esc(grain)}</b>' if grain else "",
             ui.esc(table.storage_connection or ""),
         )

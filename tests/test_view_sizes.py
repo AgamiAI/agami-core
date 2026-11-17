@@ -160,6 +160,28 @@ def test_the_written_model_carries_no_new_key(built, tmp_path):
     assert not any("kind" in t or "lower_bound" in t for t in texts)
 
 
+def test_a_failed_count_writes_no_size_and_reads_as_size_unknown(built, tmp_path):
+    """A count that failed says nothing about the size, so the model records none: a small view whose
+    count timed out must not be shown as "at least 5,000,000 rows". The build itself still treated it
+    as large (the test above); only what is written, and so displayed, changes."""
+    import admin
+    import tools
+    from semantic_model import loader
+
+    tables, _, _, _ = built
+    assert tables["lost_orders_v"].performance_hints.estimated_row_count == CAP + 1  # in memory
+    written = {f.stem: f.read_text() for f in (tmp_path / "demo").rglob("*.yaml")}
+    assert "estimated_row_count" not in written["lost_orders_v"]
+    assert f"estimated_row_count: {CAP + 1}" in written["big_orders_v"]
+    org = loader.load_datasource(tmp_path / "demo")
+    stored = {t.name: t for sa in org.subject_areas for t in sa.tables_defined}
+    assert admin._table_size(stored["lost_orders_v"]) == "size unknown"
+    assert admin._table_size(stored["big_orders_v"]) == "≥ 5M"
+    assert admin._table_size(stored["small_orders_v"]) == "≈ 600"
+    large = tools._large_tables(org)
+    assert "lost_orders_v" not in large and large["big_orders_v"] == f"at least {CAP:,}"
+
+
 def test_each_unknown_table_costs_exactly_one_capped_count(built):
     _, _, _, seen = built
     capped = [s for s in seen if CAPPED in s]

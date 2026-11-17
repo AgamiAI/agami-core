@@ -320,7 +320,9 @@ below corresponds to one such version.
   as small, and grain checks, value reads and overlap probes ran over the biggest views. A table the
   catalog cannot size now gets one `COUNT` that stops at 5,000,001 rows; past that it is treated as
   "at least 5,000,000", and a count that fails or runs out of time is treated as large. The model
-  page shows such a view as "≥ 5M", and the schema reply says "at least 5,000,000".
+  page shows such a view as "≥ 5M", and the schema reply says "at least 5,000,000". A view whose
+  count failed is treated as large during the build but gets no size in the model, so the model page
+  says "size unknown" rather than claiming 5,000,000 rows.
 
 ### Fixed
 
