@@ -1940,6 +1940,13 @@ def cmd_enrich_metadata(args) -> int:
             parents = MS.class_parents(rows, table_col=cfg["table_col"], id_col=cfg["id_col"],
                                        parent_col=cfg["parent_col"])
 
+    # No class table: the preset's standard hierarchy stands in, so a child class still inherits
+    # the references its parent declares (an incident is a task).
+    hierarchy = "class table" if "hierarchy" in sources else "none"
+    if "hierarchy" not in sources and dict_rows and "table_col" in dict_cfg:
+        parents = MS.preset_class_parents(preset, {str(r.get(dict_cfg["table_col"]) or "") for r in dict_rows})
+        hierarchy = "preset (no class table found)" if parents else "none"
+
     # A renamed export: its tables carry the platform's classes under other names, and its link
     # columns the fields under `<field>_sys_id` (ACE-181). Value labels follow the mapping.
     spec = MS.PRESETS.get(preset, {})
@@ -2019,6 +2026,7 @@ def cmd_enrich_metadata(args) -> int:
              "relationships_approved": len([s for s in found.written if s["review_state"] == "approved"]),
              "relationships_for_review": len(found.review),
              "tables_mapped_to_platform": {t: m["class"] for t, m in found.mapping.items()},
+             "class_hierarchy": hierarchy,
              "reference_checks": found.probes,
              "relationships_skipped_target_not_modelled": found.skipped_target,
              "reference_notes": found.notes} if found is not None else {})
