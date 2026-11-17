@@ -233,3 +233,14 @@ def test_a_spent_budget_treats_the_table_as_large_without_counting():
         D.get_dialect("redshift"), lambda sql: seen.append(sql) or [], "s", "v", budget
     ) == (CAP + 1, "unknown")
     assert not any("LIMIT" in s for s in seen) and budget.skipped == 1
+
+
+@pytest.mark.parametrize("engine", ["trino", "mysql"])
+def test_an_engine_that_offers_no_estimate_or_no_count_leaves_the_size_unknown(engine):
+    """Trino offers no estimate query at all; MySQL's view has none and MySQL gets no count (#459).
+    Neither is counted, and neither is guessed large: the size stays unsized, as before."""
+    seen: list[str] = []
+    assert I._estimate_rows(
+        D.get_dialect(engine), lambda sql: seen.append(sql) or [], "s", "v"
+    ) == (None, None)
+    assert not any("capped" in s for s in seen)
