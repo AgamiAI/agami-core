@@ -207,3 +207,29 @@ text and accept a number or words. The options and their order stay the same.
 
 Sentence case, no exclamation marks. Say "database" rather than "profile". Name things by what they
 do. No hype.
+
+## 9. A card asks what the data means to the business, never plumbing
+
+A card asks only what the data means to the business, in plain words with an example: *"Does a
+ticket count as resolved when it is closed, or when it is marked resolved? (closed, say, comes a
+week later on most tickets)"*. How agami reads the database is not a question for the person:
+whether to run a read with `--no-safety`, whether to append to the model or rebuild it, how many
+tables go in a batch, what share of field matches makes a mapping clear-cut, any threshold. The
+skill or the engine decides those, conservatively (when unsure, leave the thing out and say so),
+and reports the decision in one line: *"Built in 4 batches of 12 tables; 3 mappings were unclear
+and left out."* A live build asked all four of those on cards, and the person lost track of what
+they were deciding; each had a safe default.
+
+A card never names a file or table without saying what it is in words the person knows: *"the
+data dictionary you attached (column meanings)"*, not *"`fields.csv`"*; *"the Incidents table"*
+with the identifier in a preview when it is needed (rule 3b).
+
+## 10. Answers filled down are confirmed before they are signed
+
+When a page or a sheet comes back with the same answer down a whole column (every example kept,
+every column described the same way, every option the first one), it may have been filled down
+rather than decided. Say so in one line before signing it, and confirm with one question:
+*"All 38 examples came back as Keep. Sign them all off as you?"* with **Sign them off** /
+**Back to the page**. A live run signed answers like these without a check. Mixed answers need
+no check.
+

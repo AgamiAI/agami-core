@@ -398,13 +398,13 @@ def test_6_shows_a_table_of_seeds_then_the_four_option_card():
     s = _phase_6()
     assert 'sm" seed-validate' in s
     assert "15 rows" in s
-    for label in (
-        "Keep all that ran (Recommended)",
-        "Review one by one",
-        "Drop the failing ones",
-        "Mark them on a page",
-    ):
-        assert f"- **{label}**" in s, label
+    # #674: "ran" proves the SQL executes, not that it is right, so the page is recommended and
+    # keeping them all comes last, in this order.
+    card = s[s.index("(header `Examples`)"):]
+    card = card[: card.index("\n\n**Add my own**")]
+    labels = re.findall(r"^- \*\*([^*]+)\*\*", card, re.M)
+    assert labels == ["Mark them on a page (Recommended)", "Review one by one", "Add my own", "Keep all"]
+    assert "Keep all that ran" not in s
     assert "Review the failing ones" not in s and "Review all one by one" not in s
 
 
@@ -716,7 +716,7 @@ def test_review_cards_offer_the_full_view_as_an_option():
     # saves its own decisions, so the option says what it does, on every question of a card.
     four, six = _phase_4(), _phase_6()
     assert four.count("- **Review on a page**") == 2      # the Sign-off card and the item cards
-    assert six.count("- **Mark them on a page**") == 1     # the Examples card
+    assert six.count("- **Mark them on a page (Recommended)**") == 1     # the Examples card
     assert "and **Mark them on a page** (the page below, on every question of the card" in six  # item cards
     assert "| Review on a page |" in four and "| Mark them on a page |" in six
     assert "first question only" not in four + six
@@ -848,13 +848,11 @@ def test_6_saved_examples_are_checked_by_the_parser_and_a_keep_needs_an_identity
     assert "**A keep is a sign-off**" in full and "is not applied; say so" in full
 
 
-def test_6_with_add_my_own_drop_the_failing_ones_gives_way():
-    """With #649's Add my own on the card and some failures, five options would not fit."""
+def test_6_dropping_the_failing_ones_is_typed_in_other():
+    """#649's Add my own and #674's order fill the card; dropping the failures is still one phrase away."""
     s = _phase_6()
-    rule = s[s.index("**When the card also offers Add my own**"):]
-    rule = rule[: rule.index("\n\n")]
-    assert "**Drop the failing ones** gives way" in rule
-    assert "**Keep all that ran** / **Review one by one** / **Add my own** / **Mark them on a page**" in rule
+    assert '"drop the failing ones" typed in Other' in s
+    assert "| Drop the failing ones |" in s
 
 
 def test_approve_all_remaining_marks_its_ops_bulk_in_connect():
@@ -987,3 +985,48 @@ def test_readme_says_what_to_have_ready():
     for item in ("organisation does", "system the data comes from", "fiscal year", "currency",
                  "tables and columns", "metrics and business terms", "questions people ask"):
         assert item in s, item
+
+
+# --- #674: cards ask what the data means to the business; plumbing is decided and reported ------
+
+CARDS = SKILL.parents[2] / "shared" / "question-cards.md"
+HELPER_PAGE = SKILL.parents[2] / "shared" / "connect-helper-page.html"
+
+
+def _cards_rule(start: str) -> str:
+    text = CARDS.read_text(encoding="utf-8")
+    i = text.index(start)
+    j = text.find("\n## ", i + len(start))
+    return text[i: j if j != -1 else len(text)]
+
+
+def test_question_cards_rule_business_questions_only():
+    r = _cards_rule("## 9. ")
+    assert "what the data means to the business" in r
+    for plumbing in ("--no-safety", "append", "batch", "threshold"):
+        assert plumbing in r, plumbing
+    assert "conservatively" in r and "one line" in r
+    assert "never names a file or table without saying what it is" in r
+
+
+def test_question_cards_rule_filled_down_answers_are_confirmed():
+    r = _cards_rule("## 10. ")
+    assert "the same answer down a whole column" in r
+    assert "one line" in r and "before signing" in r
+
+
+def test_connect_points_at_the_business_questions_rule():
+    style = _between("## Conversation style", "## Progress tracking")
+    assert "question-cards.md#9-" in style and "question-cards.md#10-" in style
+
+
+def test_6_keep_all_shows_every_example_before_it_signs():
+    s = _phase_6()
+    row = next(ln for ln in s.splitlines() if ln.startswith("| Keep all |"))
+    assert "rule 4" in row
+
+
+def test_password_page_sends_the_person_back_to_the_card():
+    page = HELPER_PAGE.read_text(encoding="utf-8")
+    assert "Go back to Claude and pick <b>I've saved it</b>." in page
+    assert "The result shows in Claude" not in page
