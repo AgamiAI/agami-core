@@ -212,12 +212,3 @@ def test_rewrite_stamps_survive_the_store_round_trip():
     assert MS.load_organization_record(s, "org1") == rec
     s.close()
 
-
-def test_personal_data_setting_survives_the_store_round_trip_and_is_left_out_when_unset():
-    s = _store()
-    rec = OrgRecord.model_validate({**_full_record().model_dump(), "personal_data": "enforced_by_warehouse"})
-    MS.write_organization_record(s, rec, org_id="org1")
-    assert MS.load_organization_record(s, "org1") == rec
-    MS.write_organization_record(s, _full_record(), org_id="org2")
-    assert "personal_data" not in _stored_doc(s, "org2")
-    s.close()

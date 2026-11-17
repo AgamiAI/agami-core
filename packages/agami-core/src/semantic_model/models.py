@@ -1407,11 +1407,6 @@ class OrgRecord(_Base):
     # Accepted ahead of being written, so a later core can stamp them without breaking this one (#635).
     written_by: Optional[str] = None
     rewrite_needs: Optional[str] = None
-    # Who keeps people from seeing personal data (#675). Unset (the default, and never written): agami
-    # flags personal columns and asks which to hide. `enforced_by_warehouse`: the warehouse's own column-
-    # or row-level security does it, so a build flags nothing. Left out of the file when unset, so a
-    # record without it still loads on a core that predates the key.
-    personal_data: Optional[Literal["enforced_by_warehouse"]] = None
 
     @field_validator("fiscal_year_start_month")
     @classmethod

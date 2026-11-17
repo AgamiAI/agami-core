@@ -967,7 +967,14 @@ def test_0a_0_asks_the_organisation_and_the_source_system_as_their_own_first_que
     # hints, never copied verbatim, that switch on product-specific help
     assert "never copied verbatim" in s
     assert "enrich-metadata" in s and "--preset servicenow" in s
-    assert 'sm" set-org "<artifacts_dir>" --fiscal-year-start-month' in s and "--currency" in s
+    # nothing is written before the folder and the interpreter exist; the fiscal year goes through
+    # ACE-182's set-fiscal-year after 1.7 and the currency stays a hint for the units step
+    assert "**Hold the answers; write nothing yet.**" in s and "right after 0a.8" in s
+    assert 'sm" set-fiscal-year "$ROOT" --month <n>' in s and "skip 1.4 D's card" in s
+    assert "set-org" not in s.split("**Hold the answers")[1].split("Items 3 to 5")[0].replace("1.4 A", "")
+    assert "`$CURRENCY_HINT`, a hint only" in s
+    held = _between("### 0a.8 ", "### 0a.9 ")
+    assert "**Then write what 0a.0 held**" in held
     # the questions people ask become checked examples, as they do today
     assert "agami-asked-questions.txt" in s or "the `Questions people ask` option of 1.5" in s
 
@@ -1049,5 +1056,20 @@ def test_4a_skips_the_personal_data_question_when_the_warehouse_enforces_it():
 
 def test_0a_0_sets_the_personal_data_setting_from_the_source_answer():
     s = _between("### 0a.0 ", "### 0a.1 ")
-    assert 'set-org "<artifacts_dir>" --personal-data enforced_by_warehouse' in s
+    assert 'sm" set-personal-data "<artifacts_dir>" enforced_by_warehouse' in s
+    assert "never deployed" in s
     assert "whether the warehouse already controls who sees personal data" in s
+
+
+
+def test_1_4_d_is_skipped_when_0a_0_gave_the_fiscal_month():
+    d = _between("**D. Fiscal-year card", "`chmod 644`")
+    assert "`$FISCAL_START_MONTH`" in d
+
+
+def test_4a_skip_line_gives_the_kept_count_on_a_reload():
+    s = _phase_4()
+    skip = s[s.index("**When `sm sensitive` prints `personal_data: enforced_by_warehouse`"):]
+    skip = skip[: skip.index("\n\n")]
+    assert "nothing was flagged or hidden" not in skip
+    assert "`count` is above 0" in skip

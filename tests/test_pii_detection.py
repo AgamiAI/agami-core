@@ -666,8 +666,8 @@ def test_introspect_flags_names_and_logins_and_not_a_request_number(tmp_path):
 
 
 def _enforced(tmp_path):
-    from semantic_model import org_record as OR
-    OR.write_org_record(tmp_path, m.OrgRecord(org_id="abc123", personal_data="enforced_by_warehouse"))
+    from semantic_model import build_settings as BS
+    BS.set_personal_data(tmp_path, "enforced_by_warehouse")
 
 
 def test_with_the_warehouse_enforcing_it_the_build_flags_nothing_and_says_so(tmp_path):
@@ -710,3 +710,42 @@ def test_sm_sensitive_reports_the_setting_and_lists_no_suspects(tmp_path, capsys
     out = json.loads(capsys.readouterr().out)
     assert out["personal_data"] == "enforced_by_warehouse"
     assert out["suspected"] == [] and out["suspected_count"] == 0
+
+
+# --- review of #675: coded columns with person-like names are not people ------------------------
+
+
+@pytest.mark.parametrize("name,values", [
+    ("end_user", ["Yes", "No", "Yes", "Yes", "No", "No"]),
+    ("is_user", ["true", "false", "true", "false"]),
+    ("power_user", ["Active", "Inactive", "Active", "Active"]),
+    ("sort_by", ["Created Date", "Created Date", "Updated Date", "Created Date"]),
+    ("order_by", ["Due Date", "Priority", "Due Date", "Priority", "Due Date"]),
+    ("assigned_user", ["admin", "admin", "admin", "system", "admin", "admin"]),
+])
+def test_a_coded_column_with_a_person_like_name_is_not_people(name, values):
+    assert not pii.looks_like_people(values)
+
+
+@pytest.mark.parametrize("name", ["last_login", "first_login", "lastLogin", "is_user", "has_user"])
+def test_login_times_and_yes_no_flags_are_not_person_references(name):
+    assert not pii.person_ref_name(name)
+
+
+@pytest.mark.parametrize("name", ["last_login", "end_user", "power_user", "super_user", "is_user"])
+def test_these_names_alone_are_not_suspected(name):
+    assert not pii.suspected_pii(name)
+
+
+def test_introspect_leaves_coded_person_like_columns_alone(tmp_path):
+    rows = [{"id": str(i), "end_user": "Yes" if i % 2 else "No", "sort_by": "Created Date",
+             "last_login": f"2024-01-0{i % 9 + 1} 10:00:00"} for i in range(8)]
+    runner = make_catalog_runner(
+        tables=["accounts"],
+        columns={"accounts": [col("id", "integer", nullable=False), col("end_user", "text"),
+                              col("sort_by", "text"), col("last_login", "text")]},
+        sample=lambda sql: [dict(r) for r in rows])
+    org, rep = I.introspect("desk", "postgres", runner=runner, artifacts_dir=tmp_path)
+    cols = org.subject_areas[0].defined_table("accounts").columns
+    assert not any(c.sensitive for c in cols)
+    assert not rep.suspected_columns

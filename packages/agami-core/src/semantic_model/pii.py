@@ -225,13 +225,23 @@ def _thing_table(table_name: str) -> bool:
 _PERSON_REF_WORDS = frozenset({"user", "login", "logon", "username", "userid", "loginid", "by"})
 
 
+# `last_login` is when, not who; `is_user` is a yes/no.
+_LOGIN_TIME_WORDS = frozenset({"last", "first", "latest", "recent"})
+# `end_user`, `power_user`: a kind of user, often a coded column, so only its values can make it personal.
+_USER_KIND_WORDS = frozenset({"end", "power", "super", "guest", "new", "active"})
+
+
 def person_ref_name(name: str) -> bool:
     """A column that names a person by reference: `assigned_user`, `caller_login`, `login_id`,
     `opened_by`. Its values decide (`looks_like_people`); a `user_id` key or `user_count` is not one."""
     words = tokens(name)
+    if not words or words[0] in ("is", "has", "by"):
+        return False
     if len(words) > 1 and words[-1] in ("id", "name") and words[-2] in ("login", "logon"):
         return True
-    return bool(words) and words[-1] in _PERSON_REF_WORDS and words != ["by"] and words[0] != "by"
+    if words[-1] in ("login", "logon") and len(words) > 1 and words[-2] in _LOGIN_TIME_WORDS:
+        return False
+    return words[-1] in _PERSON_REF_WORDS
 
 
 def suspected_pii(column_name: str, table_name: str | None = None) -> bool:
@@ -245,7 +255,9 @@ def suspected_pii(column_name: str, table_name: str | None = None) -> bool:
         return True
     # `assigned_user`, `caller_login`; an audit `created_by` is often a reference id, so it waits for
     # its values (`looks_like_people`) rather than listing every table's audit columns.
-    if person_ref_name(column_name) and tokens(column_name)[-1] != "by":
+    words = tokens(column_name)
+    if (person_ref_name(column_name) and words[-1] != "by"
+            and not (len(words) > 1 and words[-2] in _USER_KIND_WORDS)):
         return True
     if not WEAK_PII_RE.search(column_name):
         return False
@@ -311,10 +323,20 @@ def _person_value(v: str) -> bool:
     return len(v) <= 64 and bool(_LOGIN_VALUE_RE.match(v)) and not _HEX_ID_RE.match(v)
 
 
+# People vary: a column of names or logins has many different values that rarely repeat, where a
+# coded one (Yes/No, Active/Inactive, a sort key) repeats a few. Both bounds must hold.
+PEOPLE_MIN_DISTINCT = 4
+PEOPLE_MIN_DISTINCT_SHARE = 0.5
+
+
 def looks_like_people(values: Iterable[Any]) -> bool:
     """People's names or login ids. Only asked of a column `person_ref_name` picked: by itself, a
-    one-word login looks like any short code."""
-    return _share(_present(values), _person_value)
+    one-word login looks like any short code, and two capitalised words like any label."""
+    vals = _present(values)
+    distinct = len(set(vals))
+    if distinct < PEOPLE_MIN_DISTINCT or distinct < PEOPLE_MIN_DISTINCT_SHARE * len(vals):
+        return False
+    return _share(vals, _person_value)
 
 
 def _phone_like(v: str, digits_only_ok: bool) -> bool:

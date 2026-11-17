@@ -210,56 +210,48 @@ def test_record_without_the_rewrite_stamps_writes_as_before(tmp_path):
     )
 
 
-def test_set_org_cli_writes_fiscal_year_and_currency(tmp_path):
-    # #673: the source-system card's plain facts about the database land on the company record.
+
+# --- #675: personal data enforced by the warehouse is a build-only setting ------------------------
+
+
+def test_personal_data_setting_lives_in_the_local_config_and_never_in_organization_yaml(tmp_path):
+    import json
+    import stat
+
+    from semantic_model import build_settings as BS
     from semantic_model import cli
 
-    assert cli.main(["set-org", str(tmp_path), "--name", "Acme"]) == 0
-    assert cli.main(["set-org", str(tmp_path), "--fiscal-year-start-month", "7", "--currency", "USD"]) == 0
-    rec = OR.load_org_record(tmp_path)
-    assert rec.name == "Acme"  # untouched by the second call
-    assert rec.fiscal_year_start_month == 7 and rec.display_conventions.currency == "USD"
+    OR.set_org_fields(tmp_path, name="Acme")
+    before = OR.record_path(tmp_path).read_text(encoding="utf-8")
+    cfg = tmp_path / "local" / ".config"
+    cfg.parent.mkdir()
+    cfg.write_text(json.dumps({"active_profile": "demo", "reviewer_email": "you@example.com"}))
+
+    assert cli.main(["set-personal-data", str(tmp_path), "enforced_by_warehouse"]) == 0
+    assert BS.warehouse_enforces_personal_data(tmp_path)
+    doc = json.loads(cfg.read_text())
+    assert doc == {"active_profile": "demo", "reviewer_email": "you@example.com",
+                   "personal_data": "enforced_by_warehouse"}   # every other key kept
+    assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
+    assert OR.record_path(tmp_path).read_text(encoding="utf-8") == before   # deployed file untouched
+
+    assert cli.main(["set-personal-data", str(tmp_path), "flagged_by_agami"]) == 0
+    assert not BS.warehouse_enforces_personal_data(tmp_path)
+    assert "personal_data" not in json.loads(cfg.read_text())
 
 
-def test_set_org_cli_refuses_a_month_out_of_range(tmp_path):
-    from semantic_model import cli
+def test_personal_data_setting_reads_as_unset_without_a_readable_config(tmp_path):
+    from semantic_model import build_settings as BS
 
-    with pytest.raises(SystemExit):
-        cli.main(["set-org", str(tmp_path), "--fiscal-year-start-month", "13"])
-    assert OR.load_org_record(tmp_path) is None
-
-
-# --- #675: personal data enforced by the warehouse, one organisation setting --------------------
-
-
-def test_personal_data_setting_loads_and_round_trips(tmp_path):
-    OR.record_path(tmp_path).write_text(
-        "org_id: abc123\nname: Acme\npersonal_data: enforced_by_warehouse\n", encoding="utf-8")
-    rec = OR.load_org_record(tmp_path)
-    assert rec.personal_data == "enforced_by_warehouse"
-    OR.write_org_record(tmp_path, rec)
-    doc = yaml.safe_load(OR.record_path(tmp_path).read_text(encoding="utf-8"))
-    assert doc["personal_data"] == "enforced_by_warehouse"
-    assert OR.load_org_record(tmp_path) == rec
-
-
-def test_personal_data_setting_is_omitted_by_default(tmp_path):
-    # Omitted, so a record without it still loads on a core that predates the key.
-    OR.write_org_record(tmp_path, OrgRecord(org_id="abc123"))
-    assert "personal_data" not in OR.record_path(tmp_path).read_text(encoding="utf-8")
-    assert OrgRecord(org_id="x").personal_data is None
-
-
-def test_personal_data_setting_refuses_an_unknown_value():
+    assert not BS.warehouse_enforces_personal_data(tmp_path)
+    (tmp_path / "local").mkdir()
+    (tmp_path / "local" / ".config").write_text("not json")
+    assert not BS.warehouse_enforces_personal_data(tmp_path)
     with pytest.raises(ValueError):
-        OrgRecord(org_id="x", personal_data="sometimes")
+        BS.set_personal_data(tmp_path, "sometimes")
 
 
-def test_set_org_cli_sets_and_clears_the_personal_data_setting(tmp_path):
-    from semantic_model import cli
-
-    assert cli.main(["set-org", str(tmp_path), "--personal-data", "enforced_by_warehouse"]) == 0
-    assert OR.load_org_record(tmp_path).personal_data == "enforced_by_warehouse"
-    assert cli.main(["set-org", str(tmp_path), "--personal-data", "flagged_by_agami"]) == 0
-    assert OR.load_org_record(tmp_path).personal_data is None
-    assert "personal_data" not in OR.record_path(tmp_path).read_text(encoding="utf-8")
+def test_organization_record_refuses_a_personal_data_key():
+    # Kept out on purpose: an older core refuses unknown keys, so the setting never goes here.
+    with pytest.raises(ValueError):
+        OrgRecord.model_validate({"org_id": "x", "personal_data": "enforced_by_warehouse"})

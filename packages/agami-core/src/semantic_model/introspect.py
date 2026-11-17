@@ -627,8 +627,8 @@ def introspect(
     _progress(pp, f"done: {len(built)} tables, {len(rels)} relationships")
     # The flags came off only now: every read above (value lists, placeholders, the profile) still
     # treated the columns as personal, so no personal value reached the model.
-    from . import org_record
-    if org_record.warehouse_enforces_personal_data(out.parent):
+    from . import build_settings
+    if build_settings.warehouse_enforces_personal_data(artifacts_dir):
         _leave_personal_unflagged([*built, *(per_area.values() if refreshing else ())], prev, report)
 
     # 3b. now that joins are known, re-derive deep-table column_groups so FK (reference) columns
@@ -3049,13 +3049,13 @@ def _leave_personal_unflagged(tables: list[Table], prev: Optional[Datasource], r
     """The organisation's warehouse controls who sees personal data (#675): clear the flags and
     suspicions this build found, and say so in one line. A flag the stored model already carried is
     kept: a person may have set it."""
-    kept = {(t.schema_name, t.name.lower(), c.name.lower())
+    kept = {((t.schema_name or "").lower(), t.name.lower(), c.name.lower())
             for sa in (prev.subject_areas if prev is not None else []) for t in sa.tables_defined
             for c in t.columns if c.sensitive}
     cleared: set[tuple] = set()
     for t in tables:
         for c in t.columns:
-            key = (t.schema_name, t.name.lower(), c.name.lower())
+            key = ((t.schema_name or "").lower(), t.name.lower(), c.name.lower())
             suspect = [cv for cv in c.caveats if cv in _VALUE_SUSPECT_CAVEATS]
             if (c.sensitive and key not in kept) or suspect:
                 cleared.add(key)
