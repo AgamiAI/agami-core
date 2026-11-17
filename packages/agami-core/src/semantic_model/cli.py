@@ -1884,6 +1884,33 @@ def _batch_arg(text: Optional[str]) -> Optional[tuple[int, int]]:
     return int(m.group(1)), int(m.group(2))
 
 
+# A metadata source is read whole, so each read's row cap is sized from the source's own count rather
+# than left to the deployment's query-time cap, which a platform dictionary can pass by itself. The
+# margin covers rows written between the count and the read; past the ceiling the read is refused with
+# the count, never attempted.
+_METADATA_READ_CEILING = 5_000_000
+_METADATA_READ_MARGIN = 1_000
+
+
+def _metadata_read_cap(runner, fq: str) -> int | str | None:
+    """The row cap for reading `fq` whole: its count plus a margin, at most the ceiling. None when
+    the count could not be read (the read then runs under the deployment's cap, as before); an error
+    message naming the count when it is past the ceiling."""
+    try:
+        rows = runner(f"SELECT COUNT(*) AS n FROM {fq}") or []
+    except Exception:  # noqa: BLE001 — an unread count leaves the read as it was, not failed
+        return None
+    # The one column, by position: a dialect may fold the alias's case.
+    first = rows[0] if rows and isinstance(rows[0], dict) and len(rows[0]) == 1 else None
+    n = _num(next(iter(first.values()))) if first else None
+    if n is None or n < 0:
+        return None
+    if n > _METADATA_READ_CEILING:
+        return (f"{fq} holds {n:,.0f} rows, more than the {_METADATA_READ_CEILING:,} a metadata "
+                "source is read up to; enrich-metadata reads each source whole, so it was not read")
+    return min(int(n) + _METADATA_READ_MARGIN + int(n) // 100, _METADATA_READ_CEILING)
+
+
 def cmd_enrich_metadata(args) -> int:
     """Deterministically enrich columns from the database's OWN metadata/lookup tables —
     descriptions + choice_field labels — in one validated curate batch. No LLM, no generator
@@ -1904,7 +1931,11 @@ def cmd_enrich_metadata(args) -> int:
     # server the runner still passes --no-safety but drops --build-profile, so the recon gate refuses
     # the catalog reads that would find an unmodelled dictionary; there only a modelled one is read.
     runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
-    preset, sources = _metadata_sources(org, runner, dialect, args.preset)
+    # Finding the sources lists the catalog, which a large warehouse holds past the query-time cap,
+    # and a refused listing reads as "no such source"; it is a build read, bounded by the ceiling.
+    catalog_runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True,
+                                                   max_rows=_METADATA_READ_CEILING)
+    preset, sources = _metadata_sources(org, catalog_runner, dialect, args.preset)
     if not preset:
         # most databases carry no in-DB dictionary; that is nothing to do, not a failure (#526)
         _print_json({"enriched": False,
@@ -1930,7 +1961,13 @@ def cmd_enrich_metadata(args) -> int:
         # everything after this reads the same keys (`"reference_value" AS "reference"`).
         sel = ", ".join(dialect.quote_ident(a) if a == c else f"{dialect.quote_ident(a)} AS {dialect.quote_ident(c)}"
                         for c, a in cols.items())
-        fetched_rows[role] = runner(f"SELECT {sel} FROM {fq}") or []
+        cap = _metadata_read_cap(runner, fq)
+        if isinstance(cap, str):
+            _print_json({"enriched": False, "preset": preset, "error": cap})
+            return 1
+        read = runner if cap is None else INTRO.make_execute_sql_runner(
+            args.profile, building_the_model=True, max_rows=cap)
+        fetched_rows[role] = read(f"SELECT {sel} FROM {fq}") or []
         fetched[role] = len(fetched_rows[role])
     for role, (cfg, _at, _cols) in sources.items():
         rows = fetched_rows[role]

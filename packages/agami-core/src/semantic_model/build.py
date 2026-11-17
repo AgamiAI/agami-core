@@ -999,6 +999,10 @@ def flag_rate_name(table: str, column: str) -> str:
     return f"{table}_{column}_rate"
 
 
+def record_count_name(table: str, key: str) -> str:
+    return f"{table}_distinct_{key}_count"
+
+
 # A table (often a view joining a record to its stages or periods) that holds each record on several
 # rows (ACE-182). Introspection measures it and writes this caveat; the caveat is the one place it is
 # kept, so the agent reading the table and `suggest_metrics` both see it. Worded as a factor, never a
@@ -1071,8 +1075,9 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
     Re-run after such a column is described and it becomes eligible (write_items is incremental,
     so no duplicates).
 
-    On a table whose rows repeat each record (`repeated_key`), a rate counts distinct records, and
-    no duration average is proposed: an average over the repeats weights each record by how often
+    On a table whose rows repeat each record (`repeated_key`), a distinct-record count on its key is
+    proposed first (the one count that is not plain: COUNT(*) there counts the repeats), a rate counts
+    distinct records, and no duration average is proposed: an average over the repeats weights each record by how often
     it repeats, and the repeats are where such views differ."""
     t = table.name
     st = dialect.name
@@ -1081,6 +1086,17 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
     wanted = (None if flag_rates is True
               else {n.lower() for n in flag_rates} if flag_rates else set())
     repeated = repeated_key(table)
+    if repeated:
+        # The repeat check leaves such a table without a one-column grain, so nothing else names its
+        # records; this is the count people ask of it first, and COUNT(*) would multiply it.
+        key = next((c.name for c in table.columns if c.name.lower() == repeated[0].lower()),
+                   repeated[0])
+        out.append({"name": record_count_name(t, key),
+                    "calculation": f"Number of distinct {key} values in {t}: each record counts "
+                                   f"once, however many rows repeat it",
+                    "bindings": {st: f"COUNT(DISTINCT {dialect.ident(key)})"},
+                    "source_tables": [t],
+                    "_proposal": {"flags": [], "row_expr": dialect.ident(key), "columns": [key]}})
     for c in flags_here:
         if wanted is not None and c.name.lower() not in wanted:
             continue
@@ -1134,7 +1150,7 @@ __all__ = [
     "derive_column_groups", "column_group_descriptions", "maybe_column_groups",
     "infer_cardinality", "cluster_by_family", "group_by_joins", "make_area", "make_table_ref",
     "propose_subject_areas", "extract_cross_area_relationships",
-    "suggest_metrics", "flag_columns", "flag_rate_name", "suspected_pii", "suspected_reason",
+    "suggest_metrics", "flag_columns", "flag_rate_name", "record_count_name", "suspected_pii", "suspected_reason",
     "repeat_caveat", "repeated_key", "is_repeat_caveat",
     "canonical_description",
     "write_tree", "WriteReport",

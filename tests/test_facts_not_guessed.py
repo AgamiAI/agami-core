@@ -87,6 +87,10 @@ def _large(monkeypatch, *names: str, rows: int = 10_000_000) -> None:
     monkeypatch.setattr(I, "_estimate_rows", fake)
 
 
+def _rates(props: list[dict]) -> list[dict]:
+    return [m for m in props if m["name"].endswith("_rate")]
+
+
 def _table(org, name: str):
     return next(t for sa in org.subject_areas for t in sa.tables_defined if t.name == name)
 
@@ -173,13 +177,37 @@ def test_metrics_proposed_for_a_repeating_table_count_distinct_records(tmp_path,
     for c in view.columns:
         if c.name == "is_escalated":
             c.type = "boolean"
-    (rate,) = B.suggest_metrics(view, D.get_dialect("sqlite"), flag_rates=True)
+    (rate,) = _rates(B.suggest_metrics(view, D.get_dialect("sqlite"), flag_rates=True))
     binding = rate["bindings"]["SQLite"]
     assert "COUNT(DISTINCT" in binding and "ticket_id" in binding and "AVG(" not in binding
     # the same table without repeats keeps the per-row average
     view.caveats = []
     (rate,) = B.suggest_metrics(view, D.get_dialect("sqlite"), flag_rates=True)
     assert rate["bindings"]["SQLite"].startswith("AVG(")
+
+
+def test_a_repeating_table_gets_a_distinct_record_count_that_test_runs_to_the_record_count(
+    tmp_path, db
+):
+    # The repeat check leaves such a table without a one-column grain; its record key is still
+    # known, so the count people ask for first is proposed on it, distinct over that key.
+    org, _ = I.introspect(
+        "demo", "sqlite", runner=_runner(db), artifacts_dir=tmp_path, dry_run=True
+    )
+    sqlite = D.get_dialect("sqlite")
+    view = _table(org, "tickets_v")
+    assert view.grain == [] and B.repeated_key(view)[0] == "ticket_id"
+    props = B.suggest_metrics(view, sqlite)
+    (count,) = [m for m in props if m["name"] == B.record_count_name("tickets_v", "ticket_id")]
+    assert count["bindings"]["SQLite"] == "COUNT(DISTINCT ticket_id)"
+    assert count["_proposal"]["flags"] == [] and count["_proposal"]["columns"] == ["ticket_id"]
+    assert not any("duration" in m["name"] or "avg" in m["name"] for m in props)
+    res = cli._test_run_table(_runner(db), view, sqlite, props)[count["name"]]
+    (truth,) = _runner(db)("SELECT COUNT(*) AS n FROM tickets")
+    assert res["value"] == truth["n"] == 200 and res["rows"] == 200 * REPEAT
+    assert cli._test_run_flags("tickets_v", res) == []
+    # a table that holds each record once is unchanged: no count is proposed on it
+    assert B.suggest_metrics(_table(org, "tickets"), sqlite) == []
 
 
 def test_no_duration_average_is_proposed_on_a_repeating_table():
@@ -198,7 +226,10 @@ def test_no_duration_average_is_proposed_on_a_repeating_table():
     )  # one row per record: the average is offered
     t.caveats = [B.repeat_caveat("ticket_id", 1.5)]
     assert B.repeated_key(t) == ("ticket_id", 1.5)
-    assert B.suggest_metrics(t, D.get_dialect("sqlite")) == []
+    # the distinct-record count alone: no average over the repeats
+    assert [m["name"] for m in B.suggest_metrics(t, D.get_dialect("sqlite"))] == [
+        B.record_count_name("tickets_v", "ticket_id")
+    ]
 
 
 def test_a_distinct_rate_binding_runs_and_counts_each_record_once(tmp_path, db):
@@ -209,7 +240,7 @@ def test_a_distinct_rate_binding_runs_and_counts_each_record_once(tmp_path, db):
     for c in view.columns:
         if c.name == "is_escalated":
             c.type = "integer"
-    (rate,) = B.suggest_metrics(view, D.get_dialect("sqlite"), flag_rates=["is_escalated"])
+    (rate,) = _rates(B.suggest_metrics(view, D.get_dialect("sqlite"), flag_rates=["is_escalated"]))
     (row,) = _runner(db)(f"SELECT {rate['bindings']['SQLite']} AS r FROM tickets_v")
     assert row["r"] == pytest.approx(0.5)
 

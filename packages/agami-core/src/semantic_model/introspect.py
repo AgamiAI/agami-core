@@ -493,7 +493,7 @@ class _ConnectionWatch:
 
 def make_execute_sql_runner(
     profile: str, python: Optional[str] = None, *, building_the_model: bool = False,
-    artifacts_dir: Optional[str | Path] = None,
+    artifacts_dir: Optional[str | Path] = None, max_rows: Optional[int] = None,
 ) -> Runner:
     """A runner that sends each statement through `execute_sql.py`, and returns its rows.
 
@@ -513,7 +513,11 @@ def make_execute_sql_runner(
 
     `artifacts_dir`, when given, is where execute_sql reads the credentials: it otherwise finds the
     folder through AGAMI_ARTIFACTS_DIR or the pointer file, which can name a different folder than the
-    one the command was told to build in."""
+    one the command was told to build in.
+
+    `max_rows`, when given, is the row cap for this runner's statements in place of the
+    deployment's `AGAMI_SQL_MAX_ROWS`: for a build read sized from the source's own count, so a
+    command that must read a table whole does not depend on its caller guessing a cap."""
     exe = python or sys.executable
     script = str(SCRIPT_DIR / "execute_sql.py")
     hosted = bool(os.environ.get("AGAMI_DB_URL") or os.environ.get("APP_DATABASE_URL"))
@@ -522,6 +526,8 @@ def make_execute_sql_runner(
     env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
     if artifacts_dir is not None:
         env["AGAMI_ARTIFACTS_DIR"] = str(Path(artifacts_dir).expanduser())
+    if max_rows is not None:
+        env["AGAMI_SQL_MAX_ROWS"] = str(max_rows)
 
     def run(sql: str) -> list[dict]:
         proc = subprocess.run(

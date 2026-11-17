@@ -362,6 +362,19 @@ below corresponds to one such version.
   refused any call without `--query`. `--metric` alone now lists the examples tagged with that
   metric (the most tags first); with neither flag the command says to give one.
 
+- **`sm suggest-metrics` proposes a count for a table whose rows repeat each record.** Introspection
+  measures the repeat and rightly leaves such a table without a one-column grain, but nothing was
+  then proposed on it, so the tables people ask about most often had no count. It now proposes a
+  distinct-record count on the measured record key (`COUNT(DISTINCT <key>)`), test-run like the
+  others, alongside the distinct-record flag rates; still no duration average over the repeats. A
+  table that holds each record once is unchanged.
+
+- **`sm enrich-metadata` reads a dictionary of any size it can, without a row cap from the caller.** The
+  skill told it to run under a 200,000-row cap, and a platform dictionary larger than that was refused
+  outright. The command now counts each metadata table first and reads it under a cap of that count
+  plus a margin, for that read alone; a table over 5,000,000 rows is refused with its count, never
+  read. Listing the catalog to find those tables is bounded the same way. The query-time cap is
+  unchanged, and the skill no longer asks for a number for this command.
 - **`sm introspect` says why the database couldn't be used.** A credentials profile missing its
   password read every table, got no columns, and ended with "every name yielded zero columns. Check
   the --tables list", pointing at shell quoting. A failure about the connection (missing

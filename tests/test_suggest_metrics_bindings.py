@@ -419,7 +419,10 @@ def test_a_repeated_row_table_is_test_run_over_records_like_its_binding(tmp_path
     con.close()
     rc, out, seen = _profile_run(tmp_path, monkeypatch)
     assert rc == 0, out
-    (p,) = out["proposals"]
+    count, p = out["proposals"]
+    # the distinct-record count comes first, and test-runs to the two records, not the 11 rows
+    assert count["name"] == build.record_count_name("tickets", "ticket_id"), count
+    assert count["test_run"]["value"] == 2 and count["test_run"]["rows"] == 11, count
     assert "COUNT(DISTINCT" in p["binding"], p
     assert p["test_run"]["value"] == pytest.approx(0.5), (p, seen)
     assert "ticket_id" in seen[0]   # the sample carries the record key the binding counts
