@@ -304,6 +304,11 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A database that is connected but not built goes into the build, not the "Ask a question" card.**
+  With credentials saved and no model yet, `/agami-connect` showed the returning card and recommended
+  asking a question of a database with nothing built. `connect_resolve.py` now returns `next: build`
+  for that case, and the skill starts the build.
+
 - **A `.sql` file whose statement has a comment above it is read (#645).** The intake skipped it
   as "not a SELECT", and split a statement on a `;` inside a string or a comment. The comment now
   names the statement.
