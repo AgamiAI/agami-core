@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.23] — 2026-11-17
+
 ### Added
 
 - **Microsoft sign-in for personal accounts.** `AGAMI_OIDC_MICROSOFT_TENANT=consumers` lets
