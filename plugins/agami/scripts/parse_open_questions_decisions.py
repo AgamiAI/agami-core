@@ -103,6 +103,13 @@ def _ops(d: dict, item: dict) -> tuple[list[dict] | None, str | None]:
         if choice == "confirm":
             if not item.get("guess"):
                 return None, "there is no guess to confirm"
+            # A confirm signs every code's meaning: one still blank would be signed as no meaning.
+            blank = [k for k, v in current.items() if not str(v or "").strip()]
+            if blank:
+                return (
+                    None,
+                    f"{', '.join(map(str, blank))} has no meaning yet: fix it or leave the list blank",
+                )
             return [{**op, "value": current}], None
         typed = d.get("labels")
         if not isinstance(typed, dict):

@@ -1027,6 +1027,7 @@ def _unread_columns(
             current = dict(c.choice_field or {})
             blank = [v for v, lbl in current.items() if not (lbl or "").strip()]
             where = {"table": labels[id(t)], "column": c.name}
+            # From the table's label: it gains a schema, and so changes, if a same-named table appears in another.
             ident = f"{labels[id(t)]}.{c.name}"
             asked = bool(blank) and _codes(blank) and not _plain_numbers(c, blank)
             # a list the build filled in with no person's word: asked on the page only

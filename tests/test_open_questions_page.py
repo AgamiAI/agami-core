@@ -429,7 +429,8 @@ def test_the_page_carries_every_row_in_order_and_who_signs(tmp_path):
         "both",
         "dont_know",
     ]
-    assert [c["value"] for c in data["rows"][2]["choices"]] == ["confirm", "fix", "dont_know"]
+    # a code still blank can't be confirmed: confirming would sign a meaning nobody gave
+    assert [c["value"] for c in data["rows"][2]["choices"]] == ["fix", "dont_know"]
     # an unclear column with no guess has nothing to confirm
     assert [c["value"] for c in data["rows"][3]["choices"]] == ["fix", "hide", "dont_know"]
     assert [c["value"] for c in data["rows"][4]["choices"]] == [
@@ -670,6 +671,46 @@ def _run(tmp_path, capsys, *a, **kw):
     return code, out, (json.loads(ops.read_text()) if ops.exists() else None)
 
 
+def _full() -> dict:
+    """The sample with every code of its code list guessed."""
+    out = _sample_out()
+    codes = out["questions"][2]
+    full = {"S1": "Open", "S2": "Closed", "S3": "Pending"}
+    codes.update(values=[], labels=full, guess=full, op={**codes["op"], "value": full})
+    return out
+
+
+def test_a_code_list_is_confirmed_only_when_every_code_has_a_guess():
+    data = json.loads(_block(ROQ.render(_full(), profile="demo", signoff={})))
+    assert [c["value"] for c in data["rows"][2]["choices"]] == ["confirm", "fix", "dont_know"]
+
+
+def test_a_confirm_with_a_blank_code_is_refused(tmp_path, capsys):
+    code, out, ops = _run(tmp_path, capsys, [{"id": "codes:items.st_cd", "choice": "confirm"}])
+    assert code == 0 and ops == []
+    assert out["refused"] == [
+        {
+            "id": "codes:items.st_cd",
+            "reason": "S3 has no meaning yet: fix it or leave the list blank",
+        }
+    ]
+
+
+def test_three_readings_offer_the_others():
+    out = _sample_out()
+    q = out["questions"][0]
+    q["options"].append({"label": "Paid date", "how": "by paid_at", "value": 20, "shown": "20"})
+    data = json.loads(_block(ROQ.render(out, profile="demo", signoff={})))
+    assert (
+        data["rows"][0]["choices"][0]["label"]
+        == "Placed date (31): answer with it, offer the others"
+    )
+    two = json.loads(_block(ROQ.render(_sample_out(), profile="demo", signoff={})))
+    assert (
+        two["rows"][0]["choices"][0]["label"] == "Placed date (31): answer with it, offer the other"
+    )
+
+
 def test_each_choice_becomes_the_op_its_card_answer_would(tmp_path, capsys):
     code, out, ops = _run(
         tmp_path,
@@ -681,13 +722,14 @@ def test_each_choice_becomes_the_op_its_card_answer_would(tmp_path, capsys):
             {"id": "column:items.qty", "choice": "confirm"},
             {"id": "column:items.v_1", "choice": "fix", "text": "  The batch key.  "},
         ],
+        _full(),
     )
     assert code == 0 and out["refused"] == []
-    q = _sample_out()["questions"]
+    q = _full()["questions"]
     assert ops == [
         {**q[0]["op"], "default": "Shipped date"},
         *q[1]["tables"][0]["ops"],
-        {**q[2]["op"], "value": {"S1": "Open", "S2": "Closed", "S3": ""}},
+        {**q[2]["op"], "value": {"S1": "Open", "S2": "Closed", "S3": "Pending"}},
         {
             "op": "edit",
             "kind": "table",

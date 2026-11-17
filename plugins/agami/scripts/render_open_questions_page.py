@@ -56,12 +56,14 @@ def _row(q: dict) -> dict | None:
     kind = q.get("kind")
     base = {"id": q.get("id"), "title": _title(q), "evidence": q.get("evidence") or ""}
     if kind == "ambiguity":
+        options = q.get("options") or []
+        other = "the others" if len(options) > 2 else "the other"
         readings = [
             {
                 "value": f"reading:{o['label']}",
-                "label": f"{o['label']} ({o.get('shown', '')}): answer with it, offer the other",
+                "label": f"{o['label']} ({o.get('shown', '')}): answer with it, offer {other}",
             }
-            for o in q.get("options") or []
+            for o in options
         ]
         return {
             **base,
@@ -87,7 +89,9 @@ def _row(q: dict) -> dict | None:
     if kind == "coded_values":
         labels = q.get("labels") or {v: "" for v in q.get("values") or []}
         guess = q.get("guess") or {}
-        confirm = [{"value": "confirm", "label": "The meanings shown are right"}] if guess else []
+        # Confirming signs every code's meaning, so it is offered only when every code has a guess.
+        whole = bool(labels) and all(str(guess.get(k) or "").strip() for k in labels)
+        confirm = [{"value": "confirm", "label": "The meanings shown are right"}] if whole else []
         return {
             **base,
             "kind": "codes",

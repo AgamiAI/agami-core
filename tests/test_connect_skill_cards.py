@@ -841,7 +841,8 @@ def test_2g_page_uses_the_saving_helper_and_its_parser_never_the_file_by_hand():
                  "question-cards.md#6a-a-page-that-saves-its-decisions",
                  "**I've saved it** / **Back to the cards**",
                  "parse_open_questions_decisions.py --decisions-file", "--expect-profile <profile>",
-                 '--ops-out', 'curate "$ROOT" --ops-file', '{"status": "expired"}', "Never read it by hand"):
+                 '--ops-out', 'curate "$ROOT" --ops-file', '{"status": "expired"}', "Never read it by hand",
+                 "the page and `agami-open-questions-<ts>.json` (it holds sample values)"):
         assert step in page, step
 
 
