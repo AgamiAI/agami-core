@@ -95,7 +95,9 @@ def test_review_reuses_the_connect_review_pattern():
         "asks to stop is a stop, not a change",
         "Any other \"Other\" you can't act on is re-asked, never guessed",
         "Hide these from queries",
-        "Keep them all queryable",
+        "Keep them queryable",
+        "but a raw value is never shown. Suspected ones stay ordinary columns.",
+        "**When `sm sensitive` prints `personal_data: enforced_by_warehouse`, skip this question.**",
         "Flagged and suspected columns are picked the same way",
     ):
         assert phrase in connect and phrase in s, phrase

@@ -591,3 +591,161 @@ def test_only_a_column_called_just_name_is_left_out_on_a_table_of_things(column,
     # A qualified name ("Principal Name") may be a person whatever the table holds, so it stays
     # listed for a person to confirm, as it was before tables were taken into account.
     assert suspected_pii(column, table)
+
+
+# --- #675: the column name before the value shape; names and login ids -------------------------
+
+
+@pytest.mark.parametrize("name", ["request_number", "ticket_no", "order_number", "incident_num",
+                                  "caseNumber", "invoice_nbr", "requests_number"])
+def test_a_record_number_with_phone_shaped_digits_is_not_a_phone(name):
+    assert not pii.looks_like_phones(name, ["5550100100", "5550100101"])
+    assert pii.value_suspect_caveat(name, "string", ["5550100100", "5550100101"]) is None
+
+
+@pytest.mark.parametrize("name", ["contact_number", "mobile_no", "phone_number", "home_number", "number"])
+def test_a_contact_number_with_phone_shaped_digits_stays_a_phone(name):
+    assert pii.looks_like_phones(name, ["5550100100", "5550100101"])
+
+
+PEOPLE = ["Jane Doe", "Raj Patel", "Mary-Ann O'Neil", "Li Wei"]
+LOGINS = ["jdoe", "raj.patel", "m_oneil2", "admin"]
+
+
+@pytest.mark.parametrize("name", ["assigned_user", "opened_by", "sys_created_by", "caller_login",
+                                  "approverLogin", "requested_by_user", "login_id"])
+@pytest.mark.parametrize("values", [PEOPLE, LOGINS])
+def test_a_person_reference_holding_names_or_logins_is_personal(name, values):
+    assert pii.person_ref_name(name)
+    assert pii.looks_like_people(values)
+
+
+@pytest.mark.parametrize("name", ["user_count", "logins_per_day", "by_region", "order_id", "status",
+                                  "user_id", "created_at"])
+def test_other_names_are_not_person_references(name):
+    assert not pii.person_ref_name(name)
+
+
+@pytest.mark.parametrize("values", [
+    ["a1b2c3d4e5f60718293a4b5c6d7e8f90", "0f1e2d3c4b5a69788796a5b4c3d2e1f0"],   # reference ids
+    ["1001", "1002", "1003"],
+    ["2024-01-01", "2024-02-01"],
+    ["Waiting on customer, see notes", "Closed after the fix was confirmed by the requester"],
+])
+def test_values_that_are_not_people_are_not_read_as_people(values):
+    assert not pii.looks_like_people(values)
+
+
+def test_user_and_login_names_are_suspected_but_audit_by_columns_need_values():
+    assert pii.suspected_pii("assigned_user") and pii.suspected_pii("caller_login")
+    assert not pii.suspected_pii("created_by")   # often a reference id; flagged only on its values
+
+
+def _people_runner(sample):
+    return make_catalog_runner(
+        tables=["tickets"],
+        columns={"tickets": [col("id", "integer", nullable=False), col("opened_by", "text"),
+                             col("assigned_user", "text"), col("request_number", "text"),
+                             col("contact", "text")]},
+        sample=lambda sql: [dict(r) for r in sample])
+
+
+_TICKETS = [{"id": str(i), "opened_by": PEOPLE[i % 4], "assigned_user": LOGINS[i % 4],
+             "request_number": f"55501001{i:02d}", "contact": f"user{i}@example.com"} for i in range(8)]
+
+
+def test_introspect_flags_names_and_logins_and_not_a_request_number(tmp_path):
+    org, rep = I.introspect("desk", "postgres", runner=_people_runner(_TICKETS), artifacts_dir=tmp_path)
+    c = {x.name: x for x in org.subject_areas[0].defined_table("tickets").columns}
+    assert c["opened_by"].sensitive and c["assigned_user"].sensitive
+    assert not c["request_number"].sensitive and pii.PHONE_SUSPECT_CAVEAT not in c["request_number"].caveats
+    assert "tickets.opened_by: flagged sensitive — its sampled values are people's names or login ids" in rep.notes
+    written = "".join(p.read_text() for p in (tmp_path / "desk").rglob("*") if p.is_file())
+    for v in ("Jane Doe", "raj.patel"):
+        assert v not in written, v
+
+
+def _enforced(tmp_path):
+    from semantic_model import build_settings as BS
+    BS.set_personal_data(tmp_path, "enforced_by_warehouse")
+
+
+def test_with_the_warehouse_enforcing_it_the_build_flags_nothing_and_says_so(tmp_path):
+    _enforced(tmp_path)
+    org, rep = I.introspect("desk", "postgres", runner=_people_runner(_TICKETS), artifacts_dir=tmp_path)
+    cols = org.subject_areas[0].defined_table("tickets").columns
+    assert not any(c.sensitive for c in cols)
+    assert not any(cv in c.caveats for c in cols for cv in pii.VALUE_SUSPECT_CAVEATS)
+    assert rep.sensitive_columns == 0 and rep.suspected_columns == []
+    assert not any("flagged sensitive" in n for n in rep.notes)
+    line = [n for n in rep.notes if n.startswith("personal data:")]
+    assert line == ["personal data: 3 column(s) left unflagged — organization.yaml says the warehouse "
+                    "enforces who sees personal data (personal_data: enforced_by_warehouse)"]
+    # The values were still never written into the model: the setting turns off the flags, not the care.
+    written = "".join(p.read_text() for p in (tmp_path / "desk").rglob("*") if p.is_file())
+    for v in ("Jane Doe", "raj.patel", "user1@example.com"):
+        assert v not in written, v
+    org = L.load_datasource(tmp_path / "desk")
+    assert C.sensitive_columns(org)["count"] == 0
+
+
+def test_with_the_warehouse_enforcing_it_a_refresh_keeps_a_flag_a_person_set(tmp_path):
+    I.introspect("desk", "postgres", runner=_people_runner(_TICKETS), artifacts_dir=tmp_path)
+    _enforced(tmp_path)
+    org, _ = I.introspect("desk", "postgres", runner=_people_runner(_TICKETS), artifacts_dir=tmp_path,
+                          append=True)
+    flags = {c.name: c.sensitive for c in org.subject_areas[0].defined_table("tickets").columns}
+    # flagged in the stored model before the setting: kept, since a person may have set it
+    assert flags["contact"] and flags["opened_by"]
+
+
+def test_sm_sensitive_reports_the_setting_and_lists_no_suspects(tmp_path, capsys):
+    from semantic_model import cli
+    I.introspect("desk", "postgres", runner=_people_runner(_TICKETS), artifacts_dir=tmp_path)
+    assert cli.main(["sensitive", str(tmp_path / "desk")]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "personal_data" not in out
+    _enforced(tmp_path)
+    assert cli.main(["sensitive", str(tmp_path / "desk")]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["personal_data"] == "enforced_by_warehouse"
+    assert out["suspected"] == [] and out["suspected_count"] == 0
+
+
+# --- review of #675: coded columns with person-like names are not people ------------------------
+
+
+@pytest.mark.parametrize("name,values", [
+    ("end_user", ["Yes", "No", "Yes", "Yes", "No", "No"]),
+    ("is_user", ["true", "false", "true", "false"]),
+    ("power_user", ["Active", "Inactive", "Active", "Active"]),
+    ("sort_by", ["Created Date", "Created Date", "Updated Date", "Created Date"]),
+    ("order_by", ["Due Date", "Priority", "Due Date", "Priority", "Due Date"]),
+    ("assigned_user", ["admin", "admin", "admin", "system", "admin", "admin"]),
+])
+def test_a_coded_column_with_a_person_like_name_is_not_people(name, values):
+    assert not pii.looks_like_people(values)
+
+
+@pytest.mark.parametrize("name", ["last_login", "first_login", "lastLogin", "is_user", "has_user"])
+def test_login_times_and_yes_no_flags_are_not_person_references(name):
+    assert not pii.person_ref_name(name)
+
+
+@pytest.mark.parametrize("name", ["last_login", "end_user", "power_user", "super_user", "is_user"])
+def test_these_names_alone_are_not_suspected(name):
+    assert not pii.suspected_pii(name)
+
+
+def test_introspect_leaves_coded_person_like_columns_alone(tmp_path):
+    rows = [{"id": str(i), "end_user": "Yes" if i % 2 else "No", "sort_by": "Created Date",
+             "last_login": f"2024-01-0{i % 9 + 1} 10:00:00"} for i in range(8)]
+    runner = make_catalog_runner(
+        tables=["accounts"],
+        columns={"accounts": [col("id", "integer", nullable=False), col("end_user", "text"),
+                              col("sort_by", "text"), col("last_login", "text")]},
+        sample=lambda sql: [dict(r) for r in rows])
+    org, rep = I.introspect("desk", "postgres", runner=runner, artifacts_dir=tmp_path)
+    cols = org.subject_areas[0].defined_table("accounts").columns
+    assert not any(c.sensitive for c in cols)
+    assert not rep.suspected_columns

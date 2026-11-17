@@ -24,6 +24,7 @@ For every decision card and result table: [`shared/question-cards.md`](../../sha
 - **Combine acknowledge + next question** — don't waste turns on "Got it!"
 - **Use AskUserQuestion for every Yes/No/Skip** — never inline-bullet options. Where AskUserQuestion is unavailable, ask the same as a short numbered list ([`shared/question-cards.md`](../../shared/question-cards.md) rule 7). Use `(Recommended)` only when there's a genuine recommendation. For fact-of-environment questions ("which database type?", "which schemas?"), don't mark any option Recommended — the user picks what they have.
 - **Every multiSelect needs an explicit "none / continue" option** — `AskUserQuestion` cannot be submitted with zero boxes checked, so any multiSelect where "pick nothing" is a valid answer MUST offer a selectable "Nothing — continue" (or "Keep everything") option. Never phrase the prompt as "leave all unchecked" — that's unsubmittable and traps the user.
+- **Ask the business, decide the plumbing** ([`shared/question-cards.md`](../../shared/question-cards.md#9-a-card-asks-what-the-data-means-to-the-business-never-plumbing) rule 9): a card asks only what the data means to the business, in plain words with an example. Batches, `--append`, `--no-safety`, mapping thresholds and the like are yours to decide, conservatively, and to report in one line. A card never names a file or table without saying what it is. Before signing answers that came back the same down a whole column of a page or sheet, confirm in one line ([rule 10](../../shared/question-cards.md#10-answers-filled-down-are-confirmed-before-they-are-signed)).
 - **Keep the user oriented** — print one-line progress markers between phases (`✓ Introspected 12 tables`, `✓ Validator passed`, `✓ Generated 10 examples`).
 - **Plain voice — state what happened, never how impressive it is.** Progress markers, todo labels, and narration describe the action and the result; they do NOT editorialize. Banned: "wow moment", "magic", "watch this", "the exciting part", "you'll love this", exclamation hype. The reader is a data professional — a query running correctly speaks for itself. Say *"Running the first query"*, not *"Now the wow moment"*.
 
@@ -117,8 +118,38 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 
 **Two paths, chosen by the operating system** (`uname -s`: `Darwin` is macOS; `MINGW*` / `MSYS*` / `CYGWIN*`, or `$OS` = `Windows_NT`, is Windows):
 
-- **macOS and Windows: the password page.** 0a.1 → 0a.2 → **0a.4c** (connection fields card) → 0a.3 (the name, offering the database's own name) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.4k** (the password page) → Phase 1. No file to edit and nothing to paste. The page needs the interpreter, agami-core (with `keyring`) and the artifacts folder in place, which is why 0a.5–0a.8 run before it.
-- **Linux and anything else, and Databricks on every system** (its secret is a `token`, and the page stores a `password`): the file. 0a.1 → 0a.2 → 0a.3 → **0a.4** (`credentials.example`) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.9** (a card waits for the filled-in file) → 0a.10 → Phase 1.
+- **macOS and Windows: the password page.** **0a.0** → 0a.1 → 0a.2 → **0a.4c** (connection fields card) → 0a.3 (the name, offering the database's own name) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.4k** (the password page) → Phase 1. No file to edit and nothing to paste. The page needs the interpreter, agami-core (with `keyring`) and the artifacts folder in place, which is why 0a.5–0a.8 run before it.
+- **Linux and anything else, and Databricks on every system** (its secret is a `token`, and the page stores a `password`): the file. **0a.0** → 0a.1 → 0a.2 → 0a.3 → **0a.4** (`credentials.example`) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.9** (a card waits for the filled-in file) → 0a.10 → Phase 1.
+
+### 0a.0 — Before you start: what to have ready, then the organisation and the source system
+
+**First, before the database-type card**, say in one short message what helps to have to hand, so nobody is asked mid-build for something they could have fetched up front. None of it is required:
+
+> *Before we connect, it helps to have these to hand (none is required):*
+> 1. *What your organisation does, in a sentence or two.*
+> 2. *What system the data comes from (a product such as ServiceNow or Salesforce, or your own application), and anything about the database: when your fiscal year starts, what currency amounts are in, whether the warehouse already controls who sees personal data.*
+> 3. *Definitions of the tables and columns: a data dictionary, a spec workbook, a dbt or LookML project.*
+> 4. *Definitions of your metrics and business terms.*
+> 5. *The questions people ask. They become checked examples, and how many of them agami answers correctly is how you can tell the model is right.*
+
+Then ask 1 and 2 as their own first questions, on one card (two questions; leave the Company one out when it was already authored, as 1.4 A says):
+
+- **The Company question** is 1.4 A's `Company` card, asked here instead of after the connection. 1.4 A says what to write, and it is written once the folder exists (below).
+- **The Source question**, header `Source`: *"What system does this data come from? Add anything about the database too, e.g. "ServiceNow; fiscal year starts in July; amounts in USD". Type it in Other."* Options: **Our own application** (built in-house, no product dictionary) and **Not sure** (agami reads the database and works it out). No option is marked Recommended: it is a fact about their setup.
+
+**Both answers are hints, never copied verbatim into the model.** They steer the descriptions written in Phase 2 (a domain prior, like the narrative) and switch on product-specific help; no description, glossary entry or rule is the person's sentence pasted in.
+
+**Hold the answers; write nothing yet.** At this point there is no artifacts folder (0a.6 picks it) and no interpreter (0a.5 finds it), so `sm` can't run. Bind them now and write each where the list below says: the company and the personal-data setting **right after 0a.8**, when the folder and the interpreter exist; the fiscal year **after 1.7**, when `datasource.yaml` exists. Bind the Source answer:
+
+- **A named product** → `$SOURCE_SYSTEM`. When agami has a metadata preset for it (ServiceNow: `servicenow`), 2a.0 passes `--preset servicenow` to `sm enrich-metadata`, 1.6 keeps the product's dictionary tables in the kept set (the command reads them only when they are in the model), and 1.5's published-product-schema path is already on. Say it in one line: *"ServiceNow: I'll read its own data dictionary for the column meanings."*
+- **A fiscal year start, stated plainly** → `$FISCAL_START_MONTH` (1 to 12). After 1.7 write it with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-fiscal-year "$ROOT" --month <n>`, the same write 1.4 D makes, and skip 1.4 D's card. Anything vaguer ("our year is odd") is not a month: 1.4 D asks it.
+- **A currency, stated plainly** → `$CURRENCY_HINT`, a hint only: nothing is written now. 2d offers it as the currency for the money columns `sm suggest-units` finds (`sm set-units --currency <ISO code>`), and the person still agrees to that plan there.
+- **The warehouse already controls who sees personal data** (column- or row-level security, "our warehouse handles PII") → after 0a.8, before the build: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-personal-data "<artifacts_dir>" enforced_by_warehouse`. It is a build-only setting, kept in `<artifacts_dir>/local/.config` and never deployed. The build then flags nothing personal and Phase 4 skips the personal-data question. Say it in one line. `set-personal-data "<artifacts_dir>" flagged_by_agami` undoes it (a reload flags again).
+- **Our own application** / **Not sure** → nothing is written; the build works from the database.
+
+Items 3 to 5 are handed over on 1.5's context card (its `Definitions or a semantic layer` and `Questions people ask` options); the questions people ask go to `<artifacts_dir>/local/tmp/agami-asked-questions.txt` and become checked examples in Phase 5, as they do today. Don't ask for them here.
+
+**When Phase 0a is skipped** (the credentials already exist), ask this step at the start of 1.4 instead, on a first onboard of that database. Not on `reintrospect`.
 
 ### 0a.1 — Set up `<artifacts_dir>/local/`
 ```bash
@@ -404,6 +435,8 @@ Detect the OS once so the options are platform-native — `uname -s` (`Darwin` =
 ### 0a.8 — Seed `<artifacts_dir>/USER_MEMORY.md` if missing
 Create the parent (`mkdir -p && chmod 755`) and write the default seed (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md)), `chmod 644`. Don't overwrite. Migrate a v1.1 `<artifacts_dir>/local/USER_MEMORY.md` if present.
 
+**Then write what 0a.0 held** (the folder and the interpreter exist now): the company (1.4 A's two writes) and, when it was given, the personal-data setting (`sm set-personal-data`). The fiscal year waits for 1.7.
+
 ### 0a.9 — Hand-off, then a card that waits for the file
 
 Show the summary, then the card. Don't ask the person to type a phrase.
@@ -606,9 +639,9 @@ Example to say BEFORE introspecting: *"Found 70 tables across 18 schemas. I'll m
 
 ### 1.4 — Datasource context (MANDATORY — ALWAYS ASK)
 
-Four cards, asked right after the connection works and before tables are listed: the company (once per deployment), what the person can share (1.5), this database's one line, and when its fiscal year starts. They are required state-gathering: "don't ask clarifying questions" does NOT cancel them, and the skill never decides skip for the person. Conventions: [`shared/question-cards.md`](../../shared/question-cards.md). The sample path skips all four (its model is ready-made).
+Four cards, asked right after the connection works and before tables are listed: the company (once per deployment; already asked in 0a.0 on the usual path), what the person can share (1.5), this database's one line, and when its fiscal year starts (skipped when 0a.0 already gave it). They are required state-gathering: "don't ask clarifying questions" does NOT cancel them, and the skill never decides skip for the person. Conventions: [`shared/question-cards.md`](../../shared/question-cards.md). The sample path skips all four (its model is ready-made).
 
-**A. Company card — ONCE, on the first onboard into this deployment.** Decide "already authored" by content, not by file existence: done only if the root `<artifacts_dir>/organization.md` exists **or** `<artifacts_dir>/organization.yaml` has a non-empty `name`/`description`. Otherwise AskUserQuestion, one question, header `Company`:
+**A. Company card — ONCE, on the first onboard into this deployment.** Normally already asked in 0a.0, at the very start; don't ask it twice in one run. Decide "already authored" by content, not by file existence: done only if the root `<artifacts_dir>/organization.md` exists **or** `<artifacts_dir>/organization.yaml` has a non-empty `name`/`description`. Otherwise AskUserQuestion, one question, header `Company`:
 
 > *"What's your company called, and what does it do? Type a sentence or two in Other, name first. It's shared by every database you connect here."*
 
@@ -633,7 +666,7 @@ Options: **Generate one for me (Recommended)** / **Skip**.
 
 If `datasource.yaml` already has a non-empty `description` (a re-onboard), show it and ask `Keep it (Recommended)` / `Replace it` instead. **Keep it** → `$DATASOURCE_DESCRIPTION = keep`; nothing is written. **Replace it** → ask the card above and bind from that answer. Without a narrative from this card, Phase 2f writes a short per-database starter from the enriched model.
 
-**D. Fiscal-year card — every onboard, unless `datasource.yaml` already has `fiscal_year_start_confirmed: true`.** The build never writes a fiscal start, January included: a January written by default was once never questioned for an organisation whose year starts in another month. AskUserQuestion, one question, header `Fiscal year`:
+**D. Fiscal-year card — every onboard, unless `datasource.yaml` already has `fiscal_year_start_confirmed: true` or 0a.0's Source answer gave the month (`$FISCAL_START_MONTH`, written after 1.7 the same way).** The build never writes a fiscal start, January included: a January written by default was once never questioned for an organisation whose year starts in another month. AskUserQuestion, one question, header `Fiscal year`:
 
 > *"Which month does your fiscal year start in? Type another month in Other."*
 
@@ -651,10 +684,12 @@ The context card (1.4 B). Same "required state-gathering" rule. AskUserQuestion,
 |---|---|---|
 | `Ask me as you go (Recommended)` | I'll answer what the data can't settle. Picked alone: build from the database and ask only that | Nothing now. After the descriptions, [2g](#2g--ask-what-the-data-cant-settle) asks on cards only what the data itself can't answer. |
 | `Definitions or a semantic layer` | A data dictionary, metrics list, ERD, spec workbook, or a dbt / LookML / Cube repo | A follow-up card: *"Type the file or folder path in Other, or attach the file to your next message."*, options **Skip this one** / **I'll attach it** (wait for the attachment). Then read it as the sections below say: a doc, a column dictionary, a model spec workbook, or a semantic-layer repo by what the path holds. |
-| `Questions people ask` | Real questions from your team; they become checked examples | A follow-up card: *"Type them in Other, one per line, or a file path."*, options **Skip this one** / **I'll attach a file**. Save them with the Write tool to `<artifacts_dir>/local/tmp/agami-asked-questions.txt`, one per line; Phase 5 writes SQL for each and checks them with the rest. |
+| `Questions people ask` | Real questions from your team; they become checked examples, and the measure of how right the model is | A follow-up card: *"Type them in Other, one per line, or a file path."*, options **Skip this one** / **I'll attach a file**. Save them with the Write tool to `<artifacts_dir>/local/tmp/agami-asked-questions.txt`, one per line; Phase 5 writes SQL for each and checks them with the rest. |
 | `Report SQL or dashboards` | SQL you trust, an export, or a screenshot; checked against the model after the build | A follow-up card: *"Type a path to a .sql or .csv file in Other, or attach a screenshot to your next message."*, options **Skip this one** / **I'll attach it**. Copy files or pasted SQL into `<artifacts_dir>/local/reconcile/inbox/` (SQL as `<ts>.sql`, a CSV as is; note a screenshot's path). Phase 6b hands them to `/agami-reconcile`. |
 
 `Ask me as you go` comes first because most people have no document to hand over, and a model built from the database alone guesses wherever the data has two readings: knowledge is asked for where the data shows a gap, not handed over up front. It goes with any of the others, and picked alone it is also the card's "nothing to hand over" answer, so the card can always be submitted. A person who wants neither documents nor questions types it in "Other" ("nothing", "don't ask me"): build from the database alone and leave 2g out.
+
+**This card is where the things 0a.0 listed are handed over.** Don't ask the source system again: when 0a.0's Source card named a product, the published-product-schema path below is already on.
 
 **"Other" on the context card** takes a named product ("it's ServiceNow", "this is our Salesforce") → the published-product-schema path below; or any of the above typed straight in (a path, questions, SQL), routed by what it is. A question about the options ("what's a semantic layer?") is answered first and the card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)).
 
@@ -826,7 +861,7 @@ AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect \
 
 **On a large schema (50+ tables) over a network connection the command prints nothing until it returns, which reads as hung.** Two ways to keep it legible, in order of preference:
 
-1. **Batched build (preferred for 30+ tables) — `--append`.** Split the kept allowlist into batches of ~10–15 tables and introspect **one batch per call**, each a *foreground* command. Every call MERGES into the existing model (prior tables' columns and keys are loaded from disk, not read again; every join of the model is checked on the data again each call), so you end with the full union — and you report `batch 3/5 (+12 tables)` between calls, natural progress with **no background monitor to babysit**:
+1. **Batched build (preferred for 30+ tables) — `--append`.** Batching is your call, never a card (question-cards rule 9): say in one line how many batches you ran. Split the kept allowlist into batches of ~10–15 tables and introspect **one batch per call**, each a *foreground* command. Every call MERGES into the existing model (prior tables' columns and keys are loaded from disk, not read again; every join of the model is checked on the data again each call), so you end with the full union — and you report `batch 3/5 (+12 tables)` between calls, natural progress with **no background monitor to babysit**:
    ```bash
    split -l 12 "<artifacts_dir>/local/tmp/agami-keep.txt" "<artifacts_dir>/local/tmp/agami-batch-"      # batch files
    for b in "<artifacts_dir>/local/tmp/agami-batch-"*; do
@@ -926,7 +961,7 @@ AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" enrich-metadat
   --profile <profile> --db-type <db_type>
 ```
 
-It auto-detects a preset (e.g. `servicenow`) or takes `--preset`, reads the dictionary/lookup tables, and applies — in validated curate batches — **column descriptions** (stamped `description_source: metadata`, authoritative), **`choice_field` labels**, and **reference/FK relationships** (the `caller_id → sys_user` edges that `<x>_id` name-matching can't find). On ServiceNow this alone closes most of the column-coverage, enum-decode, and join-graph gaps deterministically. It prints what it enriched. **Then** hand-enrich only what it didn't cover (2a–2c below). `--skip-references` if you want descriptions/choices only.
+When 0a.0's Source card named a product with a preset, pass it as `--preset <name>`. It auto-detects a preset (e.g. `servicenow`) or takes `--preset`, reads the dictionary/lookup tables, and applies — in validated curate batches — **column descriptions** (stamped `description_source: metadata`, authoritative), **`choice_field` labels**, and **reference/FK relationships** (the `caller_id → sys_user` edges that `<x>_id` name-matching can't find). On ServiceNow this alone closes most of the column-coverage, enum-decode, and join-graph gaps deterministically. It prints what it enriched. **Then** hand-enrich only what it didn't cover (2a–2c below). `--skip-references` if you want descriptions/choices only.
 
 **The raised cap is not optional here — [why](#raised-cap).** A real `sys_dictionary` is tens of thousands of rows, so without the prefix this command doesn't degrade, it **dies**: the read is refused and the runner re-raises the refusal as `RuntimeError: {"refusal": … "rule": "resource_limit" …}`. Nothing is half-applied when that happens (the fetch is above the first `curate` write), so re-running with the prefix is clean. Two things when you run it: **never pipe it through `tail`** — that masks the exit code and a hard failure reads as success; and if the command still refuses even at 200,000, read the `fetched` counts, raise the prefix to clear the largest source table, and say so.
 
@@ -1102,7 +1137,7 @@ From samples + the domain doc, add provider-portable cleaning where evidence sup
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-units "$ROOT" --currency INR        # prints {planned: [{area, table, column, label, unit}]}, writes nothing
 ```
 
-**Show that plan to the user** (each entry's `label` → unit, one line each) and apply only what they agree to: all of it with `--yes`, or a subset with the same `--currency`/`--unit` plus `--columns <table.col …>` (which writes exactly those columns, each with the unit the plan showed for it: a name that states its currency keeps that unit, the rest get `--currency`/`--unit`). A column whose name states its currency gets that unit in the plan; the rest get `--currency`. The write is one validated curate batch. The runtime + chart renderer format the symbol + grouping **deterministically** from `unit` (`semantic_model/units.py`) — no prose caveat to re-interpret. `Mixed` → skip (leave `unit` unset), one-liner. Non-currency units (`cents`/`percent`/`days`) → `--unit <name>`.
+When 0a.0's Source answer named a currency (`$CURRENCY_HINT`), it is the `--currency` the plan proposes. **Show that plan to the user** (each entry's `label` → unit, one line each) and apply only what they agree to: all of it with `--yes`, or a subset with the same `--currency`/`--unit` plus `--columns <table.col …>` (which writes exactly those columns, each with the unit the plan showed for it: a name that states its currency keeps that unit, the rest get `--currency`/`--unit`). A column whose name states its currency gets that unit in the plan; the rest get `--currency`. The write is one validated curate batch. The runtime + chart renderer format the symbol + grouping **deterministically** from `unit` (`semantic_model/units.py`) — no prose caveat to re-interpret. `Mixed` → skip (leave `unit` unset), one-liner. Non-currency units (`cents`/`percent`/`days`) → `--unit <name>`.
 
   **Unit grammar:** `<ISO code>[_<scale>][/<period>]`. Scale (values stored in thousands/millions/…): `thousands`, `millions`, `billions`, `lakhs`, `crores` — `USD_millions` renders 12.5 as `$12.5M`. Period (a rate): `hour`, `day`, `week`, `month`, `quarter`, `year` — `USD/day` renders 120 as `$120.00/day`; both combine (`USD_millions/year`). Use a scale only when the column or the user says the values are stored that way; never rescale data to fit one. Anything else (`kg`, `days`) is shown as a plain label.
 - **Date encodings (auto-sniffed — no question):** introspection already sets `date_format` (`epoch_s`/`ms`/`us`/`ns`, `yyyymmdd`, `iso8601`) + `timezone` on date-named columns whose sample values fit the shape, and `iso8601` on a text column with any name when at least 20 sampled values are present and every one is a real ISO date or timestamp (a single version string, impossible date or note rules it out), so epoch integers render as human dates (UTC) deterministically. You don't ask. **Do** glance at the result: if a time column was missed or mis-scaled (e.g. an epoch_ms tagged epoch_s), fix it with a `field:date_format`/`field:timezone` edit op in the same batch; mention any epoch columns found in the Phase 7 summary.
@@ -1314,16 +1349,18 @@ After each card, apply its answers in one `sm curate` batch (approvals with `--s
 
 The identity is typed by the person: **never infer it** from git config, the environment, the credentials, or the Claude login, and don't pre-fill a domain. An email that doesn't match `\S+@\S+\.\S+` is said back and the same card asked again. Merge the two keys into `<artifacts_dir>/local/.config` (keep every other key), then `chmod 600 <artifacts_dir>/local/.config`, so neither this run nor `/agami-model` asks again.
 
+**When `sm sensitive` prints `personal_data: enforced_by_warehouse`, skip this question.** The organisation set that its warehouse controls who sees personal data (`sm set-personal-data`), so the build flagged nothing; say so in one line, *"Personal data: your warehouse controls who sees it, so this build flagged none of it."*, and ask nothing about it. When `sm sensitive`'s `count` is above 0 (flags kept from before the setting, on a reload), add it: *"<count> columns flagged before stay flagged; change them in /agami-model."*
+
 **Personal-data columns (when `pii_count` or `suspected_count` > 0).** From the `sm sensitive` output above, `{count, columns:[{area, table, column, label}], suspected, suspected_count}`: `columns` are flagged personal, `suspected` look personal but weren't flagged (a phone-like or birth-date-like sample, a name like `ip_address`). Show both in one table, `Table | Columns`, marking each suspected column "(suspected)", e.g. `customers | email, phone, ip_address (suspected)` (a table in the chat may show identifiers; the card names them in words); at most 15 rows and *"and N more"*. Then one multiSelect question (header `Personal`), **"Hide these from queries"**: *"These columns look like personal data. Which should queries never read?"*
 
 Flagged and suspected columns are picked the same way:
 
 - 3 columns or fewer in all: one option per column, named by its `label`, **Email on Customers**, or **IP address on Customers (suspected)**; the identifier (`customers.email`) goes in the option's description.
 - More: grouped by table, one option per table with its count, the table and columns in words, **Customers (3: Email, Phone, IP address (suspected))**; picking a table hides every listed column in it, suspected ones included. With more than 3 tables, the options are **All <n> listed columns**, the table with the most listed columns, and **Review on a page** (the full view below, on its personal-data tab: every listed column on one page, each hidden, kept or marked there, saved from the page).
-- Always last: **Keep them all queryable**.
+- Always last: **Keep them queryable**, its description saying what stays: *"Flagged ones can still be counted and filtered, but a raw value is never shown. Suspected ones stay ordinary columns."* (The old label, *Keep them all queryable*, read as "ordinary columns" while the flags stayed on.)
 - "Other" takes `table.column` names to hide, flagged, suspected or any other column in the model.
 
-Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them all queryable** writes nothing. A name in "Other" that isn't a column in the model, or **Keep them all queryable** or **Review on a page** picked together with anything else, is said back and the same card asked again; never guess which column was meant.
+Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them queryable** writes nothing; say in one line what that leaves (flagged columns queryable, raw values never shown). A name in "Other" that isn't a column in the model, or **Keep them queryable** or **Review on a page** picked together with anything else, is said back and the same card asked again; never guess which column was meant.
 
 **Show the full view** (an option on the Sign-off and item cards and the personal-data question, labelled **Review on a page** there, or asked for in words). The model explorer, with every metric, entity, join and column, which saves its own decisions ([question-cards rule 6a](../../shared/question-cards.md#6a-a-page-that-saves-its-decisions)): render it the way `/agami-model preseed` does in its Phase 5 (`render_model_explorer.py … --initial-tab review --section <metrics|entities|joins> --save-to-helper`, or `--initial-tab pii` from the personal-data question) and serve it from localhost with the helper waiting for its save, giving the person the URL:
 
@@ -1395,18 +1432,20 @@ Without `--area` it runs every area's seeds (each through `execute_sql` scoped t
 
 Then call AskUserQuestion, one question (header `Examples`), *"What should I do with these examples?"*:
 
-- **Keep all that ran (Recommended)**: sign off every example that returned rows. Drop the (Recommended) and put **Review one by one** first when a result that ran looks wrong (6a).
+- **Mark them on a page (Recommended)**: the examples page, every result with its SQL, where each example is kept, dropped, fixed or noted, and saved from the page (below).
 - **Review one by one**: every example, 4 per card, the failing ones first.
-- **Drop the failing ones**: mark every failed example rejected. Leave it out when none failed.
-- **Mark them on a page**: the examples page, every result with its SQL, where each example is kept, dropped, fixed or noted, and saved from the page (below).
+- **Add my own**: the person's own examples, below.
+- **Keep all**: sign off every example that returned rows. Never recommended: that a statement ran proves it executes, not that it is right (a live run had two of 38 that ran cleanly and were wrong).
 
-**Add my own** is on this card every time, so the person's own examples are offered at the step where examples are reviewed, not only up front: the person's own examples, a .sql file or a folder of them, a sheet of questions and SQL, a dashboard export (Tableau, Power BI, LookML) or a screenshot, each checked before it is added; then this card again. When none failed it takes the place **Drop the failing ones** leaves.
+The order is fixed. Put **Review one by one** first and recommend it instead of the page only when the page can't open (question-cards rule 6a, step 1). A result that ran but looks wrong goes in one sentence under the table either way (6a).
 
-**When the card also offers Add my own** ([`shared/own-examples.md`](../../shared/own-examples.md)) and some examples failed, it would hold five options: **Drop the failing ones** gives way, because **Review one by one** shows the failures first and the page can drop them. The card is then **Keep all that ran** / **Review one by one** / **Add my own** / **Mark them on a page**, and "drop the failing ones" typed in Other still does it.
+**Add my own** is on this card every time, so the person's own examples are offered at the step where examples are reviewed, not only up front: the person's own examples, a .sql file or a folder of them, a sheet of questions and SQL, a dashboard export (Tableau, Power BI, LookML) or a screenshot, each checked before it is added ([`shared/own-examples.md`](../../shared/own-examples.md)); then this card again.
+
+**Dropping the failures has no option of its own**: **Review one by one** shows them first and the page can drop them, and "drop the failing ones" typed in Other still does it (the `Drop the failing ones` row below).
 
 | Answer | Do |
 |---|---|
-| Keep all that ran | The identity card from Phase 4a if `reviewer_email`/`reviewer_role` aren't saved yet; here **Don't sign anything yet** leaves every example written but unsigned and goes on to Phase 7 (not 4b). Then, per area, write the examples that ran back with their own `question` and `sql` (same SQL, so it is a sign-off, not a change; their tags are kept): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add-example "$ROOT" --area <area> --file "<artifacts_dir>/local/tmp/agami-keep-examples.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. The sign-off is recorded in `curation_log.jsonl`, not on the example. Failed ones are left as they are; say how many. |
+| Keep all | First, every example the table above didn't show is listed and confirmed ([question-cards rule 4](../../shared/question-cards.md#4-lists-longer-than-a-card-holds-are-summarised)): a sign-off is never recorded for an example the person hasn't seen. Then the identity card from Phase 4a if `reviewer_email`/`reviewer_role` aren't saved yet; here **Don't sign anything yet** leaves every example written but unsigned and goes on to Phase 7 (not 4b). Then, per area, write the examples that ran back with their own `question` and `sql` (same SQL, so it is a sign-off, not a change; their tags are kept): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add-example "$ROOT" --area <area> --file "<artifacts_dir>/local/tmp/agami-keep-examples.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. The sign-off is recorded in `curation_log.jsonl`, not on the example. Failed ones are left as they are; say how many. |
 | Drop the failing ones | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" remove-example "$ROOT" --question "<area>/<question>" …` (one `--question` per failed item, `--signer`/`--role` when known). They are marked rejected and kept for audit, not deleted: say so. |
 | Review one by one | The one-by-one cards over every item, failed ones first; **Keep all remaining** on each card ends the review once the failures are dealt with. |
 | Add my own | [`shared/own-examples.md`](../../shared/own-examples.md), from its step 1; it checks each statement through `/agami-reconcile`, adds the ones that agree as examples signed as the person's, and asks about the ones that disagree. Its run is separate from the seeds, so nothing on this card is decided by it. Then this card again for the seeds. |

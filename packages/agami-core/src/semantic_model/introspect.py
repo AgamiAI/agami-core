@@ -676,6 +676,11 @@ def introspect(
     report.relationship_count = len(rels)
     _progress(pp, f"done: {len(built)} tables, {len(rels)} joins written, "
                   f"{len(report.join_candidates)} join candidates found")
+    # The flags came off only now: every read above (value lists, placeholders, the profile) still
+    # treated the columns as personal, so no personal value reached the model.
+    from . import build_settings
+    if build_settings.warehouse_enforces_personal_data(artifacts_dir):
+        _leave_personal_unflagged([*built, *(per_area.values() if refreshing else ())], prev, report)
 
     # 3b. now that joins are known, re-derive deep-table column_groups so FK (reference) columns
     # group under `references` instead of scattering through `misc` — references live on the
@@ -3286,6 +3291,34 @@ def _merged_placeholders(old: list[Placeholder], findings: list[P.Finding]) -> l
     return out
 
 
+def _leave_personal_unflagged(tables: list[Table], prev: Optional[Datasource], report: IntrospectReport) -> None:
+    """The organisation's warehouse controls who sees personal data (#675): clear the flags and
+    suspicions this build found, and say so in one line. A flag the stored model already carried is
+    kept: a person may have set it."""
+    kept = {((t.schema_name or "").lower(), t.name.lower(), c.name.lower())
+            for sa in (prev.subject_areas if prev is not None else []) for t in sa.tables_defined
+            for c in t.columns if c.sensitive}
+    cleared: set[tuple] = set()
+    for t in tables:
+        for c in t.columns:
+            key = ((t.schema_name or "").lower(), t.name.lower(), c.name.lower())
+            suspect = [cv for cv in c.caveats if cv in _VALUE_SUSPECT_CAVEATS]
+            if (c.sensitive and key not in kept) or suspect:
+                cleared.add(key)
+                c.caveats = [cv for cv in c.caveats if cv not in _VALUE_SUSPECT_CAVEATS]
+                if key not in kept:
+                    c.sensitive = False
+    found = set(report.suspected_columns)
+    report.suspected_columns = []
+    report.notes = [n for n in report.notes if ": flagged sensitive — " not in n]
+    report.sample_findings = [f for f in report.sample_findings
+                              if f[0] not in found and ": flagged sensitive — " not in f[0]]
+    report.sensitive_columns = sum(c.sensitive for t in tables for c in t.columns)
+    report.notes.append(
+        f"personal data: {len(cleared)} column(s) left unflagged — organization.yaml says the warehouse "
+        "enforces who sees personal data (personal_data: enforced_by_warehouse)")
+
+
 def _pii_from_sample(
     schema: Optional[str], table: str, cols: list[Column], sample: list[dict],
     report: Optional[IntrospectReport],
@@ -3304,6 +3337,9 @@ def _pii_from_sample(
             flag_note = f"{table}.{c.name}: flagged sensitive — JSON keys hold personal data ({', '.join(paths)})"
         elif c.type == "string" and not c.sensitive and pii.looks_like_emails(values):
             flag_note = f"{table}.{c.name}: flagged sensitive — its sampled values are email addresses"
+        elif (c.type == "string" and not c.sensitive and pii.person_ref_name(c.name)
+              and pii.looks_like_people(values)):
+            flag_note = f"{table}.{c.name}: flagged sensitive — its sampled values are people's names or login ids"
         if flag_note:
             if not c.sensitive:
                 c.sensitive = True

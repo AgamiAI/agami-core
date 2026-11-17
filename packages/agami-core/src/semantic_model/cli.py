@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from . import build_settings as BS
 from . import introspect as INTRO
 from . import loader as L
 from . import metadata_sources as MS
@@ -576,10 +577,24 @@ def cmd_sensitive(args) -> int:
     from . import curate
     org = L.load_datasource(args.root, include_rejected=True)
     flagged = curate.sensitive_columns(org)
-    suspected = curate.suspected_sensitive_columns(org)
     # `count`/`columns` keep their meaning (flagged PII — the gate signal); `suspected` is the
     # second review tier (might-be-PII the strict flag missed, for the PII tab to confirm).
+    if BS.warehouse_enforces_personal_data(Path(args.root).parent):
+        # The warehouse controls it (#675): nothing to suspect. A flag still on a column was set before
+        # the setting, possibly by a person, so it is still counted.
+        _print_json({**flagged, "suspected": [], "suspected_count": 0,
+                     "personal_data": BS.PERSONAL_DATA_ENFORCED})
+        return 0
+    suspected = curate.suspected_sensitive_columns(org)
     _print_json({**flagged, "suspected": suspected["columns"], "suspected_count": suspected["count"]})
+    return 0
+
+
+def cmd_set_personal_data(args) -> int:
+    """Record who keeps people from seeing personal data (#675). Build-only: it lives in the local
+    config, so nothing deployed carries it and an older core never meets the key."""
+    BS.set_personal_data(args.artifacts_dir, args.setting)
+    _print_json({"personal_data": args.setting, "config": str(BS.config_path(args.artifacts_dir))})
     return 0
 
 
@@ -2110,6 +2125,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--name", default=None)
     sp.add_argument("--description", default=None)
     sp.set_defaults(func=cmd_set_org)
+
+    sp = sub.add_parser("set-personal-data", help="build-only: who keeps people from seeing personal data, "
+                        "kept in <artifacts_dir>/local/.config and never deployed")
+    sp.add_argument("artifacts_dir")
+    sp.add_argument("setting", choices=list(BS.PERSONAL_DATA_CHOICES),
+                    help="enforced_by_warehouse: the warehouse's own security does it, so a build flags "
+                         "nothing; flagged_by_agami: agami flags and asks (the default)")
+    sp.set_defaults(func=cmd_set_personal_data)
 
     sp = sub.add_parser("examples", help="rank prompt examples for a query")
     sp.add_argument("root")

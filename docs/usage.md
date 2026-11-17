@@ -72,10 +72,10 @@ You (on the cards, 4 per card): Approve 6, type a calculation tweak in "Other"
   | 1 | Top 5 customers by lifetime spend | 5 rows      |
   | ...                                                 |
 
-  [card] Keep all that ran (Recommended) · Review the failing ones ·
-         Drop the failing ones · Review all one by one
+  [card] Mark them on a page (Recommended) · Review one by one ·
+         Add my own · Keep all
 
-You: Review all one by one — Keep 6, and for #8 type the fix in "Other".
+You: Review one by one — Keep 6, and for #8 type the fix in "Other".
 
 ✓ Validation complete: 6 validated, 1 edited, 4 unreviewed (errors).
 

@@ -221,6 +221,29 @@ def _thing_table(table_name: str) -> bool:
     return any(_in_words(w, THING_TABLE_WORDS) for w in words)
 
 
+# The last word of a column that names who did something: `assigned_user`, `caller_login`, `opened_by`.
+_PERSON_REF_WORDS = frozenset({"user", "login", "logon", "username", "userid", "loginid", "by"})
+
+
+# `last_login` is when, not who; `is_user` is a yes/no.
+_LOGIN_TIME_WORDS = frozenset({"last", "first", "latest", "recent"})
+# `end_user`, `power_user`: a kind of user, often a coded column, so only its values can make it personal.
+_USER_KIND_WORDS = frozenset({"end", "power", "super", "guest", "new", "active"})
+
+
+def person_ref_name(name: str) -> bool:
+    """A column that names a person by reference: `assigned_user`, `caller_login`, `login_id`,
+    `opened_by`. Its values decide (`looks_like_people`); a `user_id` key or `user_count` is not one."""
+    words = tokens(name)
+    if not words or words[0] in ("is", "has", "by"):
+        return False
+    if len(words) > 1 and words[-1] in ("id", "name") and words[-2] in ("login", "logon"):
+        return True
+    if words[-1] in ("login", "logon") and len(words) > 1 and words[-2] in _LOGIN_TIME_WORDS:
+        return False
+    return words[-1] in _PERSON_REF_WORDS
+
+
 def suspected_pii(column_name: str, table_name: str | None = None) -> bool:
     """A BROADER 'might be PII' name rule than `detect_sensitive`, for the review tier: it also
     keeps every older substring hit (`mobile_sessions`, `ip_address`), so a column the strict
@@ -229,6 +252,12 @@ def suspected_pii(column_name: str, table_name: str | None = None) -> bool:
     A bare `name` on a table of things (`products.name`, `plans.name`) is left out when the table
     is given: listing it made people wade through product names to find the personal data."""
     if strong_pii_name(column_name) or STRONG_PII_RE.search(column_name) or _EXTRA_PII_RE.search(column_name):
+        return True
+    # `assigned_user`, `caller_login`; an audit `created_by` is often a reference id, so it waits for
+    # its values (`looks_like_people`) rather than listing every table's audit columns.
+    words = tokens(column_name)
+    if (person_ref_name(column_name) and words[-1] != "by"
+            and not (len(words) > 1 and words[-2] in _USER_KIND_WORDS)):
         return True
     if not WEAK_PII_RE.search(column_name):
         return False
@@ -280,6 +309,36 @@ def looks_like_emails(values: Iterable[Any]) -> bool:
     return _share(_present(values), _EMAIL_VALUE_RE.match)
 
 
+# `Jane Doe`, `Mary-Ann O'Neil`: two to four capitalised words of letters.
+_PERSON_NAME_VALUE_RE = re.compile(r"^[A-Z][A-Za-z'’-]+(?: [A-Z][A-Za-z'’.-]*){1,3}$")
+# `jdoe`, `raj.patel`, `m_oneil2`: a login id, one word that starts with a letter.
+_LOGIN_VALUE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*(?:[._-][A-Za-z0-9]+){0,3}$")
+# A long hex string is a reference id (a 32-character key), not a login.
+_HEX_ID_RE = re.compile(r"^[0-9a-fA-F]{16,}$")
+
+
+def _person_value(v: str) -> bool:
+    if _PERSON_NAME_VALUE_RE.match(v):
+        return True
+    return len(v) <= 64 and bool(_LOGIN_VALUE_RE.match(v)) and not _HEX_ID_RE.match(v)
+
+
+# People vary: a column of names or logins has many different values that rarely repeat, where a
+# coded one (Yes/No, Active/Inactive, a sort key) repeats a few. Both bounds must hold.
+PEOPLE_MIN_DISTINCT = 4
+PEOPLE_MIN_DISTINCT_SHARE = 0.5
+
+
+def looks_like_people(values: Iterable[Any]) -> bool:
+    """People's names or login ids. Only asked of a column `person_ref_name` picked: by itself, a
+    one-word login looks like any short code, and two capitalised words like any label."""
+    vals = _present(values)
+    distinct = len(set(vals))
+    if distinct < PEOPLE_MIN_DISTINCT or distinct < PEOPLE_MIN_DISTINCT_SHARE * len(vals):
+        return False
+    return _share(vals, _person_value)
+
+
 def _phone_like(v: str, digits_only_ok: bool) -> bool:
     if (not _PHONE_VALUE_RE.match(v) or _DATE_ONLY_RE.match(v) or _NUMBER_VALUE_RE.match(v)
             or _IPV4_VALUE_RE.match(v)):
@@ -292,15 +351,24 @@ def _phone_like(v: str, digits_only_ok: bool) -> bool:
     return True
 
 
+# Things a number identifies (`request_number`, `ticket_no`): the column's name says what its digits
+# are before their shape does, so a ten-digit request number is not a phone (#675).
+_RECORD_WORDS = frozenset({
+    "request", "ticket", "order", "incident", "case", "invoice", "task", "change", "problem", "record",
+    "reference", "ref", "serial", "transaction", "receipt", "claim", "policy", "shipment", "job", "item",
+})
+
+
 def _id_named(column_name: str) -> bool:
-    """`order_id`, `customerId`, `trackingCode`, `id_number`: an identifier, whose bare digits
-    are not a phone. Trailing number words are dropped, so `id_no` ends in `id`."""
+    """`order_id`, `customerId`, `trackingCode`, `id_number`, `request_number`: an identifier, whose
+    bare digits are not a phone. Trailing number words are dropped, so `id_no` ends in `id` and
+    `ticket_no` in `ticket`."""
     if _ID_NAME_RE.search(column_name or ""):
         return True
     words = tokens(column_name)
     while len(words) > 1 and words[-1] in _NUMBER_WORDS:
         words.pop()
-    return bool(words) and words[-1] in _ID_WORDS
+    return bool(words) and (words[-1] in _ID_WORDS or _in_words(words[-1], _RECORD_WORDS))
 
 
 def looks_like_phones(column_name: str, values: Iterable[Any]) -> bool:
@@ -443,6 +511,6 @@ def suspected_reason(name: str, caveats: Iterable[str], table_name: str | None =
 __all__ = [
     "STRONG_PII_RE", "WEAK_PII_RE", "PERSON_WORDS", "NON_PII_WORDS", "tokens", "person_name",
     "strong_pii_name", "legacy_strong", "detect_sensitive", "suspected_pii", "looks_like_emails",
-    "looks_like_phones", "looks_like_birth_dates", "value_suspect_caveat", "json_pii_paths",
+    "looks_like_phones", "looks_like_birth_dates", "person_ref_name", "looks_like_people", "value_suspect_caveat", "json_pii_paths",
     "json_pii_caveat", "suspected_reason", "VALUE_SUSPECT_CAVEATS", "JSON_PII_CAVEAT_PREFIX",
 ]

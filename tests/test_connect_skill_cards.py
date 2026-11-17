@@ -359,7 +359,7 @@ def test_4a_unparseable_other_is_reasked_never_guessed():
 def test_4a_personal_data_card_hides_columns_with_exclude_ops():
     s = _phase_4()
     assert "Hide these from queries" in s
-    assert "Keep them all queryable" in s
+    assert "**Keep them queryable**" in s and "- Always last: **Keep them all queryable**" not in s
     assert "multiSelect" in s
     assert '"op":"exclude","kind":"table"' in s and '"column"' in s
     assert "grouped by table" in s.lower()
@@ -398,13 +398,13 @@ def test_6_shows_a_table_of_seeds_then_the_four_option_card():
     s = _phase_6()
     assert 'sm" seed-validate' in s
     assert "15 rows" in s
-    for label in (
-        "Keep all that ran (Recommended)",
-        "Review one by one",
-        "Drop the failing ones",
-        "Mark them on a page",
-    ):
-        assert f"- **{label}**" in s, label
+    # #674: "ran" proves the SQL executes, not that it is right, so the page is recommended and
+    # keeping them all comes last, in this order.
+    card = s[s.index("(header `Examples`)"):]
+    card = card[: card.index("\n\n**Add my own**")]
+    labels = re.findall(r"^- \*\*([^*]+)\*\*", card, re.M)
+    assert labels == ["Mark them on a page (Recommended)", "Review one by one", "Add my own", "Keep all"]
+    assert "Keep all that ran" not in s
     assert "Review the failing ones" not in s and "Review all one by one" not in s
 
 
@@ -716,7 +716,7 @@ def test_review_cards_offer_the_full_view_as_an_option():
     # saves its own decisions, so the option says what it does, on every question of a card.
     four, six = _phase_4(), _phase_6()
     assert four.count("- **Review on a page**") == 2      # the Sign-off card and the item cards
-    assert six.count("- **Mark them on a page**") == 1     # the Examples card
+    assert six.count("- **Mark them on a page (Recommended)**") == 1     # the Examples card
     assert "and **Mark them on a page** (the page below, on every question of the card" in six  # item cards
     assert "| Review on a page |" in four and "| Mark them on a page |" in six
     assert "first question only" not in four + six
@@ -902,13 +902,11 @@ def test_6_saved_examples_are_checked_by_the_parser_and_a_keep_needs_an_identity
     assert "**A keep is a sign-off**" in full and "is not applied; say so" in full
 
 
-def test_6_with_add_my_own_drop_the_failing_ones_gives_way():
-    """With #649's Add my own on the card and some failures, five options would not fit."""
+def test_6_dropping_the_failing_ones_is_typed_in_other():
+    """#649's Add my own and #674's order fill the card; dropping the failures is still one phrase away."""
     s = _phase_6()
-    rule = s[s.index("**When the card also offers Add my own**"):]
-    rule = rule[: rule.index("\n\n")]
-    assert "**Drop the failing ones** gives way" in rule
-    assert "**Keep all that ran** / **Review one by one** / **Add my own** / **Mark them on a page**" in rule
+    assert '"drop the failing ones" typed in Other' in s
+    assert "| Drop the failing ones |" in s
 
 
 def test_approve_all_remaining_marks_its_ops_bulk_in_connect():
@@ -990,3 +988,142 @@ def test_1_6p_back_to_the_cards_goes_to_the_numbered_list():
     back = back[: back.index("\n")]
     assert back.index("TaskStop") < back.index("**The numbered list**")
     assert "`Tables` card again" not in back
+
+
+# --- #673: say up front what to have ready; ask the organisation and the source system first -----
+
+README = SKILL.parents[4] / "README.md"
+
+
+def test_0a_0_before_you_start_comes_before_the_database_card():
+    text = SKILL.read_text(encoding="utf-8")
+    assert text.index("### 0a.0 ") < text.index("### 0a.2 ")
+    s = _between("### 0a.0 ", "### 0a.1 ")
+    for item in (
+        "What your organisation does",
+        "What system the data comes from",
+        "when your fiscal year starts",
+        "what currency amounts are in",
+        "Definitions of the tables and columns",
+        "Definitions of your metrics and business terms",
+        "The questions people ask",
+    ):
+        assert item in s, item
+    # both paths through Phase 0a start here
+    top = _between("## Phase 0a:", "### 0a.1 ")
+    assert top.count("**0a.0** → 0a.1 → 0a.2") == 2
+
+
+def test_0a_0_asks_the_organisation_and_the_source_system_as_their_own_first_questions():
+    s = _between("### 0a.0 ", "### 0a.1 ")
+    assert "1.4 A's `Company` card" in s and "header `Source`" in s
+    assert s.index("1.4 A's `Company` card") < s.index("header `Source`")
+    # hints, never copied verbatim, that switch on product-specific help
+    assert "never copied verbatim" in s
+    assert "enrich-metadata" in s and "--preset servicenow" in s
+    # nothing is written before the folder and the interpreter exist; the fiscal year goes through
+    # ACE-182's set-fiscal-year after 1.7 and the currency stays a hint for the units step
+    assert "**Hold the answers; write nothing yet.**" in s and "right after 0a.8" in s
+    assert 'sm" set-fiscal-year "$ROOT" --month <n>' in s and "skip 1.4 D's card" in s
+    assert "set-org" not in s.split("**Hold the answers")[1].split("Items 3 to 5")[0].replace("1.4 A", "")
+    assert "`$CURRENCY_HINT`, a hint only" in s
+    held = _between("### 0a.8 ", "### 0a.9 ")
+    assert "**Then write what 0a.0 held**" in held
+    # the questions people ask become checked examples, as they do today
+    assert "agami-asked-questions.txt" in s or "the `Questions people ask` option of 1.5" in s
+
+
+def test_1_4_and_1_5_do_not_ask_again_what_0a_0_asked():
+    four = _between("### 1.4 ", "### 1.5 ")
+    assert "already asked in 0a.0" in four
+    five = _between("### 1.5 ", "### 1.6 ")
+    assert "Don't ask the source system again" in five
+
+
+def test_readme_says_what_to_have_ready():
+    r = README.read_text(encoding="utf-8")
+    s = r[r.index("**Before you start**"): r.index("1. **Start setup.**")]
+    for item in ("organisation does", "system the data comes from", "fiscal year", "currency",
+                 "tables and columns", "metrics and business terms", "questions people ask"):
+        assert item in s, item
+
+
+# --- #674: cards ask what the data means to the business; plumbing is decided and reported ------
+
+CARDS = SKILL.parents[2] / "shared" / "question-cards.md"
+HELPER_PAGE = SKILL.parents[2] / "shared" / "connect-helper-page.html"
+
+
+def _cards_rule(start: str) -> str:
+    text = CARDS.read_text(encoding="utf-8")
+    i = text.index(start)
+    j = text.find("\n## ", i + len(start))
+    return text[i: j if j != -1 else len(text)]
+
+
+def test_question_cards_rule_business_questions_only():
+    r = _cards_rule("## 9. ")
+    assert "what the data means to the business" in r
+    for plumbing in ("--no-safety", "append", "batch", "threshold"):
+        assert plumbing in r, plumbing
+    assert "conservatively" in r and "one line" in r
+    assert "never names a file or table without saying what it is" in r
+
+
+def test_question_cards_rule_filled_down_answers_are_confirmed():
+    r = _cards_rule("## 10. ")
+    assert "the same answer down a whole column" in r
+    assert "one line" in r and "before signing" in r
+
+
+def test_connect_points_at_the_business_questions_rule():
+    style = _between("## Conversation style", "## Progress tracking")
+    assert "question-cards.md#9-" in style and "question-cards.md#10-" in style
+
+
+def test_6_keep_all_shows_every_example_before_it_signs():
+    s = _phase_6()
+    row = next(ln for ln in s.splitlines() if ln.startswith("| Keep all |"))
+    assert "rule 4" in row
+
+
+def test_password_page_sends_the_person_back_to_the_card():
+    page = HELPER_PAGE.read_text(encoding="utf-8")
+    assert "Go back to Claude and pick <b>I've saved it</b>." in page
+    assert "The result shows in Claude" not in page
+
+
+# --- #675: personal data per organisation ---------------------------------------------------------
+
+
+def test_4a_keep_option_says_what_stays():
+    s = _phase_4()
+    assert "but a raw value is never shown. Suspected ones stay ordinary columns." in s
+
+
+def test_4a_skips_the_personal_data_question_when_the_warehouse_enforces_it():
+    s = _phase_4()
+    skip = s[s.index("**When `sm sensitive` prints `personal_data: enforced_by_warehouse`"):]
+    skip = skip[: skip.index("\n\n")]
+    assert "skip this question" in skip and "one line" in skip
+
+
+def test_0a_0_sets_the_personal_data_setting_from_the_source_answer():
+    s = _between("### 0a.0 ", "### 0a.1 ")
+    assert 'sm" set-personal-data "<artifacts_dir>" enforced_by_warehouse' in s
+    assert "never deployed" in s
+    assert "whether the warehouse already controls who sees personal data" in s
+
+
+
+def test_1_4_d_is_skipped_when_0a_0_gave_the_fiscal_month():
+    d = _between("**D. Fiscal-year card", "`chmod 644`")
+    assert "`$FISCAL_START_MONTH`" in d
+
+
+def test_4a_skip_line_gives_the_kept_count_on_a_reload():
+    s = _phase_4()
+    skip = s[s.index("**When `sm sensitive` prints `personal_data: enforced_by_warehouse`"):]
+    skip = skip[: skip.index("\n\n")]
+    assert "nothing was flagged or hidden" not in skip
+    assert "`count` is above 0" in skip

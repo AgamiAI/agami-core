@@ -211,3 +211,4 @@ def test_rewrite_stamps_survive_the_store_round_trip():
     MS.write_organization_record(s, rec, org_id="org1")
     assert MS.load_organization_record(s, "org1") == rec
     s.close()
+
