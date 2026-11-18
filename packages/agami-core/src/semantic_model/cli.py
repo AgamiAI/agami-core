@@ -872,7 +872,12 @@ def cmd_sensitive(args) -> int:
 def cmd_set_personal_data(args) -> int:
     """Record who keeps people from seeing personal data (#675). Build-only: it lives in the local
     config, so nothing deployed carries it and an older core never meets the key."""
-    BS.set_personal_data(args.artifacts_dir, args.setting)
+    from .scratch import LinkedTarget
+    try:
+        BS.set_personal_data(args.artifacts_dir, args.setting)
+    except LinkedTarget as exc:
+        _print_json({"error": str(exc)})
+        return 2
     _print_json({"personal_data": args.setting, "config": str(BS.config_path(args.artifacts_dir))})
     return 0
 

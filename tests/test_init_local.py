@@ -171,3 +171,25 @@ def test_an_identity_file_outside_scratch_is_refused(art, tmp_path):
     ident.write_text(json.dumps({"email": "you@example.com", "role": "x"}))
     rc, out = _run(["set-config", str(art), "--identity-file", str(ident)])
     assert rc == 2 and "scratch" in out["error"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks")
+def test_a_link_planted_at_the_config_is_never_written_through(art, tmp_path):
+    _run(["init-local", str(art)])
+    victim = tmp_path / "victim.txt"
+    victim.write_text("the person's own file\n")
+    (art / "local" / ".config").symlink_to(victim)
+    rc, out = _run(["set-config", str(art), "--tier", "cli"])
+    assert rc == 2 and "link" in out["error"]
+    assert victim.read_text() == "the person's own file\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks")
+def test_a_linked_local_folder_is_refused(art, tmp_path):
+    art.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (art / "local").symlink_to(elsewhere)
+    rc, out = _run(["set-config", str(art), "--tier", "cli"])
+    assert rc == 2 and "link" in out["error"]
+    assert not (elsewhere / ".config").exists()

@@ -91,8 +91,34 @@ THEN_NONE_KEPT = "Nothing was written: that choice keeps no tables. Ask the same
 
 def _needs_choice(payload: dict, then: str) -> int:
     """Print a result that needs the person's answer, and exit 0: a question is not a failure."""
-    print(json.dumps({**payload, "status": NEEDS_CHOICE, "then": then}, indent=2))
+    print(json.dumps({**_bounded(payload), "status": NEEDS_CHOICE, "then": then}, indent=2))
     return 0
+
+
+SHOW_UNMATCHED = 10
+UNMATCHED_CHARS = 64
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# A schema.table.column name: three dotted parts, no spaces, `=`, `:` or `/` (a key = value line).
+_COLUMN_NAME = re.compile(r"[^\s=:/]+\.[^\s=:/]+\.[^\s=:/]+")
+
+
+def _bounded(payload: dict, columns: bool = False) -> dict:
+    """`payload` with its unmatched names cut to what a person could have typed: at most
+    SHOW_UNMATCHED of them, control characters stripped, each at most UNMATCHED_CHARS long, the rest
+    counted in `unmatched_not_shown`. With `columns`, a line that is not a column name is never
+    repeated at all, only counted: the file may be any file, and its lines anything."""
+    names = payload.get("unmatched")
+    if not isinstance(names, list):
+        return payload
+    clean = [_CONTROL.sub("", str(n)) for n in names]
+    if columns:
+        clean = [n for n in clean if _COLUMN_NAME.fullmatch(n)]
+    shown = [n if len(n) <= UNMATCHED_CHARS else n[: UNMATCHED_CHARS - 1] + "…"
+             for n in clean[:SHOW_UNMATCHED]]
+    out = {**payload, "unmatched": shown}
+    if len(names) > len(shown):
+        out["unmatched_not_shown"] = len(names) - len(shown)
+    return out
 
 
 # Words that mark a table as a copy, scratch or staging only at the start or the end of its name
@@ -647,7 +673,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.check_columns:
         found, unmatched = check_columns(inventory, _read_names(args.check_columns))
         if unmatched:
-            return _needs_choice({"unmatched": unmatched}, THEN_ASK_AGAIN)
+            return _needs_choice(_bounded({"unmatched": unmatched}, columns=True), THEN_ASK_AGAIN)
         print(json.dumps({"exclude_columns": found}))
         return 0
     if not args.keep:
@@ -666,7 +692,7 @@ def main(argv: list[str] | None = None) -> int:
     kept, problem = choose(inventory, args.keep, args.shown)
     if args.keep.startswith("page:") and (problem or not kept):
         # The page's saved file is refused whole, as before: it is not a name the person typed.
-        print(json.dumps(problem or {"error": "no tables kept"}))
+        print(json.dumps(_bounded(problem) if problem else {"error": "no tables kept"}))
         return 1
     if problem:
         return _needs_choice(problem, THEN_ASK_AGAIN)

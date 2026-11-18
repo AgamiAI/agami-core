@@ -406,3 +406,38 @@ def test_two_flagged_tables_never_copy_each_other(tmp_path):
     # A plain original is still found from a backup schema.
     code, out = _run(tmp_path, _inventory({"backup": ["orders"], "sales": ["orders"]}))
     assert {n["table"]: n["copy_of"] for n in out["likely_noise"]} == {"backup.orders": "sales.orders"}
+
+
+def test_check_columns_never_echoes_a_line_that_is_not_a_column_name(tmp_path):
+    """Pointed at a file that is not a column list (a credentials file, say), the reply counts the
+    lines and repeats none of them."""
+    secret = tmp_path / "credentials"
+    secret.write_text(
+        "[default]\naws_access_key_id = AKIAEXAMPLEEXAMPLE\naws_secret_access_key = abc/def+ghi\n"
+        "AKIAEXAMPLEBARETOKEN\nmain.t1.nope\n",
+        encoding="utf-8",
+    )
+    code, out = _run(tmp_path, _inventory({"main": ["t1"]}), "--check-columns", str(secret))
+    text = json.dumps(out)
+    assert code == 0 and out["status"] == "needs_choice"
+    assert "AKIA" not in text and "abc/def" not in text and "default" not in text
+    assert out["unmatched"] == ["main.t1.nope"] and out["unmatched_not_shown"] == 4
+
+
+def test_unmatched_names_are_bounded_and_stripped_of_control_characters(tmp_path):
+    names = tmp_path / "agami-names.txt"
+    names.write_text(
+        "\n".join(["x" * 500, "bad\x1b[31mred"] + [f"nope_{i}" for i in range(30)]),
+        encoding="utf-8",
+    )
+    code, out = _run(
+        tmp_path,
+        _inventory({"main": ["t1"]}),
+        "--keep",
+        f"names:{names}",
+        "--tables-out",
+        str(tmp_path / "kept.txt"),
+    )
+    assert code == 0 and len(out["unmatched"]) <= 10 and out["unmatched_not_shown"] == 22
+    assert all(len(n) <= 64 and "\x1b" not in n for n in out["unmatched"])
+    assert out["unmatched"][1] == "bad[31mred"

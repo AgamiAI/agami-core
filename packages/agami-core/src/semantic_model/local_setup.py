@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from .scratch import LinkedTarget
+
 TIERS = ("cli", "duckdb", "python")
 TOOLS = ("psql", "mysql", "snowsql", "sqlite3", "duckdb")
 PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
@@ -165,7 +167,10 @@ def set_config(
     doc["schema_version"] = 1
     doc["artifacts_dir"] = str(art)
     doc["detected_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    BS.write_private(cfg, json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    try:
+        BS.write_private(cfg, json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    except LinkedTarget as exc:
+        raise SetupRefused(str(exc)) from exc
     shown = {k: v for k, v in doc.items() if k not in ("reviewer_email", "reviewer_role")}
     return {
         "config": str(cfg),

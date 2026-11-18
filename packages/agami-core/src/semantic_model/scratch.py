@@ -39,6 +39,39 @@ class NotScratch(ValueError):
     """The file is not one agami's skills could have written: refused, in plain words."""
 
 
+class LinkedTarget(ValueError):
+    """A file agami writes, or its folder, is a link: refused, so nothing is written through it."""
+
+
+def write_replacing(path: Path, text: str, mode: int | None = None) -> None:
+    """`text` at `path` through a temp file in the same folder and a rename, so a link planted at the
+    name is replaced, never written through. A folder that is a link is refused (`LinkedTarget`), as
+    is a name that is one, so a file in another place is never touched. `mode` sets the file's
+    permissions (created that way, never readable by others even for a moment); None keeps the
+    usual umask."""
+    import contextlib
+    import tempfile
+
+    if path.parent.is_symlink():
+        raise LinkedTarget(f"{path.parent} is a link; agami writes {path.name} only in a real folder")
+    if path.is_symlink():
+        raise LinkedTarget(f"{path} is a link; agami will not write through it")
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        if mode is None:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def guarded() -> bool:
     return os.environ.get(GUARD_ENV, "") == "1"
 

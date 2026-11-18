@@ -31,6 +31,7 @@ from . import dialects as D
 from . import introspect as INTRO
 from . import profile as PF
 from .models import Column, Datasource, Entity, Table, table_key
+from .scratch import LinkedTarget, write_replacing
 
 # Checks per run for stated references; the scan's cap is not touched.
 DICTIONARY_PROBE_CAP = PF.JOIN_CHECK_CAP
@@ -561,7 +562,8 @@ def store(root: Path, found: Found) -> Optional[Path]:
     ]
     doc["dictionary_notes"] = found.notes + siblings
     doc["dictionary_unresolved"] = found.unresolved
-    doc.setdefault("how_to_accept", INTRO._accept_command(str(root)))
+    # Written afresh: a command carried from the file would be whatever the file said.
+    doc["how_to_accept"] = INTRO._accept_command(str(root))
     if INTRO._listed(doc, "unchecked_tables"):
         tested = INTRO._tested_pairs(doc) | found.tested
         doc["tested_pairs"] = sorted(
@@ -570,8 +572,11 @@ def store(root: Path, found: Found) -> Optional[Path]:
     found.candidates = [c for c in found.candidates if _from(c) in offered and c in kept]
     path = root / ".introspect" / INTRO.JOIN_CANDIDATES_FILE
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    except OSError:
+        if not path.parent.is_symlink():
+            path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink():
+            path.unlink()  # replaced, never written through
+        write_replacing(path, json.dumps(doc, indent=2) + "\n")
+    except (OSError, LinkedTarget):
         return None
     return path
