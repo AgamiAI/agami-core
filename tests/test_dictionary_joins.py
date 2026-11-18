@@ -247,6 +247,29 @@ def test_a_dictionary_join_that_stops_holding_leaves_the_candidates_on_the_rerun
     assert [c["id"] for c in _file(out)["candidates"]] == [scan["id"]]
 
 
+def test_the_dictionarys_notes_survive_an_append(tmp_path, monkeypatch, capsys):
+    out = _build(
+        tmp_path,
+        [("child", "other_ref", "FK -> parent.pkey"), ("child", "grp", "FK -> nowhere.pkey")],
+        monkeypatch,
+    )
+    _run_verb(tmp_path, out, monkeypatch, capsys)
+    before = _file(out)
+    assert before["dictionary_notes"] and before["dictionary_unresolved"]
+    I.introspect(
+        "acme",
+        "sqlite",
+        runner=_runner(_db(tmp_path)),
+        artifacts_dir=tmp_path,
+        out_dir=out,
+        tables=["main.counter"],
+        append=True,
+    )
+    after = _file(out)
+    assert after["dictionary_notes"] == before["dictionary_notes"]
+    assert after["dictionary_unresolved"] == before["dictionary_unresolved"]
+
+
 def test_a_stated_key_that_repeats_is_a_note_not_a_candidate(tmp_path, monkeypatch, capsys):
     out = _build(tmp_path, [("child", "grp", "references grouping.gid")], monkeypatch, cap=0)
     res = _run_verb(tmp_path, out, monkeypatch, capsys)

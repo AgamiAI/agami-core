@@ -328,6 +328,9 @@ class IntrospectReport:
     # How many of those pairs THIS run tested: a run that finishes a stopped scan repeats while it is
     # above zero (the unchecked list can stay the same while a wide table makes progress).
     join_candidate_tested_now: int = 0
+    # What `sm dictionary-joins` stored beside the candidates (its notes, the names it could not
+    # resolve), carried over an append: only a run of that verb decides them again.
+    join_candidate_dictionary: dict = field(default_factory=dict)
     # Every join of the model as checked on the data: its label, and the evidence (`JoinCheck.evidence`).
     join_checks: list[dict] = field(default_factory=list)
     # The column profile of each table this run read, keyed `schema.table` (`profile.profile_table`).
@@ -3603,6 +3606,8 @@ def _merge_candidates(prior: dict, report: IntrospectReport, read: set[str], rel
     kept = {t for t in _listed(prior, "unchecked_tables") if isinstance(t, str) and t not in read}
     report.join_candidate_unchecked = sorted(kept | set(report.join_candidate_unchecked))
     report.join_candidate_tested |= tested
+    report.join_candidate_dictionary = {k: prior[k] for k in ("dictionary_notes", "dictionary_unresolved")
+                                        if isinstance(prior.get(k), list)}
 
 
 def write_join_candidates(out: Path, report: IntrospectReport) -> Optional[Path]:
@@ -3623,6 +3628,7 @@ def write_join_candidates(out: Path, report: IntrospectReport) -> Optional[Path]
                                key=lambda p: [x or "" for x in p]) if report.join_candidate_unchecked else [],
         "candidates": report.join_candidates,
         "low_overlap": report.join_candidates_low,
+        **report.join_candidate_dictionary,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
