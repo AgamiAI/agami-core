@@ -4832,6 +4832,13 @@ def assemble_receipt(
             "missing_tables": _missing_tables(result.missing_tables),
             "built_from": _built(result.built_from),
             "reason": result.reason,
+            # Undetermined only: the one metric this value is written as, when the way its tables
+            # were joined (an outer join whose unmatched rows still count, a FULL join, a window
+            # over filtered rows) kept the two from being compared. NOT a match: the number may
+            # differ from the metric's. Null otherwise.
+            "unconfirmed": ({"name": result.unconfirmed.metric.name,
+                             "area": result.unconfirmed.area}
+                            if status == UNDETERMINED and result.unconfirmed is not None else None),
         })
 
     def _declared_table(bare: str) -> Optional[tuple]:
@@ -11026,6 +11033,7 @@ class _ColumnMatch(NamedTuple):
     reason: Optional[str] = None     # undetermined: why, from the `_WHY_*` vocabulary
     built_from: Optional[dict] = None  # an aggregate over a matched per-group number
     aggregating: bool = False    # the number aggregates, here or in a step it was computed in
+    unconfirmed: "MetricCandidate | None" = None  # undetermined: the one binding it is written as
 
 
 # The aggregates that skip a NULL input, and the operators that keep a NULL a NULL: a number built
@@ -11226,7 +11234,13 @@ def _match_output_column(oc: OutputColumn, unread: bool,
         # add nothing to it.
         if aggregating and (path.full or (_has(expr, exp.Window) and path.rows)
                             or (path.outer_used and not _ignores_null_rows(peeled_value))):
-            return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNMODELLED, aggregating=True)
+            # The value IS written as a binding, and only how its rows were joined kept it from
+            # being compared. Which one, so a reader can say the figure could not be confirmed as
+            # that measure rather than leave it nameless; never a match.
+            near = {(c.area, c.metric.name): c for c, _conds, _g in found
+                    if {_tkey(_bare(t)) for t in (c.metric.source_tables or [])} <= read_tables}
+            return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNMODELLED, aggregating=True,
+                                unconfirmed=next(iter(near.values())) if len(near) == 1 else None)
         rows_by_form = {grouped: _rows(grouped) for grouped in own_found}
         if any(rows is None for rows in rows_by_form.values()):
             return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNMODELLED, aggregating=True)

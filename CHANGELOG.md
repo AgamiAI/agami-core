@@ -20,6 +20,11 @@ below corresponds to one such version.
   two tables and its review state. The join's status stays `undeclarable`, so the double-counting
   check is unchanged. A computed or renamed key, or a declaration with a condition on the step's
   side, follows nothing.
+- **A figure written as a metric but joined differently names it.** When a value is written as a
+  metric's binding but its tables are joined in a way the check cannot compare (an outer join whose
+  unmatched rows still count, a FULL join, a window over filtered rows), its receipt column item
+  stays `undetermined` and now carries `unconfirmed`: the one metric it is written as. It is never
+  a match.
 
 ## [0.9.24] — 2026-11-17
 
