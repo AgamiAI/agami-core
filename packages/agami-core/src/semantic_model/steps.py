@@ -21,6 +21,7 @@ from typing import Any, Optional
 from . import loader as L
 from .say_text import count as noun_count
 from .say_text import quoted
+from .scratch import LinkedFile, open_one_name
 
 STEP_IDS = (
     "connect",
@@ -111,14 +112,24 @@ def parse_progress(raw: str) -> Optional[tuple[re.Match, str, Optional[str]]]:
     return None
 
 
+def _open_own(root: Path, path: Path):
+    """One of the model's own files under `<root>/.introspect/`, open for reading: inside the model
+    folder, not a link, and with no other name (a hard link resolves inside the folder whatever file
+    it shares, so only the open file shows it). OSError otherwise, which every reader takes as "no
+    such file"."""
+    if not L.inside_model(root, path):
+        raise OSError(f"{path} leads out of the model folder")
+    fd = open_one_name(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    return os.fdopen(fd, "r", encoding="utf-8", errors="replace")
+
+
 def last_progress_line(log: Path) -> str:
     """The build log's latest non-blank line without its time stamp, or "" when there is none (yet),
-    or when the log is a link out of its model folder (`<root>/.introspect/progress.log`): `sm
-    progress` prints the line."""
-    if not L.inside_model(Path(log).parent.parent, log):
-        return ""
+    or when the log is a link, or a hard link, or leads out of its model folder
+    (`<root>/.introspect/progress.log`): `sm progress` prints the line."""
     try:
-        text = log.read_text(encoding="utf-8", errors="replace")
+        with _open_own(Path(log).parent.parent, log) as fh:
+            text = fh.read()
         lines = [ln for ln in text.splitlines() if ln.strip()]
     except OSError:
         return ""
@@ -173,7 +184,11 @@ def mark(root: Path, step_id: str, status: str, now: Optional[datetime] = None) 
     if not L.inside_model(root, path):
         raise ValueError(f"{path} leads out of the model folder {root}; no mark was written")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
+    try:
+        fd = open_one_name(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+    except LinkedFile as exc:
+        raise ValueError(f"{exc}; no mark was written") from None
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(json.dumps({"id": step_id, "status": status, "at": at.isoformat()}) + "\n")
 
 
@@ -221,9 +236,8 @@ def _replay_marks(root: Path) -> _Replay:
     it, earlier steps' included, belong to an earlier run (a reload days later must not count the
     days between). A finished step marked `in_progress` again starts a new attempt of that step."""
     try:
-        if not L.inside_model(root, _timeline(root)):
-            raise OSError("timeline leads out of the model folder")
-        text = _timeline(root).read_text(encoding="utf-8", errors="replace")
+        with _open_own(root, _timeline(root)) as fh:
+            text = fh.read()
     except OSError:
         return _Replay({}, False, None)
     marks: dict[str, str] = {}
@@ -472,10 +486,8 @@ def _batches_left(log: Path) -> bool:
     """Whether the log is a batched build's that has batches still to run: each batch starts a fresh
     log whose first line is `batch n of N`, and every batch writes the model, so after batch 1 of 3
     the model has landed and the log ends `done:` while two batches are still to come."""
-    if not L.inside_model(Path(log).parent.parent, log):
-        return False
     try:
-        with open(log, encoding="utf-8", errors="replace") as fh:
+        with _open_own(Path(log).parent.parent, log) as fh:
             first = next((ln for ln in fh if ln.strip()), "")
     except OSError:
         return False
@@ -709,9 +721,8 @@ def read_printed(root: Path) -> dict[str, Any]:
     root = Path(root).expanduser()
     path = _last_path(root)
     try:
-        if not L.inside_model(root, path):
-            return {}
-        doc = json.loads(path.read_text(encoding="utf-8"))
+        with _open_own(root, path) as fh:
+            doc = json.loads(fh.read())
     except (OSError, ValueError):
         return {}
     return doc if isinstance(doc, dict) else {}

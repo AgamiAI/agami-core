@@ -2603,7 +2603,13 @@ def cmd_discover(args) -> int:
     inv_path = (Path(args.inventory_out).expanduser() if args.inventory_out
                 else artifacts / args.profile / ".introspect" / "inventory.json")
     inv_path.parent.mkdir(parents=True, exist_ok=True)
-    inv_path.write_text(json.dumps(inventory, indent=2, default=str), encoding="utf-8")
+    from .scratch import LinkedTarget, write_replacing
+    try:
+        # replaced, never written through: a link at the name would carry the write elsewhere
+        write_replacing(inv_path, json.dumps(inventory, indent=2, default=str))
+    except LinkedTarget as exc:
+        _print_json({"error": str(exc)})
+        return 2
 
 
     _print_json({

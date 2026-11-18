@@ -66,6 +66,11 @@ A schema or table name that matches nothing (or a bare table name that matches s
 reported as `{"unmatched": [...], "ambiguous": {...}}`, and nothing is written: the skill asks the
 same card again rather than guessing.
 
+Under `AGAMI_SCRATCH_ONLY=1` every file the call reads (`--check-columns`, `--used-by`, the file of
+`--keep names:/page:/pick:`) must be one of agami's scratch files, and `--inventory` a scratch file
+or the build's own `<artifacts_dir>/<profile>/.introspect/inventory.json`; anything else, or a link
+or hard link, is refused (exit 2) before it is read.
+
 Each of those needs the person's answer, which is not a failure: it exits 0 with
 `"status": "needs_choice"` and a `then`. (It exited 1, which the app showed as a failed command.)
 Exit 2 is a call that could not start.
@@ -278,8 +283,37 @@ def summarise(inventory: dict) -> dict:
     }
 
 
+def _read(path: str, errors: str = "strict") -> str:
+    """A file the call names. Under the guard, one `_guard_inputs` passed, read without following a
+    link swapped in since (`_scratch_out.Refused` otherwise)."""
+    if _scratch_out.guarded():
+        return _scratch_out.read_file(_scratch_out._plain(path))
+    return Path(path).expanduser().read_text(encoding="utf-8", errors=errors)
+
+
+# The forms of --keep that name a file.
+_FILE_CHOICES = ("names:", "page:", "pick:")
+
+
+def _guard_inputs(args: argparse.Namespace) -> None:
+    """Under the guard, every file the call reads is a scratch file, and `--inventory` a scratch
+    file or the build's own `<artifacts_dir>/<profile>/.introspect/inventory.json`: a call steered
+    by text nobody vetted could otherwise have `--check-columns` echo the lines of any file."""
+    try:
+        _scratch_out.scratch_file(args.inventory, ("json",))
+    except _scratch_out.Refused:
+        _scratch_out.model_file(args.inventory, "<profile>", ".introspect", "inventory.json",
+                                profile_at=0)
+    named = [args.check_columns, *args.used_by]
+    if args.keep and args.keep.startswith(_FILE_CHOICES):
+        named.append(args.keep.split(":", 1)[1])
+    for f in named:
+        if f:
+            _scratch_out.scratch_file(f)
+
+
 def _read_names(path: str) -> list[str]:
-    lines = Path(path).expanduser().read_text(encoding="utf-8").splitlines()
+    lines = _read(path).splitlines()
     return [ln.strip().strip(",").strip("\"'`").strip() for ln in lines if ln.strip()]
 
 
@@ -326,7 +360,7 @@ def choose(inventory: dict, choice: str, shown: int = 0) -> tuple[list[str], dic
     if choice.startswith("page:"):
         return _from_page(inventory, choice[len("page:") :])
     if choice.startswith("pick:"):
-        text = Path(choice[len("pick:") :]).expanduser().read_text(encoding="utf-8")
+        text = _read(choice[len("pick:") :])
         return pick(inventory, text, shown)
     return [], {
         "unmatched": [choice],
@@ -340,7 +374,7 @@ _PAGE_KEYS = {"page", "profile", "keep"}
 def _from_page(inventory: dict, path: str) -> tuple[list[str], dict | None]:
     """The tables the picker page saved, checked against the inventory before anything is written."""
     try:
-        doc = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+        doc = json.loads(_read(path))
     except (OSError, UnicodeDecodeError, ValueError, RecursionError):
         return [], {"error": "the page's decisions file can't be read as JSON"}
     if not isinstance(doc, dict):
@@ -654,13 +688,18 @@ def main(argv: list[str] | None = None) -> int:
         help="a file of shared SQL or questions; adds the schemas it names as `used_schemas`",
     )
     args = ap.parse_args(argv)
-    if args.tables_out and _scratch_out.guarded():
-        try:
-            _scratch_out.scratch_file(args.tables_out)
-        except _scratch_out.Refused as e:
-            return _scratch_out.refuse("inventory_summary.py", e)
+    try:
+        if _scratch_out.guarded():
+            if args.tables_out:
+                _scratch_out.scratch_file(args.tables_out)
+            _guard_inputs(args)
+        return _run(args)
+    except _scratch_out.Refused as e:
+        return _scratch_out.refuse("inventory_summary.py", e)
 
-    inventory = json.loads(Path(args.inventory).expanduser().read_text(encoding="utf-8"))
+
+def _run(args: argparse.Namespace) -> int:
+    inventory = json.loads(_read(args.inventory))
     if args.show:
         result, ok = show(inventory, args.show)
         if not ok:
@@ -679,10 +718,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.keep:
         summary = summarise(inventory)
         if args.used_by:
-            text = "\n".join(
-                Path(f).expanduser().read_text(encoding="utf-8", errors="replace")
-                for f in args.used_by
-            )
+            text = "\n".join(_read(f, errors="replace") for f in args.used_by)
             summary["used_schemas"] = used_schemas(inventory, text)
         print(json.dumps(summary, indent=2))
         return 0
