@@ -19,9 +19,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import loader as L
-from .scratch import LinkedFile, open_one_name
 from .say_text import count as noun_count
 from .say_text import quoted
+from .scratch import LinkedFile, open_one_name
 
 STEP_IDS = (
     "connect",
