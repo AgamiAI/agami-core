@@ -66,15 +66,17 @@ agami_artifacts_dir() {
 # it would leave a stray ~/agami-artifacts behind.
 # `local/` and `tmp/` are made 0700, and an existing `local/` tightened to 0700: this runs before
 # every `sm` and `py` call, so it is usually what creates `local/`, and a plain `mkdir -p` under the
-# usual umask left it readable by anyone on the machine. A `local` that is a link is not chmod-ed.
+# usual umask left it readable by anyone on the machine. A `local` or `tmp` that is a link is left
+# alone, nothing made through it: that would create a folder wherever it points (`sm init-local`
+# refuses one and says how to fix it).
 agami_scratch_dir() {
   local art d
   art="$(agami_artifacts_dir)"
   d="$art/local/tmp"
-  if [ -d "$art" ]; then
+  if [ -d "$art" ] && [ ! -L "$art/local" ] && [ ! -L "$d" ]; then
     [ -d "$art/local" ] || mkdir -m 700 "$art/local" 2>/dev/null || true
     [ -d "$d" ] || mkdir -m 700 "$d" 2>/dev/null || true
-    [ -L "$art/local" ] || chmod 700 "$art/local" 2>/dev/null || true
+    chmod 700 "$art/local" 2>/dev/null || true
   fi
   printf '%s\n' "$d"
 }

@@ -28,6 +28,7 @@ from semantic_model import cli  # noqa: E402
 def art(tmp_path, monkeypatch) -> Path:
     art = tmp_path / "art"
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    monkeypatch.delenv("AGAMI_PYTHON", raising=False)
     return art.resolve() if art.exists() else Path(os.path.realpath(tmp_path)) / "art"
 
 
@@ -73,9 +74,19 @@ def test_sample_writes_the_sample_credential_once(art):
     assert example.read_text() == (
         f"[agami-example]\ntype = sqlite\npath = {art / 'local' / 'samples' / 'store.db'}\n"
     )
+    rc, out = _run(["init-local", str(art), "--sample"])  # the sample's own, from a re-run
+    assert rc == 0 and out["credentials_example"] == "exists"
+
+
+def test_the_sample_never_takes_over_another_connections_template(art):
+    """A template left by an earlier connection attempt is that connection's: promoted by the
+    sample flow it would connect the wrong database and lose the person's file. Refuse, keep it."""
+    _run(["init-local", str(art)])
+    example = art / "local" / "credentials.example"
     example.write_text("[acme]\ntype = postgres\n")  # the person's own template
     rc, out = _run(["init-local", str(art), "--sample"])
-    assert out["credentials_example"] == "exists"
+    assert rc == 2 and "credentials.example" in out["error"]
+    assert "acme" in out["error"] or "another" in out["error"]
     assert example.read_text() == "[acme]\ntype = postgres\n"
 
 
@@ -193,3 +204,246 @@ def test_a_linked_local_folder_is_refused(art, tmp_path):
     rc, out = _run(["set-config", str(art), "--tier", "cli"])
     assert rc == 2 and "link" in out["error"]
     assert not (elsewhere / ".config").exists()
+
+
+PLUGIN = Path(__file__).resolve().parent.parent / "plugins" / "agami"
+
+# A Python whose agami-core is missing and whose pip would install: every pip call leaves a mark.
+_SHIM_MISSING_WITH_PIP = """#!/bin/sh
+case "$1 $2" in
+  "-m pip") [ "$3" = "--version" ] && exit 0; echo "$*" >> "$PIP_MARK"; exit 0 ;;
+  "-c "*) exit 1 ;;
+esac
+exit 0
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell shim")
+@pytest.mark.parametrize(
+    "argv", [["choose-folder"], ["init-local"], ["init-local", "--sample"], ["set-config"]]
+)
+def test_setting_up_the_folder_never_installs(art, tmp_path, argv):
+    """Onboarding sets the folder up before the person has agreed to install agami's library, so
+    these verbs must stop with the install step (exit 12) instead of running pip themselves."""
+    import shutil
+    import subprocess
+
+    cache = tmp_path / "agami-core" / "0.0.1"  # a versioned cache folder: no dev checkout beside it
+    shutil.copytree(PLUGIN / "scripts", cache / "scripts")
+    shim = tmp_path / "pyshim"
+    shim.write_text(_SHIM_MISSING_WITH_PIP)
+    shim.chmod(0o755)
+    mark = tmp_path / "pip-calls"
+    env = {**os.environ, "AGAMI_PYTHON": str(shim), "PIP_MARK": str(mark)}
+    verb, *rest = argv
+    r = subprocess.run(
+        ["bash", str(cache / "scripts" / "sm"), verb, str(art), *rest],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert r.returncode == 12, r.stderr
+    assert not mark.exists(), mark.read_text()
+    assert 'sm" install' in r.stderr
+
+
+@pytest.fixture
+def first_run(tmp_path, monkeypatch) -> Path:
+    """A brand-new install: no AGAMI_ARTIFACTS_DIR, no saved pointer, nothing at the default."""
+    import agami_paths
+
+    monkeypatch.delenv("AGAMI_ARTIFACTS_DIR", raising=False)
+    home = Path(os.path.realpath(tmp_path))
+    monkeypatch.setattr(agami_paths, "POINTER_PATH", home / ".config" / "agami" / "path")
+    monkeypatch.setattr(agami_paths, "DEFAULT_ARTIFACTS_DIR", home / "agami-artifacts")
+    return home
+
+
+def test_the_first_run_with_a_folder_of_its_own_goes_through_the_verbs(first_run):
+    """agami-connect's first run, in its order: 0a.6 picks a folder other than the default and
+    `choose-folder` saves it, then 0a.1's `init-local` and 0a.7's `set-config` take that folder."""
+    import agami_paths
+
+    chosen = first_run / "code" / "acme-data" / "agami"
+    rc, out = _run(["choose-folder", str(chosen)])
+    assert rc == 0, out
+    assert out["artifacts_dir"] == str(chosen)
+    assert agami_paths.POINTER_PATH.read_text().strip() == str(chosen)
+    rc, out = _run(["init-local", str(chosen)])
+    assert rc == 0, out
+    assert (chosen / "local" / "tmp").is_dir()
+    rc, out = _run(["set-config", str(chosen), "--tier", "python", "--active-profile", "acme"])
+    assert rc == 0, out
+    doc = json.loads((chosen / "local" / ".config").read_text())
+    assert doc["artifacts_dir"] == str(chosen) and doc["active_profile"] == "acme"
+    assert not (first_run / "agami-artifacts").exists()  # no stray default folder
+
+
+@pytest.mark.parametrize("where", ["relative", "a file", "inside local"])
+def test_choose_folder_refuses_a_folder_it_cannot_use(first_run, where):
+    import agami_paths
+
+    (first_run / "agami-artifacts" / "local").mkdir(parents=True)
+    (first_run / "notes.txt").write_text("x")
+    target = {
+        "relative": "agami",
+        "a file": str(first_run / "notes.txt"),
+        "inside local": str(first_run / "agami-artifacts" / "local" / "x"),
+    }[where]
+    rc, out = _run(["choose-folder", target])
+    assert rc == 2 and "error" in out
+    assert not agami_paths.POINTER_PATH.exists()
+
+
+def test_a_new_folder_under_the_env_override_says_how_to_switch(first_run, monkeypatch):
+    """Connecting a different company picks a new folder, but AGAMI_ARTIFACTS_DIR outranks the
+    saved pointer, so saving it would change nothing: refuse before writing, and say what to change."""
+    import agami_paths
+
+    current = first_run / "acme"
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(current))
+    new = first_run / "demo"
+    rc, out = _run(["choose-folder", str(new)])
+    assert rc == 2
+    assert "AGAMI_ARTIFACTS_DIR" in out["error"] and str(new) in out["error"]
+    assert "restart" in out["error"]
+    assert not agami_paths.POINTER_PATH.exists()
+    rc, out = _run(["init-local", str(new)])
+    assert rc == 2 and "AGAMI_ARTIFACTS_DIR" in out["error"] and "restart" in out["error"]
+    assert not new.exists()
+    rc, out = _run(["choose-folder", str(current)])  # the folder it already names is fine
+    assert rc == 0, out
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks")
+@pytest.mark.parametrize("linked", ["local", "local/tmp"])
+@pytest.mark.parametrize("sample", [False, True])
+def test_init_local_writes_nothing_through_a_linked_folder(art, tmp_path, linked, sample):
+    """A linked `local/` (or `local/tmp`) would put the scratch folder and the credential template
+    wherever it points, outside the artifacts folder and outside its 0700 `local/`."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (art / "local").parent.mkdir(parents=True, exist_ok=True)
+    if linked == "local":
+        (art / "local").symlink_to(elsewhere)
+    else:
+        (art / "local").mkdir(mode=0o700)
+        (art / "local" / "tmp").symlink_to(elsewhere)
+    rc, out = _run(["init-local", str(art), *(["--sample"] if sample else [])])
+    assert rc == 2 and "link" in out["error"]
+    assert list(elsewhere.iterdir()) == []
+    assert not (art / ".gitignore").exists()  # refused before any write
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks")
+def test_the_launchers_scratch_folder_is_never_made_through_a_linked_local(art, tmp_path):
+    """`_python.sh` makes `local/tmp` before every `sm` and `py` call; through a linked `local` that
+    would create a folder wherever the link points."""
+    import subprocess
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "local").symlink_to(elsewhere)
+    script = f'. "{PLUGIN / "scripts" / "_python.sh"}"; agami_scratch_dir'
+    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(art)}
+    subprocess.run(["bash", "-c", script], env=env, check=True, capture_output=True, timeout=30)
+    assert list(elsewhere.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "existing",
+    ["local/\n!local/\n", "/local/\n!/local\n", "local\n!loc*\n", "*\n!local/\n"],
+)
+def test_a_later_negation_does_not_cancel_the_exclusion(art, existing):
+    """git takes the last rule that matches, so a `local/` line followed by `!local/` ignores
+    nothing. The exclusion is checked by that rule, and made the last word when it isn't."""
+    import shutil
+    import subprocess
+
+    art.mkdir(parents=True)
+    (art / ".gitignore").write_text(existing)
+    rc, out = _run(["init-local", str(art)])
+    assert rc == 0, out
+    assert out["gitignore"] == "added_local"
+    assert (art / ".gitignore").read_text().startswith(existing)  # the person's lines kept
+    if shutil.which("git"):
+        subprocess.run(["git", "init", "-q", str(art)], check=True)
+        r = subprocess.run(["git", "-C", str(art), "check-ignore", "-q", "local/credentials"])
+        assert r.returncode == 0
+
+
+@pytest.mark.parametrize("existing", ["local/\n", "# x\n/local/\n!other\n", "local\n"])
+def test_an_effective_exclusion_is_left_as_it_is(art, existing):
+    art.mkdir(parents=True)
+    (art / ".gitignore").write_text(existing)
+    rc, out = _run(["init-local", str(art)])
+    assert rc == 0 and out["gitignore"] == "had_local"
+    assert (art / ".gitignore").read_text() == existing
+
+
+@pytest.mark.parametrize("broken", ["a folder", "read-only"])
+def test_no_credential_template_without_the_exclusion(art, broken):
+    """When `.gitignore` can't be made to ignore `local/`, setup stops with an error before the
+    credential template exists: a credential must never be one `git add` away from a commit."""
+    art.mkdir(parents=True)
+    gi = art / ".gitignore"
+    if broken == "a folder":
+        gi.mkdir()
+    else:
+        if os.name == "nt" or os.geteuid() == 0:
+            pytest.skip("POSIX permissions, not root")
+        gi.write_text("*.bak\n")
+        gi.chmod(0o444)
+    rc, out = _run(["init-local", str(art), "--sample"])
+    assert rc == 2 and ".gitignore" in out["error"]
+    assert not (art / "local" / "credentials.example").exists()
+
+
+def _interpreter(folder: Path, name: str) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    exe = folder / name
+    exe.write_text("#!/bin/sh\nexit 0\n")
+    exe.chmod(0o755)
+    return exe
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executables")
+@pytest.mark.parametrize("pin", ["bare name", "custom name"])
+def test_the_agami_python_pin_is_saved_as_an_absolute_path(art, tmp_path, monkeypatch, pin):
+    """Both launchers run `$AGAMI_PYTHON` as given, and the resolve step reports it as given, so
+    set-config takes that value and saves the executable it names, whatever it is called."""
+    bin_dir = Path(os.path.realpath(tmp_path)) / "bin"
+    if pin == "bare name":
+        exe = _interpreter(bin_dir, "python3")
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        given = "python3"
+    else:
+        exe = _interpreter(bin_dir, "acme-interp")
+        given = str(exe)
+    monkeypatch.setenv("AGAMI_PYTHON", given)
+    _run(["init-local", str(art)])
+    rc, out = _run(["set-config", str(art), "--python3", given])
+    assert rc == 0, out
+    doc = json.loads((art / "local" / ".config").read_text())
+    assert doc["tool_paths"]["python3"] == str(exe)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executables")
+def test_only_the_pin_or_the_configured_one_may_have_another_name(art, tmp_path, monkeypatch):
+    """set-config chooses what later calls run, so a custom-named executable is taken only when
+    it is what `$AGAMI_PYTHON` names or what `.config` already runs, never just any path."""
+    bin_dir = Path(os.path.realpath(tmp_path)) / "bin"
+    pinned, other = _interpreter(bin_dir, "acme-interp"), _interpreter(bin_dir, "demo-tool")
+    _run(["init-local", str(art)])
+    rc, out = _run(["set-config", str(art), "--python3", str(pinned)])  # no pin
+    assert rc == 2 and "Python" in out["error"]
+    monkeypatch.setenv("AGAMI_PYTHON", str(pinned))
+    rc, out = _run(["set-config", str(art), "--python3", str(other)])  # not the pin
+    assert rc == 2 and "Python" in out["error"]
+    rc, out = _run(["set-config", str(art), "--python3", str(pinned)])
+    assert rc == 0, out
+    monkeypatch.delenv("AGAMI_PYTHON")
+    rc, out = _run(["set-config", str(art), "--python3", str(pinned)])  # already configured
+    assert rc == 0, out

@@ -1031,7 +1031,9 @@ def test_0a_0_before_you_start_comes_before_the_database_card():
         assert item in s, item
     # both paths through Phase 0a start here
     top = _between("## Phase 0a:", "### 0a.1 ")
-    assert top.count("**0a.0** → 0a.1 → 0a.2") == 2
+    # …and both agree to the library install (0a.5b) and choose the folder (0a.6) before 0a.1 sets
+    # it up: setting it up never installs, and acts only on the folder agami has saved
+    assert top.count("**0a.0** → 0a.5b → 0a.6 → 0a.1 → 0a.2") == 2
 
 
 def test_0a_0_asks_the_organisation_and_the_source_system_as_their_own_first_questions():

@@ -48,6 +48,12 @@ export AGAMI_PLUGIN_ROOT="${AGAMI_PLUGIN_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 NO_INSTALL_VERBS="steps progress summary overview areas coverage review-queue review-items model-tree bundle batch-id"
 APPROVED_VERB=""
 case " $NO_INSTALL_VERBS " in *" ${1:-} "*) APPROVED_VERB=1 ;; esac
+# The verbs that set up the artifacts folder run before the person is asked about installing the
+# library (agami-connect asks for `sm install` first), so they never install either: they ask for the
+# hook's approval like any write, but a missing or stale library stops them with the install step.
+SETUP_VERBS="choose-folder init-local set-config"
+SETUP_VERB=""
+case " $SETUP_VERBS " in *" ${1:-} "*) SETUP_VERB=1 ;; esac
 
 . "$SCRIPT_DIR/_python.sh"   # usable_python / path_python / config_python / resolve_python
 # The skills write scratch files there; make sure it exists. Not for an approved verb, which writes
@@ -243,7 +249,7 @@ STALE_LIBRARY_EXIT=12
 # These verbs never reach ensure_pkg, not even after the check passes: it probes again and installs
 # on a failure, so a library update landing in between would turn an approved call into an install.
 INSTALL_HINT="agami's library needs installing or updating: run  bash \"$(cd "$SCRIPT_DIR/.." && pwd)/scripts/sm\" install"
-if [ -n "$APPROVED_VERB" ]; then
+if [ -n "$APPROVED_VERB" ] || [ -n "$SETUP_VERB" ]; then
   if ! { _imports_ok && _version_ok; }; then
     echo "$INSTALL_HINT" >&2
     exit "$STALE_LIBRARY_EXIT"
