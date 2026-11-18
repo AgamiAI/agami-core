@@ -267,26 +267,43 @@ def _where(t: Table, c: str) -> str:
     return INTRO._qualified_column(t, c)
 
 
-def _covered(org: Datasource, sg: Optional[str]) -> dict[tuple, set[str]]:
-    """(table, column) of each column a served join reads from -> the tables it joins it to. A
-    column in a composite key to one table can still reference another on its own."""
+def _identity(tables: list[Table], name: str, schema: Optional[str]) -> Optional[tuple[str, str]]:
+    """`(schema, table)` of a relationship's table reference. One written without a schema reads the
+    served table of that name when exactly one carries it; with several it names none of them (None)."""
+    key = table_key(name, schema)
+    if key[0]:
+        return key
+    hits = {table_key(t.name, t.schema_name) for t in tables if table_key(t.name, t.schema_name)[1] == key[1]}
+    if len(hits) > 1:
+        return None
+    return next(iter(hits), key)
+
+
+def _covered(org: Datasource, sg: Optional[str]) -> dict[tuple, set[tuple[str, str]]]:
+    """(schema, table, column) of each column a served join reads from -> the (schema, table)s it
+    joins it to. A column in a composite key to one table can still reference another on its own.
+    Schemas are kept: `sales.child -> sales.parent` says nothing about `archive.child`."""
     rels = [r for sa in org.subject_areas for r in sa.relationships] + list(
         org.cross_subject_area_relationships
     )
-    out: dict[tuple, set[str]] = {}
+    tables = _tables(org)
+    out: dict[tuple, set[tuple[str, str]]] = {}
     for r in rels:
         if r.review_state in INTRO._UNSERVED:
             continue
+        src = _identity(tables, r.from_table, r.from_schema)
+        dst = _identity(tables, r.to_table, r.to_schema)
+        if src is None or dst is None:
+            continue
         for fc, _tc in INTRO._column_pairs(r, sg) or []:
-            key = (table_key(r.from_table, r.from_schema)[1], fc.lower())
-            out.setdefault(key, set()).add(table_key(r.to_table, r.to_schema)[1])
+            out.setdefault((*src, fc.lower()), set()).add(dst)
     return out
 
 
-def _joined(covered: dict[tuple, set[str]], t: Table, c: Column, u: Optional[Table]) -> bool:
+def _joined(covered: dict[tuple, set[tuple[str, str]]], t: Table, c: Column, u: Optional[Table]) -> bool:
     """A join already reads `c`: to `u` when the statement resolved, else to any table."""
-    to = covered.get((table_key(t.name, t.schema_name)[1], c.name.lower()))
-    return bool(to) and (u is None or table_key(u.name, u.schema_name)[1] in to)
+    to = covered.get((*table_key(t.name, t.schema_name), c.name.lower()))
+    return bool(to) and (u is None or table_key(u.name, u.schema_name) in to)
 
 
 @dataclass

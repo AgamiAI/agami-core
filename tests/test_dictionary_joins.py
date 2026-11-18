@@ -457,3 +457,57 @@ def test_the_entity_form_resolves_only_through_one_anchoring_table(tmp_path, mon
     assert found.candidates == [] and [u["reason"] for u in found.unresolved] == [
         "no one table carries that entity"
     ]
+
+
+# ---- schemas stay part of a covered join's identity (#698) ---------------------------------------------
+
+
+def _two_schema_org(*rels):
+    from types import SimpleNamespace
+
+    from semantic_model.models import Column, Relationship, Table
+
+    def table(schema: str, name: str, col: str) -> Table:
+        return Table.model_validate(
+            {"name": name, "schema": schema, "columns": [Column(name=col, type="string")]}
+        )
+
+    tables = [
+        table("sales", "child", "parent_ref"),
+        table("sales", "parent", "pkey"),
+        table("archive", "child", "parent_ref"),
+        table("archive", "parent", "pkey"),
+    ]
+    relationships = [
+        Relationship(
+            from_table=ft, to_table=tt, from_schema=fs, to_schema=ts, from_column="parent_ref",
+            to_column="pkey", relationship="many_to_one",
+        )
+        for ft, fs, tt, ts in rels
+    ]
+    sa = SimpleNamespace(tables_defined=tables, relationships=relationships, entities=[])
+    return SimpleNamespace(
+        subject_areas=[sa], cross_subject_area_relationships=[], cross_subject_area_entities=[]
+    ), tables
+
+
+def test_a_join_in_one_schema_does_not_cover_the_same_named_tables_of_another():
+    org, (s_child, s_parent, a_child, a_parent) = _two_schema_org(
+        ("child", "sales", "parent", "sales")
+    )
+    covered = DJ._covered(org, None)
+    col = s_child.columns[0]
+    assert DJ._joined(covered, s_child, col, s_parent)
+    assert not DJ._joined(covered, a_child, col, a_parent)
+    assert not DJ._joined(covered, a_child, col, None)
+
+
+def test_a_reference_with_no_schema_reads_the_one_served_table_it_names_else_nothing():
+    org, (s_child, s_parent, a_child, a_parent) = _two_schema_org(("child", None, "parent", None))
+    assert DJ._covered(org, None) == {}  # two schemas carry both names: ambiguous, not covered
+    org, tables = _two_schema_org(("child", None, "parent", None))
+    only = org.subject_areas[0]
+    only.tables_defined = tables[:2]
+    covered = DJ._covered(org, None)
+    assert DJ._joined(covered, tables[0], tables[0].columns[0], tables[1])
+    assert not DJ._joined(covered, tables[2], tables[2].columns[0], tables[3])
