@@ -3188,6 +3188,15 @@ def _named_for(column: str, target: Table) -> bool:
     return stem[0] == tn[0] and all(ch in rest for ch in stem)
 
 
+def _names_table(column: str, target: Table) -> bool:
+    """`_named_for`, or the same with the key suffix run on (`orderid` -> `orders`)."""
+    low, tn = column.lower(), target.name.lower()
+    if _named_for(column, target):
+        return True
+    stem = low[:-2] if low.endswith("id") and "_" not in low else ""
+    return len(stem) >= 3 and _singular(tn) == stem
+
+
 def _candidate_pairs(rels: list[Relationship], tables: list[Table], dialect: Optional[str],
                      read: Optional[set[str]] = None) -> Iterator[tuple[int, Table, Column, Table, str]]:
     """Every (priority, table, column, target, key) the wider scan tests: a column no join reads from,
@@ -3229,9 +3238,10 @@ def _candidate_pairs(rels: list[Relationship], tables: list[Table], dialect: Opt
             # So does any whole number: sequential ids overlap by accident (one 52-table schema had
             # about 3,400 such pairs), so an integer needs its name, or the dictionary (#694), to back it.
             needs_name = bool(c.choice_field or c.primary_key or c.type == "integer")
-            columns.append((t, c, measure, needs_name, _own_key(t, c.name), shared))
+            whole = c.type == "integer" and not (c.choice_field or c.primary_key)
+            columns.append((t, c, measure, needs_name, _own_key(t, c.name), shared, whole))
     for level in (0, 1, 2):
-        for t, c, measure, needs_name, own, shared in columns:
+        for t, c, measure, needs_name, own, shared, whole in columns:
             for u, k, kc in keys:
                 # A table's own key never points at another table's own key: two record ids match
                 # only by chance, and between same-named ids that is every pair of tables. A shared
@@ -3246,7 +3256,10 @@ def _candidate_pairs(rels: list[Relationship], tables: list[Table], dialect: Opt
                     prio = 1 if _name_hint(c.name, u) else 2
                 else:
                     continue
-                if prio == level and not (needs_name and prio == 2):
+                # A whole number's name backs it when it names the target table (`acct_no`,
+                # `orderid`); one named for its role (`manager_id`) needs the dictionary.
+                named = whole and prio == 2 and _names_table(c.name, u)
+                if prio == level and not (needs_name and prio == 2 and not named):
                     yield prio, t, c, u, k
 
 

@@ -352,3 +352,17 @@ def test_a_refresh_tells_filtered_joins_apart_by_their_literals():
                                     relationship="many_to_one")
     assert not I._same_join(rel(on.format("Y")), rel(on.format("y")))
     assert I._same_join(rel(on.format("Y")), rel("  " + on.format("Y").upper().replace(" AND ", "  and ")))
+
+
+def test_a_whole_number_named_for_its_table_is_scanned_and_one_named_for_nothing_is_not():
+    """An integer is tested when its name names the target (`acct_no` -> accounts, `prd_key` ->
+    products, `orderid` -> orders); on type overlap alone, or a name for its role, it is not."""
+    ints = ["acct_no", "prd_key", "orderid", "widget", "manager_id"]
+    tables = [_t("accounts", [_ID], grain=["id"]), _t("orders", [_ID], grain=["id"]),
+              _t("products", [_ID], grain=["id"]),
+              _t("lines", [_ID, *({"name": n, "type": "integer"} for n in ints)], grain=["id"])]
+    pairs = {(c.name, u.name) for _, t, c, u, _k in I._candidate_pairs([], tables, None)
+             if t.name == "lines"}
+    assert {("acct_no", "accounts"), ("prd_key", "products"), ("orderid", "orders")} <= pairs
+    assert not any(c in ("widget", "manager_id") for c, _ in pairs)
+    assert ("acct_no", "orders") not in pairs and ("orderid", "accounts") not in pairs

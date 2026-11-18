@@ -84,9 +84,13 @@ below corresponds to one such version.
 
 - **A whole-number column is no longer offered as a join on its values alone** (#694). Sequential
   ids overlap by accident (one 52-table schema had about 3,400 such pairs), so the join-candidate
-  scan now tests an integer column only when its name points at the other table or key; one the
-  data dictionary calls a reference is checked by `sm dictionary-joins`. Text and UUID columns are
-  tested by type as before.
+  scan now tests an integer column only when its name points at the other table or key: the key's
+  own name, `<table>_id`, a name starting with the table's (`cust_ref`), an abbreviation with a key
+  suffix (`acct_no` -> accounts, `prd_key` -> products), or `<table>id` (`orderid` -> orders).
+  **Now found only through the dictionary or a declared foreign key:** an integer reference named
+  for its role rather than its table, such as `manager_id` -> employees, `created_by` -> users or
+  `bill_to_customer_id` -> customers; `sm dictionary-joins` checks one the data dictionary calls a
+  reference. Text and UUID columns are tested by type as before.
 - **Every agami-connect command is one literal call, pre-approved one rule per command.** The skill
   and the shared files it links write each command as the launcher and its arguments, every path in
   full: no `$ROOT` or `$PY`, no pipe, `;`, `&&` or redirect (the DuckDB heredocs in
