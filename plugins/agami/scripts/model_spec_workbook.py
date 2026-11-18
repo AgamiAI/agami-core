@@ -213,9 +213,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     if errors:
         print(json.dumps({"errors": errors}, indent=2))
         return 1
-    _scratch_out.write_text(Path(a.out), json.dumps(spec, indent=2))
+    _scratch_out.save(Path(a.out), json.dumps(spec, indent=2))
     if a.tables_out:
-        _scratch_out.write_text(Path(a.tables_out), "\n".join(allow) + "\n")
+        _scratch_out.save(Path(a.tables_out), "\n".join(allow) + "\n")
     print(json.dumps({"spec": a.out, "tables_file": a.tables_out, **summary(spec)}, indent=2))
     return 0
 

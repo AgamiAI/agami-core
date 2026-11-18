@@ -128,7 +128,7 @@ def model_file(path: str, *rel: str, profile_at: int | None = None) -> Path:
     return p
 
 
-def write_text(path: Path, text: str) -> None:
+def save(path: Path, text: str) -> None:
     """Write `text` to `path` in one step: a fresh temp file beside it, then a rename, so a link
     planted at the name is replaced and never written through."""
     path.parent.mkdir(parents=True, exist_ok=True)

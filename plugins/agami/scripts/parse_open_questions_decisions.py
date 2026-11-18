@@ -264,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
     data, refused, error = parse(doc, items, args.expect_profile)
     if error:
         return _fail(error)
-    _scratch_out.write_text(out, json.dumps(data["ops"], indent=2))
+    _scratch_out.save(out, json.dumps(data["ops"], indent=2))
     print(
         json.dumps(
             {

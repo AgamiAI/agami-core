@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     if not inventory.get("tables"):
         print(json.dumps({"error": "the inventory lists no tables"}))
         return 1
-    _scratch_out.write_text(out, render(inventory))
+    _scratch_out.save(out, render(inventory))
     data = page_data(inventory)
     flagged = sum(1 for r in data["tables"] if r["why"])
     print(

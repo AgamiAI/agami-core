@@ -673,7 +673,7 @@ def main(argv: list[str] | None = None) -> int:
     if not kept:
         return _needs_choice({"error": "no tables kept"}, THEN_NONE_KEPT)
     out = Path(args.tables_out).expanduser()
-    _scratch_out.write_text(out, "".join(t + "\n" for t in kept))
+    _scratch_out.save(out, "".join(t + "\n" for t in kept))
     print(json.dumps({"tables_file": str(out), "kept": len(kept)}))
     return 0
 

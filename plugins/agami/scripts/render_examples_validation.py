@@ -214,7 +214,7 @@ def main() -> int:
     elif args.save_to_helper:
         signoff = saved_signoff(Path(os.path.expanduser(args.artifacts_dir)))
         html = make_saving(html, signoff, back_label=EXAMPLES_BACK_LABEL)
-    _scratch_out.write_text(out_path, html)
+    _scratch_out.save(out_path, html)
     # render() normalized `n` to a stable global 1..N (in place). Persist it back so a later
     # apply pass ("edit N" -> the N-th example) resolves against the SAME numbering the dashboard
     # showed — regardless of the per-area numbers the caller wrote. Atomic (temp + os.replace) so a
@@ -225,7 +225,7 @@ def main() -> int:
         items_path = os.path.expanduser(path)
         try:
             # A fresh temp name, never a fixed `<file>.tmp` a planted link could redirect.
-            _scratch_out.write_text(Path(items_path), json.dumps(doc))
+            _scratch_out.save(Path(items_path), json.dumps(doc))
         except OSError as e:
             sys.stderr.write(f"warning: could not normalize {items_path}: {e}\n")
     print(f"Wrote {out_path} ({len(items)} example{'s' if len(items) != 1 else ''})")

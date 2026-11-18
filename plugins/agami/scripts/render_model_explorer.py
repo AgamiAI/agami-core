@@ -391,10 +391,10 @@ def main() -> int:
         html = make_read_only(html)
     elif args.save_to_helper:
         html = make_saving(html, signoff)
-    _scratch_out.write_text(out_path, html)
+    _scratch_out.save(out_path, html)
 
     if mpath is not None:
-        _scratch_out.write_text(mpath, json.dumps(manifest, indent=2))
+        _scratch_out.save(mpath, json.dumps(manifest, indent=2))
 
     t = manifest["totals"]
 

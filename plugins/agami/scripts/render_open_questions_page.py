@@ -202,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     rows = page_rows(out_doc)
-    _scratch_out.write_text(page, render(out_doc, profile=args.profile, signoff=signoff))
+    _scratch_out.save(page, render(out_doc, profile=args.profile, signoff=signoff))
     kinds = [r["kind"] for r in rows]
     print(
         json.dumps(
