@@ -478,10 +478,11 @@ def _two_schema_org(*rels):
         table("archive", "child", "parent_ref"),
         table("archive", "parent", "pkey"),
     ]
+    PARENT_COL = "pkey"
     relationships = [
         Relationship(
             from_table=ft, to_table=tt, from_schema=fs, to_schema=ts, from_column="parent_ref",
-            to_column="pkey", relationship="many_to_one",
+            to_column=PARENT_COL, relationship="many_to_one",
         )
         for ft, fs, tt, ts in rels
     ]
