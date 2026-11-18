@@ -117,6 +117,9 @@ below corresponds to one such version.
   existing one; `.config` is written 0600.
 - **`py <name>.py` runs only the plugin's own script of that name**, never a file of that name in the
   current folder.
+- **A grouping label is never a figure on the receipt.** An output column the final query groups by
+  (by name, position or the same expression) is `aggregate: false` even when a step took its `MAX`
+  to collapse duplicates, so a consumer no longer describes the label as a computed number.
 
 ## [0.9.24] — 2026-11-17
 

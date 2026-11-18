@@ -4810,8 +4810,10 @@ def assemble_receipt(
             # Whether the projection aggregates (SUM, COUNT, AVG, ...). A plain column in a list
             # query computes nothing a metric could define, so a reader that grades "matches no
             # metric" reads this first and says nothing about such a column.
-            # Followed through steps (ACE-178): a column passing on a step's count aggregates.
-            "aggregate": result.aggregating,
+            # Followed through steps (ACE-178): a column passing on a step's count aggregates. A
+            # column the SELECT it is projected in groups by is that answer's label, never a figure,
+            # whatever a step did to it (a `MAX(priority)` collapsing duplicates per row).
+            "aggregate": result.aggregating and not _is_own_group_key(oc),
             # The same scope label `tables` and `joins` carry, from the same composer, so a reader
             # can join the three sections on it for a column that appears in more than one.
             "scope": oc.scope,
@@ -10861,6 +10863,30 @@ def _group_columns(sel: "exp.Select") -> list:
         if isinstance(g, exp.Column):
             out.append(g)
     return out
+
+
+def _is_own_group_key(oc: "OutputColumn") -> bool:
+    """Whether an output column is one of the keys its own SELECT groups by: named by its alias,
+    its position, or the same expression (a plain column by name, its qualifier aside). A value that
+    aggregates in its own right (`SUM(x)`), or holds a subquery, is never a key here."""
+    expr, sel = oc.expr, oc.sel
+    group = sel.args.get("group") if isinstance(sel, exp.Select) else None
+    if expr is None or group is None or _own_nodes(expr, exp.AggFunc) or _has(expr, exp.Select):
+        return False
+    position = next((n for n, p in enumerate(sel.expressions, 1)
+                     if (p.this if isinstance(p, exp.Alias) else p) is expr), None)
+    if position is None:
+        return False
+    alias = sel.expressions[position - 1].alias
+    for g in group.expressions:
+        if isinstance(g, exp.Literal) and g.is_int and int(g.name) == position:
+            return True
+        if isinstance(g, exp.Column) and not g.table and alias and _tkey(g.name) == _tkey(alias):
+            return True
+        if g == expr or (isinstance(g, exp.Column) and isinstance(expr, exp.Column)
+                         and _tkey(g.name) == _tkey(expr.name)):
+            return True
+    return False
 
 
 def _group_by_items(sel: "exp.Select") -> "tuple | None":
