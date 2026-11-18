@@ -41,8 +41,23 @@ GIT_BASE="git+https://github.com/AgamiAI/agami-core"
 # direct caller didn't, so no command depends on the caller remembering to export it.
 export AGAMI_PLUGIN_ROOT="${AGAMI_PLUGIN_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+# The verbs the permission hook (approve_own_calls.py, VERBS) approves with no prompt never install:
+# an install is a network fetch that runs build code, which the person must agree to. A missing or
+# stale library stops them with how to install it. tests/test_approve_own_calls.py holds this list
+# and the hook's table equal.
+NO_INSTALL_VERBS="areas coverage review-queue review-items model-tree bundle"
+APPROVED_VERB=""
+case " $NO_INSTALL_VERBS " in *" ${1:-} "*) APPROVED_VERB=1 ;; esac
+
 . "$SCRIPT_DIR/_python.sh"   # usable_python / path_python / config_python / resolve_python
-agami_scratch_dir >/dev/null   # the skills write scratch files there; make sure it exists
+# The skills write scratch files there; make sure it exists. Not for an approved verb, which writes
+# nothing: `mkdir -p` follows a linked <artifacts_dir>/local and would create a folder wherever it
+# points, before anyone agreed to anything. Nor does Python cache bytecode for one.
+if [ -n "$APPROVED_VERB" ]; then
+  export PYTHONDONTWRITEBYTECODE=1
+else
+  agami_scratch_dir >/dev/null
+fi
 
 PY="$(resolve_python)"
 if [ -z "$PY" ]; then
@@ -205,11 +220,6 @@ if [ "${1:-}" = "install" ]; then
   exit 0
 fi
 
-# The verbs the permission hook (approve_own_calls.py, VERBS) approves with no prompt never install:
-# an install is a network fetch that runs build code, which the person must agree to. A missing or
-# stale library stops them with how to install it. tests/test_approve_own_calls.py holds this list
-# and the hook's table equal.
-NO_INSTALL_VERBS="areas coverage review-queue review-items model-tree bundle"
 # The refusal has a code of its own. 3 already means "no model here" to the skills (a first `sm areas`
 # exiting 3 sends the person to agami-connect), so a library left stale by a plugin update would send
 # them to set up a database that is already connected. 12 is used by nothing sm runs or passes
@@ -217,14 +227,14 @@ NO_INSTALL_VERBS="areas coverage review-queue review-items model-tree bundle"
 STALE_LIBRARY_EXIT=12
 # These verbs never reach ensure_pkg, not even after the check passes: it probes again and installs
 # on a failure, so a library update landing in between would turn an approved call into an install.
-case " $NO_INSTALL_VERBS " in
-  *" ${1:-} "*)
-    if ! { _imports_ok && _version_ok; }; then
-      echo "agami's library needs installing or updating: run  bash \"$(cd "$SCRIPT_DIR/.." && pwd)/scripts/sm\" install" >&2
-      exit "$STALE_LIBRARY_EXIT"
-    fi ;;
-  *) ensure_pkg ;;
-esac
+if [ -n "$APPROVED_VERB" ]; then
+  if ! { _imports_ok && _version_ok; }; then
+    echo "agami's library needs installing or updating: run  bash \"$(cd "$SCRIPT_DIR/.." && pwd)/scripts/sm\" install" >&2
+    exit "$STALE_LIBRARY_EXIT"
+  fi
+else
+  ensure_pkg
+fi
 # Run the CLI from a neutral cwd so a `semantic_model` in the caller's cwd can't shadow the installed
 # package via `python -m` putting cwd on sys.path[0].
 # PYTHONSAFEPATH (3.11+; ignored below) is a belt-and-suspenders second guard; `cd /` is the portable

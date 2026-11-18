@@ -193,6 +193,56 @@ def test_an_approved_call_changes_no_file(art, args):
     assert snapshot() == before
 
 
+def _tree(top: Path) -> dict[str, tuple]:
+    """Every entry under `top`, links not followed: kind, and a file's bytes and mtime."""
+    out: dict[str, tuple] = {}
+    for dirpath, dirs, files in os.walk(top):
+        for name in dirs + files:
+            p = Path(dirpath) / name
+            if p.is_symlink():
+                out[str(p)] = ("link", os.readlink(p))
+            elif p.is_dir():
+                out[str(p)] = ("dir",)
+            else:
+                out[str(p)] = ("file", p.read_bytes(), p.stat().st_mtime_ns)
+    return out
+
+
+@SYMLINKS
+@pytest.mark.parametrize("args", APPROVED)
+def test_an_approved_call_through_the_launcher_changes_no_file(art, tmp_path, args):
+    """The same promise through the real `sm`, the way the hook lets it run, with <artifacts_dir>/local
+    a link to a folder elsewhere: the launcher's own setup (the scratch folder, Python's bytecode
+    cache) writes nothing, there or anywhere under the test's folder."""
+    pytest.importorskip("pydantic")
+    from semantic_model import cli
+
+    shutil.rmtree(art / "acme")
+    shutil.copytree(PLUGIN / "samples" / "store" / "model", art / "acme")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    shutil.rmtree(art / "local")
+    (art / "local").symlink_to(elsewhere)
+    filled = args.format(R=str(art / "acme")).split()
+    if "--area" in filled:
+        filled[filled.index("--area") + 1] = (
+            cli.L.load_datasource(art / "acme").subject_areas[0].name
+        )
+    env = {
+        **os.environ,
+        "AGAMI_ARTIFACTS_DIR": str(art),
+        "HOME": str(tmp_path),
+        "AGAMI_PYTHON": sys.executable,
+    }
+    before = _tree(tmp_path)
+    proc = subprocess.run(
+        ["bash", SM, *filled], capture_output=True, env=env, cwd=tmp_path, timeout=120
+    )
+    assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+    assert _tree(tmp_path) == before
+    assert list(elsewhere.iterdir()) == []
+
+
 # --- what an approved verb reads: only files inside the model folder --------------------------------
 # The hook checks the folder a call names, but the model inside it names more files: a storage `ref`,
 # a subject area's path, a link. Before this, a ref to a credentials file outside the model reached
