@@ -1,11 +1,11 @@
-"""Where a pre-approved plugin script may write, or serve from, under `AGAMI_SCRATCH_ONLY=1`.
+"""Where a plugin script may write, or serve from, under `AGAMI_SCRATCH_ONLY=1`.
 
-agami-connect pre-approves its page renderers, page parsers, `serve_page.py`, `progress_page.py`,
+agami-connect runs its page renderers, page parsers, `serve_page.py`, `progress_page.py`,
 `inventory_summary.py`, `model_spec_workbook.py` and the sample builder, and onboarding reads rows
 and documents nobody vetted. Each of those scripts takes an output path (`--out`, `--tables-out`,
 `--ops-out`, ...), and one steered by such text could otherwise overwrite any file the person owns
-with no prompt. So the skill runs them with `AGAMI_SCRATCH_ONLY=1` in front (its rules name that
-prefix), and under it every path a script writes or serves is one of:
+once approved. So the skill runs them with `AGAMI_SCRATCH_ONLY=1` in front (defence in depth: no
+skill pre-approves them today), and under it every path a script writes or serves is one of:
 
   * a scratch file: directly inside `<artifacts_dir>/local/tmp/` (no link on the way), named
     `agami-<...>.<ext>`, and, when it already exists, a regular file that is neither a link nor a
@@ -15,8 +15,7 @@ prefix), and under it every path a script writes or serves is one of:
 
 Anything else is refused with a plain message and nothing is written. Writes go to a fresh temp file
 in the same folder and are renamed over the name, so a link planted at the name is replaced, never
-written through. Without the guard nothing changes: a call without the prefix is not pre-approved,
-so the person is asked. This mirrors `semantic_model/scratch.py`, kept stdlib-only and in the plugin
+written through. Without the guard nothing changes. This mirrors `semantic_model/scratch.py`, kept stdlib-only and in the plugin
 so a stale installed agami-core can't weaken it. Stdlib only.
 """
 

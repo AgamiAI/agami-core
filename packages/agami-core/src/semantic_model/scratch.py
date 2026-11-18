@@ -1,7 +1,7 @@
 """The files a skill hands the CLI, and the only places the CLI writes a file it is told to.
 
 A skill passes free text, ops and lists through files it wrote with its Write tool into
-`<artifacts_dir>/local/tmp/`, named `agami-…`. A call can be pre-approved (a skill's `allowed-tools`),
+`<artifacts_dir>/local/tmp/`, named `agami-…`. A call can be approved with no prompt (agami's permission hook),
 and the text that steers the model during onboarding includes rows and documents nobody vetted, so
 a file option that read any path would let such text copy `~/.aws/credentials` into the org record
 or `datasource.yaml`. These are the rules, the same as the permission hook's `scratch_file`:
@@ -29,8 +29,9 @@ PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 TEXT_CAP = 1024 * 1024
 INPUT_CAP = 16 * 1024 * 1024
 # Set on a call to mean every file it names, in or out, follows the rules above. The skills put it
-# in front of the calls their `allowed-tools` pre-approve, so a pre-approved call can't be pointed
-# at another file; a person typing the command without it can still name any file.
+# in front of the calls that read or write a file they name, as defence in depth: a call steered by
+# text nobody vetted can't be pointed at another file; a person typing the command without it can
+# still name any file.
 GUARD_ENV = "AGAMI_SCRATCH_ONLY"
 
 

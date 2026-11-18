@@ -3,12 +3,13 @@
 A live run of `/agami-connect` stopped for permission on most of agami's own commands: Claude wrote
 them as it saw them, `R="…"; bash "$P/scripts/sm" steps "$R" | grep …`, and no `allowed-tools`
 rule matches a line that starts with an assignment or carries a pipe. Claude copies the skill's
-command forms, so the forms themselves must be the one shape that is pre-approved: the launcher,
-then its arguments, every path written out. This reads agami-connect's SKILL.md and the shared
-files it links, and checks each command three ways: no shell syntax, matched by one of the skill's
-own `allowed-tools` rules (or listed as one that deliberately asks), and accepted by the real `sm`
-parser. The read-only verbs the plugin hook approves must also be approved by it, so the step list,
-progress, summary and wait calls never stop for permission in any turn.
+command forms, so the forms themselves must be the one shape the plugin's permission hook can
+approve: the launcher, then its arguments, every path written out. No skill declares `allowed-tools`
+since 0.9.25 (tests/test_skills_declare_no_allowed_tools.py): the hook is the only auto-approval.
+This reads agami-connect's SKILL.md and the shared files it links, and checks each command: no shell
+syntax, accepted by the real `sm` parser, never hook-approved when it deliberately asks, and the
+read-only verbs the hook approves approved as the skill writes them, so the step list, progress,
+summary and wait calls never stop for permission in any turn.
 """
 
 from __future__ import annotations
@@ -24,7 +25,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 from skill_docs import PLUGIN, SKILLS_DIR, skill_docs
 
@@ -47,9 +47,8 @@ LAUNCHER = re.compile(r"(?:\$\{CLAUDE_PLUGIN_ROOT\}|<plugin_root>)/scripts/(?:sm
 QUOTED_LAUNCHER = re.compile(
     r'^(?:AGAMI_[A-Z_]+=\S+ )*bash "(?:\$\{CLAUDE_PLUGIN_ROOT\}|<plugin_root>)/scripts/(?:sm|py)"(?: |$)'
 )
-# Commands the skill shows that are deliberately NOT pre-approved: each asks the person, for the
-# reason given. Everything else must match one of the skill's `allowed-tools` rules
-# (tests/test_connect_allowed_tools.py holds what those rules may and may not approve).
+# Commands the skill shows that must always ask the person, for the reason given: the hook never
+# approves one of them, whatever the hook's lists grow to.
 DELIBERATELY_ASKS = {
     r'scripts/sm" install\b': "a network install, which the person agrees to",
     r'scripts/py" -c ': "runs code given on the line",
@@ -60,8 +59,8 @@ DELIBERATELY_ASKS = {
     r'scripts/sm" add-example .*<examples_files': "reads reconcile's output under local/reconcile/",
     r'scripts/(sm|py)" <(verb|script)>': "a generic form in prose, not a command",
     r'^bash "[^"]*scripts/py" (serve_page|render_[a-z_]+|progress_page|parse_[a-z_]+_decisions|'
-    r"inventory_summary|model_spec_workbook)\.py": "writes or serves a path it is given; pre-approved "
-    "only under AGAMI_SCRATCH_ONLY=1, which holds that path to agami's scratch folder",
+    r"inventory_summary|model_spec_workbook)\.py": "writes or serves a path it is given (run under "
+    "AGAMI_SCRATCH_ONLY=1, which holds that path to agami's scratch folder)",
 }
 SHORTHAND = re.compile(r"^sm ([a-z][a-z-]*)(?: (.*))?$")
 
@@ -221,7 +220,7 @@ HELPER_SPANS = {
 
 def _body(doc: Path) -> str:
     text = doc.read_text(encoding="utf-8")
-    if text.startswith("---\n"):  # the frontmatter's allowed-tools rules are patterns, not commands
+    if text.startswith("---\n"):  # the frontmatter holds no command
         return text.split("\n---\n", 1)[1]
     return text
 
@@ -440,23 +439,6 @@ def _fill(command: str, art: Path) -> str:
     return " ".join(w for w in filled.split(" ") if w != "…")
 
 
-def _allowed_tools() -> list[re.Pattern]:
-    head = (CONNECT / "SKILL.md").read_text(encoding="utf-8").split("\n---\n", 1)[0]
-    rules = yaml.safe_load(head.removeprefix("---\n"))["allowed-tools"]
-    patterns = []
-    for rule in rules:
-        if not rule.startswith("Bash("):
-            continue
-        glob = rule[len("Bash(") : -1].replace("${CLAUDE_PLUGIN_ROOT}", str(PLUGIN))
-        patterns.append(
-            re.compile("".join(".*" if c == "*" else re.escape(c) for c in glob) + r"\Z", re.S)
-        )
-    return patterns
-
-
-ALLOWED = _allowed_tools()
-
-
 @pytest.fixture
 def art(tmp_path: Path) -> Path:
     root = tmp_path / "artifacts"
@@ -470,16 +452,14 @@ _FRAGMENT = re.compile(r'scripts/py"$')
 
 
 @pytest.mark.parametrize("where,command", COMMANDS)
-def test_each_command_is_matched_by_an_allowed_tools_rule(where, command, art):
+def test_a_command_that_asks_on_purpose_is_never_approved_by_the_hook(where, command, art):
     if _FRAGMENT.search(command):
         pytest.skip("names the launcher only")
     asks = [why for pat, why in DELIBERATELY_ASKS.items() if re.search(pat, command)]
+    if not asks:
+        pytest.skip("not one that must ask")
     filled = _fill(command, art)
-    approved = any(p.match(filled) for p in ALLOWED)
-    if asks:
-        assert not approved, f"{where}: pre-approved, but it should ask ({asks[0]}): {filled}"
-        return
-    assert approved, f"{where}: no allowed-tools rule matches {filled}"
+    assert not _hook_allows(filled, art), f"{where}: approved, but it should ask ({asks[0]}): {filled}"
 
 
 def _sm_argv(art: Path) -> list[tuple[str, list[str]]]:
@@ -616,9 +596,10 @@ def _flat(text: str) -> str:
 def test_the_hard_rule_is_stated_in_the_skill_and_the_conventions():
     rule = (
         "Never put a variable assignment, a pipe, `;`, `&&`, a redirect or a filter on the line, "
-        "and never run two agami commands in one call. A line written any other way stops to ask "
-        "the person for permission; written this way it is pre-approved while the skill is "
-        "running. Read the whole output: the commands print only what you need."
+        "and never run two agami commands in one call. A line written any other way always stops to ask "
+        "the person for permission; written this way agami's own hook approves the read-only "
+        "commands and scratch files without a prompt, and every other command asks as usual. "
+        "Read the whole output: the commands print only what you need."
     )
     assert rule in _flat(_read(CONNECT / "SKILL.md"))
     assert rule in _flat(_read(SHARED / "invocation-conventions.md"))
@@ -671,9 +652,7 @@ def test_the_checks_catch_the_live_runs_forms(art):
     ):
         with pytest.raises(AssertionError):
             test_no_shell_syntax_in_a_command("example", bad)
-    assert not any(
-        p.match(_fill('R=x bash "<plugin_root>/scripts/sm" steps "<root>"', art)) for p in ALLOWED
-    )
+    assert not _hook_allows(_fill('R=x bash "<plugin_root>/scripts/sm" steps "<root>"', art), art)
     assert not _hook_allows(
         _fill('bash "<plugin_root>/scripts/sm" steps "/elsewhere/acme"', art), art
     )

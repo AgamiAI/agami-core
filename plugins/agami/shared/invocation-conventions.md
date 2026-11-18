@@ -11,11 +11,12 @@ same way.
 
 **Run each agami command as its own Bash call: `bash "<plugin_root>/scripts/sm" <verb> …` with every
 path written out in full.** Never put a variable assignment, a pipe, `;`, `&&`, a redirect or a
-filter on the line, and never run two agami commands in one call. A line written any other way stops
-to ask the person for permission; written this way it is pre-approved while the skill is running.
-Read the whole output: the commands print only what you need. Where a command starts with
+filter on the line, and never run two agami commands in one call. A line written any other way
+always stops to ask the person for permission; written this way agami's own hook approves the
+read-only commands and scratch files without a prompt, and every other command asks as usual. Read
+the whole output: the commands print only what you need. Where a command starts with
 `AGAMI_SCRATCH_ONLY=1`, copy that prefix exactly: it holds every file the call names to agami's
-scratch folder, and only with it is the call pre-approved.
+scratch folder.
 
 agami ships nine skills, all prefixed `agami-` to avoid colliding with Claude Code's built-in slash commands (e.g. `/init`) and with other plugins:
 

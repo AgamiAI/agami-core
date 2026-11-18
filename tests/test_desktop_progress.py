@@ -108,8 +108,8 @@ def test_the_build_runs_in_the_background_with_a_bar_from_the_log():
     assert "on every database, a SQLite or DuckDB file included" in " ".join(build.split())
     assert "`run_in_background: true`, and a `description` the person can read" in build
     assert 'scripts/sm" progress "<root>" --wait 20' in build
-    # a turn that ends loses the skill's pre-approvals (live run), so it loops on a pre-approved call
-    assert "Use this, not `tail` or a watcher of your own: it is pre-approved" in build
+    # it loops on a call the hook approves with no prompt, so the turn stays open
+    assert "Use this, not `tail` or a watcher of your own: agami's hook approves it" in build
     # a live run ended its turn mid-build twice: the app wakes it, but the turn must say so
     assert "If you do end your turn while it runs, say so in that message" in build
     # the old fallback stays for hosts without background commands
@@ -132,25 +132,8 @@ def test_the_overview_card_takes_every_number_from_sm_overview():
     assert "overview-card.md" in _section("## Phase 7:")
 
 
-@pytest.mark.parametrize("skill", ["agami-connect"])
-def test_the_skill_pre_approves_its_own_scripts(skill):
-    head = (SKILLS_DIR / skill / "SKILL.md").read_text(encoding="utf-8").split("\n---\n", 1)[0]
-    rules = yaml.safe_load(head.removeprefix("---\n"))["allowed-tools"]
-    # one rule per command, never a free `sm *` (tests/test_connect_allowed_tools.py says why)
-    assert 'Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" steps *)' in rules
-    assert 'Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)' not in rules
-    # an allow rule doesn't match past an env assignment Claude Code doesn't know is safe, so the
-    # build's prefix is in the rule, written out: `=*` would let any other assignment through too
-    assert (
-        'Bash(AGAMI_SQL_MAX_ROWS=200000 AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm"'
-        " introspect *)" in rules
-    )
-    assert "Read(/${CLAUDE_PLUGIN_ROOT}/**)" in rules
-    assert all("${CLAUDE_PLUGIN_ROOT}/" in r for r in rules)  # nothing outside the plugin
-
-
 def test_no_skill_runs_execute_sql_through_the_bare_interpreter():
-    """The interpreter's path differs per machine, so no allowed-tools rule can name it: a live run
+    """The interpreter's path differs per machine, so no approval rule can name it: a live run
     stopped for permission on every sample query until the reads went through agami's own launcher."""
     from skill_docs import skill_docs
 

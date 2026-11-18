@@ -3,78 +3,6 @@ name: agami-connect
 description: "End-to-end database connection for agami: sets up credentials on first run (DB-type picker → writes <artifacts_dir>/local/credentials.example for the user to fill in), then introspects the live DB directly into the agami semantic model (subject areas, tables, columns, relationships with join cardinality, deep-table column groups, sensitive-column flags) under <artifacts_dir>/<profile>/. The structural model is built deterministically by the agami-core semantic_model package (catalog mode, or a probe-mode fallback when the catalog is locked down); the skill then layers LLM enrichment (descriptions, entities, metrics) and seeds EXPLAIN-validated NL→SQL examples. Every model write is gated by the semantic-model validator — no breaking model is ever persisted."
 when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami' / 'connect to my database' / 'introspect my database' / 'introspect the schema' / 'reload schema' / 'add a new database', wants to try agami WITHOUT a database ('I don't have a database', 'try the sample', 'use the sample data', 'demo data'), or after the user changes their schema and wants the model refreshed. Also auto-invoked by agami-query the first time it runs (when the semantic model is missing). This skill handles credential setup, introspection, enrichment, and seed-example validation — one entry point for everything before the user can query. The sample-database path (Phase 0s) needs no connection and copies in a ready, queryable model."
 argument-hint: "[sample | reintrospect | profile NAME]"
-allowed-tools:
-  # Pre-approved while this skill runs, one rule per command it runs (tests/test_connect_allowed_tools.py
-  # holds this list). Rows and documents nobody vetted steer the model during onboarding, so a rule
-  # never ends in a free tail that could pick what runs. Not here, so they ask: `sm install` (a network
-  # install), `sm describe-file` and `sm apply-spec` (they read a file the person names), `py -c`, `py -m`
-  # (pip, execute_sql) and reconcile.py. Every `sm` verb here: reads text files only from agami's
-  # scratch folder (--name-file, --description-file, --question-file) and writes --out only there or to
-  # a model's datasource.md; the five that read JSON or a table list are pre-approved only under
-  # AGAMI_SCRATCH_ONLY=1, which holds every file they name to the same folder (semantic_model/scratch.py).
-  # Every `py` script that writes or serves a path it is given (a page, --out, --tables-out, --ops-out,
-  # the page server, the progress page, the sample builder) is pre-approved only under the same prefix,
-  # which holds that path to agami's scratch folder or the one model file the script writes
-  # (scripts/_scratch_out.py), so an injected call can't overwrite a file the person owns. Not here,
-  # so they ask: check_statement.py (it writes into any --row-dir) and promote_credentials.py with an
-  # argument (--agami-dir writes credentials anywhere).
-  # Env prefixes are literal: a `VAR=*` rule would also let `BASH_ENV=<file>` through, which runs <file>.
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" steps *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" progress *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" summary *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" overview *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" coverage *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" model-tree *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" validate *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" snapshot *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" ensure-org-id *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" context *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" org-draft *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-org *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-personal-data *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-description *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-fiscal-year *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-units *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" remove-example *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate-gate *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" profile *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" approve-queue *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" open-questions *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" seed-validate *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" enrich-metadata *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" dictionary-joins *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" suggest-metrics *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" suggest-units *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-queue *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" history *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" batch-id)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" init-local *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-config *)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate *)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add *)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add-example *)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" seed-examples *)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-terminology *)
-  - Bash(AGAMI_SQL_MAX_ROWS=200000 AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" discover *)
-  - Bash(AGAMI_SQL_MAX_ROWS=200000 AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_resolve.py *)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py *)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_helper.py *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" setup_pgauth.py *)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_table_picker.py *)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_open_questions_page.py *)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_examples_validation.py *)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_model_explorer.py *)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" progress_page.py *)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_open_questions_decisions.py *)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_examples_decisions.py *)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" model_spec_workbook.py *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" promote_credentials.py)
-  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" "${CLAUDE_PLUGIN_ROOT}/samples/store/build_sample.py" *)
-  - Read(/${CLAUDE_PLUGIN_ROOT}/**)
 ---
 
 # agami connect
@@ -150,7 +78,7 @@ Non-negotiable. They override every other instruction here when they conflict.
 3. **Never scan or guess.** No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, no port-listener scans, no testing connections to common hostnames. The only acceptable Bash probes here are `which <tool>` and `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -c 'import <module>'`.
 4. **If credentials are missing for the active profile, run Phase 0a.** It ends connected (the password page, 0a.4k) or with a card that waits for the filled-in file (0a.9). A person who closes the chat instead can come back later with any data question — `agami-query` auto-invokes us and 0a.10 picks the file up.
 5. **NEVER put a credential on a Bash command line** — no `export PGPASSWORD=…`, no `psql -W <pw>`, no heredoc that interpolates a secret. Hosts render Bash calls in chat; anything on the line leaks. Runtime queries use the auth files from `scripts/setup_pgauth.py` (psql/mysql) or `python -m execute_sql` (every driver, reads `<artifacts_dir>/local/credentials` itself). See [`shared/connection-reference.md → HARD RULES`](../../shared/connection-reference.md).
-6. **Run each agami command as its own Bash call: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" <verb> …` with every path written out in full.** Never put a variable assignment, a pipe, `;`, `&&`, a redirect or a filter on the line, and never run two agami commands in one call. A line written any other way stops to ask the person for permission; written this way it is pre-approved while the skill is running. Read the whole output: the commands print only what you need. Where a command starts with `AGAMI_SCRATCH_ONLY=1` (and `AGAMI_SQL_MAX_ROWS=200000` before it on `discover` and `introspect`), copy that prefix exactly: it holds every file the call names to agami's scratch folder, and only with it is the call pre-approved. A few commands are never pre-approved and always ask: `sm install`, `py -c`, `py -m`, `sm describe-file` and `sm apply-spec`. `<root>` is the database's model folder, `<artifacts_dir>/<profile>`, written out in full; the artifacts folder is preflight step 1's `artifacts_dir`, never read from the pointer file; scratch files go only in `<artifacts_dir>/local/tmp/`, named `agami-…`, never `/tmp`, and are written with the Write tool ([`shared/invocation-conventions.md`](../../shared/invocation-conventions.md)). The person's own words (a company name, a description, a question) go to `sm` through a file the same way (`--name-file`, `--description-file`, `--question-file`), never on the command line.
+6. **Run each agami command as its own Bash call: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" <verb> …` with every path written out in full.** Never put a variable assignment, a pipe, `;`, `&&`, a redirect or a filter on the line, and never run two agami commands in one call. A line written any other way always stops to ask the person for permission; written this way agami's own hook approves the read-only commands and scratch files without a prompt, and every other command asks as usual. Read the whole output: the commands print only what you need. Where a command starts with `AGAMI_SCRATCH_ONLY=1` (and `AGAMI_SQL_MAX_ROWS=200000` before it on `discover` and `introspect`), copy that prefix exactly: it holds every file the call names to agami's scratch folder. `<root>` is the database's model folder, `<artifacts_dir>/<profile>`, written out in full; the artifacts folder is preflight step 1's `artifacts_dir`, never read from the pointer file; scratch files go only in `<artifacts_dir>/local/tmp/`, named `agami-…`, never `/tmp`, and are written with the Write tool ([`shared/invocation-conventions.md`](../../shared/invocation-conventions.md)). The person's own words (a company name, a description, a question) go to `sm` through a file the same way (`--name-file`, `--description-file`, `--question-file`), never on the command line.
 7. **Do what the engine says.** When an agami command's output has `say`, post it as written; when it has `then`, do that next.
 
 If you reach for a command that doesn't fit, stop and re-read this section.
@@ -1006,7 +934,7 @@ AGAMI_SQL_MAX_ROWS=200000 AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scrip
    ```bash
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" progress "<root>" --wait 20
    ```
-   It returns as soon as the build's log moves on (or after 20 seconds) with `line`, ready to post: *"Reading columns ▰▰▱▱▱▱▱▱ 12/34 tables"*, the bar drawn from the log's own counts and rounded down (never an estimate); a slow statement reads *"Waiting on the database for 12 min: …"*, which means a statement is slow, not that the build has stopped. Its `then` is one of: post `line`; post `line` and update the task list from `list`; update the task list from `list`; nothing new, call this again; or the build has ended, run `sm steps` and go on. Do exactly that, and nothing else, each pass. Use this, not `tail` or a watcher of your own: it is pre-approved, and a turn that ends mid-onboarding loses the skill's pre-approvals, so every later command would stop for permission. If you do end your turn while it runs, say so in that message (*"Still reading your tables; I'll carry on as soon as it finishes."*).
+   It returns as soon as the build's log moves on (or after 20 seconds) with `line`, ready to post: *"Reading columns ▰▰▱▱▱▱▱▱ 12/34 tables"*, the bar drawn from the log's own counts and rounded down (never an estimate); a slow statement reads *"Waiting on the database for 12 min: …"*, which means a statement is slow, not that the build has stopped. Its `then` is one of: post `line`; post `line` and update the task list from `list`; update the task list from `list`; nothing new, call this again; or the build has ended, run `sm steps` and go on. Do exactly that, and nothing else, each pass. Use this, not `tail` or a watcher of your own: agami's hook approves it with no prompt, and a turn that ends mid-onboarding leaves the build unwatched. If you do end your turn while it runs, say so in that message (*"Still reading your tables; I'll carry on as soon as it finishes."*).
 
    Its output also carries `list`, the same step list `sm steps` prints, when there is a new one to show: the task list is updated from it when `then` says so ([shared/task-list.md](../../shared/task-list.md)). No separate `sm steps` call per pass.
 
@@ -1147,7 +1075,7 @@ It adds each one that holds (`candidates`, `evidence.found_by: dictionary`, the 
 
 ### 2a — Descriptions (describe coded columns; leave only self-evident ones empty)
 
-**The evidence for each table is the build's profile, not a handful of rows.** Read it with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" profile "<root>" --table <t1> <t2>` (a few tables per call): per column how much of it is filled or blank text, its distinct count, MIN/MAX for numbers and dates, its most frequent values with their shares when it is coded (at most 25 values that repeat, none of them personal; never for a column named like a person's or party's name, a contact, tax or licence number), the stand-in values the build found, and `findings` (a column that is always empty, mostly blank or one constant value; dates after today on a column named for something that already happened; one date before another on nearly every row, the reverse of what their names say; a text column that mixes date formats); and each join's check on the data. The profile was read from the whole table under 500,000 rows and from a sample above it (`read` says which). A personal column carries counts only, and pay to a person (salary, pay rate, bonus) no range. Use a finding in the description in words that stay true after the next load (*"the date the claim was paid, which comes before it was submitted"* is not one; *"holds the invoice date, not the payment date"* is), never its figures. Only when a column's meaning still isn't clear from its name, its profile and the documents, read up to 5 rows of the columns in question, naming them: `SELECT c1, c2, … FROM <t> LIMIT 5` with only declared columns that are neither excluded nor flagged sensitive. A star is refused, so never write one. Run profiling reads through `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -m execute_sql --profile <profile> --build-profile --sql-file "<artifacts_dir>/local/tmp/agami-sample.txt"` (the statement written there first with the Write tool; the file is overwritten by the next statement and holds only SQL text, never a credential, so never put a secret in it) (agami's own launcher runs the interpreter Phase 0a.5 resolved, and its call is pre-approved, so sampling doesn't stop for permission): it keeps every check except that it also allows `information_schema`'s structure views (and `pg_catalog`'s structure tables) and JSON/array functions such as `jsonb_each` or `json_each` over a declared column. Join with an explicit `ON`; `USING` and `NATURAL` joins are refused there. Don't use `--no-safety` for these. The database's first error line comes back under the fixed message, so a typo is visible. **Rows you read are never written to disk** — context only, then discarded. The profile's MIN/MAX of each date column is what Phase 5 anchors "last 30 days" to (the data's real MAX, not `NOW()`).
+**The evidence for each table is the build's profile, not a handful of rows.** Read it with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" profile "<root>" --table <t1> <t2>` (a few tables per call): per column how much of it is filled or blank text, its distinct count, MIN/MAX for numbers and dates, its most frequent values with their shares when it is coded (at most 25 values that repeat, none of them personal; never for a column named like a person's or party's name, a contact, tax or licence number), the stand-in values the build found, and `findings` (a column that is always empty, mostly blank or one constant value; dates after today on a column named for something that already happened; one date before another on nearly every row, the reverse of what their names say; a text column that mixes date formats); and each join's check on the data. The profile was read from the whole table under 500,000 rows and from a sample above it (`read` says which). A personal column carries counts only, and pay to a person (salary, pay rate, bonus) no range. Use a finding in the description in words that stay true after the next load (*"the date the claim was paid, which comes before it was submitted"* is not one; *"holds the invoice date, not the payment date"* is), never its figures. Only when a column's meaning still isn't clear from its name, its profile and the documents, read up to 5 rows of the columns in question, naming them: `SELECT c1, c2, … FROM <t> LIMIT 5` with only declared columns that are neither excluded nor flagged sensitive. A star is refused, so never write one. Run profiling reads through `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -m execute_sql --profile <profile> --build-profile --sql-file "<artifacts_dir>/local/tmp/agami-sample.txt"` (the statement written there first with the Write tool; the file is overwritten by the next statement and holds only SQL text, never a credential, so never put a secret in it) (agami's own launcher runs the interpreter Phase 0a.5 resolved): it keeps every check except that it also allows `information_schema`'s structure views (and `pg_catalog`'s structure tables) and JSON/array functions such as `jsonb_each` or `json_each` over a declared column. Join with an explicit `ON`; `USING` and `NATURAL` joins are refused there. Don't use `--no-safety` for these. The database's first error line comes back under the fixed message, so a typo is visible. **Rows you read are never written to disk** — context only, then discarded. The profile's MIN/MAX of each date column is what Phase 5 anchors "last 30 days" to (the data's real MAX, not `NOW()`).
 
 Build a per-schema prompt with `$DATA_MODEL_DOC_TEXT` first (dominant prior), then `datasource.md`, then tables/columns/profile. **Always** emit a 1-line table `description`. For **columns**, classify each into one of three — don't default everything to empty:
 

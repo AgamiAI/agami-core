@@ -190,7 +190,7 @@ def test_a_model_root_that_does_not_exist_yet_is_allowed(art):
 def test_a_step_mark_on_a_model_root_that_does_not_exist_yet_is_not_approved(art):
     # A mark creates <root>/.introspect/: approved, it would let any call make a new profile folder
     # in <artifacts_dir>. Onboarding's first mark comes before the build makes the folder; it runs
-    # inside agami-connect, whose own allowed-tools cover it. Reading the list there is still fine.
+    # inside agami-connect and asks the person once. Reading the list there is still fine.
     assert _decision(_bash(f'bash "{SM}" steps {art / "newdb"} --mark connect=in_progress'), art) is None
     assert _decision(_bash(f'bash "{SM}" steps {art / "newdb"}'), art) == "allow"
     assert not (art / "newdb").exists()
@@ -1265,7 +1265,7 @@ def test_the_hook_imports_nothing_of_the_plugin_or_the_package():
     assert "spec_from_file_location" not in HOOK.read_text(encoding="utf-8")
 
 
-# --- hooks.json, and agreement with allowed-tools ---------------------------------------------------------
+# --- hooks.json ---------------------------------------------------------
 
 
 def test_hooks_json_runs_python3_from_path_never_the_plugin_launcher():

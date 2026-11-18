@@ -91,37 +91,32 @@ below corresponds to one such version.
   for its role rather than its table, such as `manager_id` -> employees, `created_by` -> users or
   `bill_to_customer_id` -> customers; `sm dictionary-joins` checks one the data dictionary calls a
   reference. Text and UUID columns are tested by type as before.
-- **Every agami-connect command is one literal call, pre-approved one rule per command.** The skill
-  and the shared files it links write each command as the launcher and its arguments, every path in
-  full: no `$ROOT` or `$PY`, no pipe, `;`, `&&` or redirect (the DuckDB heredocs in
-  `connection-reference.md` are left for a follow-up). The skill's `allowed-tools` has one rule per
-  `sm` verb and per plugin script it runs, with any env prefix written out (`AGAMI_SQL_MAX_ROWS=*`
-  would also let `BASH_ENV=<file>` through, which runs the file). The verbs that read a JSON or
-  table-list file (`curate`, `add`, `add-example`, `seed-examples`, `set-terminology`, `introspect`,
-  `discover`) are pre-approved only with the `AGAMI_SCRATCH_ONLY=1` prefix, under which every file
-  the call names must be one of agami's scratch files (or the build's own `join_candidates.json`).
-  **Still asks:** `sm install`, `py -c`, `py -m` (pip, and `execute_sql`, used to read a few rows of
-  an unclear column), `sm describe-file` and `sm apply-spec` (they read the person's own files),
-  `reconcile.py`, the native query tools (`psql` and the like), the Write of the artifacts-folder
-  pointer for a non-default folder, the Linux `credentials.example`, `USER_MEMORY.md`, and the
-  Write of a model's `datasource.md` narrative. Native-CLI
-  SQL is read from a scratch file. `sm` no longer accepts an abbreviated option (`--o` for `--out`).
-- **A pre-approved script writes only agami's own files.** The page renderers, the page parsers,
-  `serve_page.py`, `progress_page.py`, `inventory_summary.py`, `model_spec_workbook.py` and the
-  sample builder are pre-approved by agami-connect only with the `AGAMI_SCRATCH_ONLY=1` prefix. Under
-  it every path such a script writes or serves (`--out`, `--tables-out`, `--ops-out`, `--out-dir`,
-  `--manifest-out`, the served page and its decisions file, the progress log) must be an `agami-*`
-  file directly in `<artifacts_dir>/local/tmp/`, not a link or a hard link, or the one model file
-  that script writes (the sample's `local/samples/store.db`, the converted workbook's
-  `local/model-spec/<profile>/spec.json` and `spec-tables.txt`, a model's
-  `.introspect/progress.log`); anything else is refused in one line and nothing is written, and a
-  link planted at an allowed name is replaced, never written through. The examples page is now
-  rendered into the scratch folder, and its parsed keeps and fixes land there directly, where
-  `sm add-example` under the same guard can read them. `check_statement.py` (it writes into any
-  `--row-dir`) and `promote_credentials.py` with an argument (`--agami-dir` writes credentials
-  anywhere) are no longer pre-approved. **Known, deliberate:** a pre-approved `sm` verb outside the
-  permission hook's no-install list still installs agami-core itself when the installed library is
-  older than the plugin; it installs only agami-core, at the plugin's pinned version.
+- **Every agami-connect command is one literal call.** The skill and the shared files it links
+  write each command as the launcher and its arguments, every path in full: no `$ROOT` or `$PY`, no
+  pipe, `;`, `&&` or redirect (the DuckDB heredocs in `connection-reference.md` are left for a
+  follow-up), so agami's permission hook can recognise the read-only ones. Native-CLI SQL is read
+  from a scratch file. `sm` no longer accepts an abbreviated option (`--o` for `--out`).
+- **agami-connect pre-approves nothing; only the hook approves without a prompt.** The skill no
+  longer declares `allowed-tools`. A pre-approved command list was tried during this release and
+  dropped before shipping: argument-blind rules let a call steered by unvetted rows or documents
+  read files outside agami's folders, write under another profile, point later calls at another
+  interpreter, or sign off under any name, with no prompt. The plugin hook (above) is the only
+  auto-approval: read-only model commands and agami's own scratch files. Setup's writing and
+  connecting commands (the build, `curate`, `set-config`, `approve-queue`, the page scripts, `sm
+  install` and the rest) ask as before. Pre-approval is planned to return with per-argument checks.
+- **A plugin script writes only agami's own files under `AGAMI_SCRATCH_ONLY=1`.** The page
+  renderers, the page parsers, `serve_page.py`, `progress_page.py`, `inventory_summary.py`,
+  `model_spec_workbook.py` and the sample builder run with that prefix, and the `sm` verbs that read
+  a JSON or table-list file (`curate`, `add`, `add-example`, `seed-examples`, `set-terminology`,
+  `introspect`, `discover`) too. Under it every path such a call reads, writes or serves (`--out`,
+  `--tables-out`, `--ops-out`, `--out-dir`, `--manifest-out`, the served page and its decisions
+  file, the progress log, the files it reads) must be an `agami-*` file directly in
+  `<artifacts_dir>/local/tmp/`, not a link or a hard link, or the one model file that call writes
+  (the sample's `local/samples/store.db`, the converted workbook's `local/model-spec/<profile>/`
+  files, a model's `.introspect/progress.log` or `join_candidates.json`); anything else is refused
+  in one line and nothing is written, and a link planted at an allowed name is replaced, never
+  written through. The examples page is now rendered into the scratch folder, and its parsed keeps
+  and fixes land there directly, where `sm add-example` under the same guard can read them.
 - **A choice that needs the person is not a failure.** `inventory_summary.py` exits 0 with
   `status: needs_choice` and a `then` for a name that matches nothing or several, or a choice that
   keeps no tables; the table picker's `page:` keeps its exit 1. `connect_resolve.py` says where the
