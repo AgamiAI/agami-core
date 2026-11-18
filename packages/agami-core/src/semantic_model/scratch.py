@@ -216,10 +216,32 @@ def read_scratch(path: str, cap: int, engine_ok: bool = False) -> bytes:
     return data
 
 
+def _not_linked(p: Path) -> Path:
+    """`p`, when nothing is there yet or it is a regular file with one name. Not every writer of an
+    output replaces the name (a log is appended to), so a link or a hard link there is refused up
+    front, whoever writes it."""
+    try:
+        st = os.lstat(p)
+    except FileNotFoundError:
+        return p
+    if _is_link(st):
+        raise NotScratch(f"{p} is a link; agami writes only its own files")
+    if not stat.S_ISREG(st.st_mode):
+        raise NotScratch(f"{p} is not a regular file")
+    if st.st_nlink != 1:
+        raise NotScratch(f"{p} has another name elsewhere (a hard link); agami writes only its own files")
+    return p
+
+
 def check_out(path: str) -> Path:
-    """Where `--out` may write: a scratch file, or a model's own `datasource.md`. Returns the path.
-    The write itself is a temp file and a rename in that folder, which replaces a link or a hard
-    link at the name instead of writing through it, so only the folder needs checking here."""
+    """Where `--out` (or another named output) may write: a scratch file, or a model's own
+    `datasource.md`, that is not already a link or a hard link. Returns the path. Its writers still
+    never write through the name (a temp file and a rename, or an append through `open_one_name`),
+    so a link planted after this check is not followed either."""
+    return _not_linked(_out_place(path))
+
+
+def _out_place(path: str) -> Path:
     p = _plain(path)
     if p.name == "datasource.md":
         art = _artifacts_dir()

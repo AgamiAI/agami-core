@@ -105,3 +105,114 @@ def test_without_nofollow_a_file_it_cannot_identify_is_refused(art, no_nofollow,
     )
     with pytest.raises(scratch.NotScratch):
         scratch.read_scratch(str(f), 100)
+
+
+# --- outputs: a linked file at an output name is refused, and every writer is link-safe (4614773456)
+
+
+def _link(kind: str, name: Path, target: Path) -> None:
+    if kind == "symlink":
+        name.symlink_to(target)
+    else:
+        os.link(target, name)
+
+
+def _cli(argv: list[str]) -> tuple[int, str]:
+    import contextlib
+    import io
+
+    from semantic_model import cli
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        try:
+            rc = cli.main(argv)
+        except SystemExit as exc:
+            rc = exc.code
+    return rc, buf.getvalue()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_check_out_refuses_a_linked_scratch_output(art, victim, kind):
+    out = art / "local" / "tmp" / "agami-inventory.json"
+    _link(kind, out, victim)
+    with pytest.raises(scratch.NotScratch):
+        scratch.check_out(str(out))
+    assert victim.read_text() == MARKER + "\n"
+
+
+def test_check_out_still_takes_a_fresh_or_plain_scratch_output(art):
+    out = art / "local" / "tmp" / "agami-inventory.json"
+    assert scratch.check_out(str(out)) == out
+    out.write_text("{}")
+    assert scratch.check_out(str(out)) == out
+
+
+def _discovers_nothing(monkeypatch) -> None:
+    """`sm discover` with no database: an empty inventory, so only its write is under test."""
+    from semantic_model import introspect as INTRO
+
+    monkeypatch.setattr(INTRO, "make_execute_sql_runner", lambda *a, **kw: None)
+    monkeypatch.setattr(INTRO, "discover_inventory", lambda *a, **kw: {
+        "table_count": 0, "column_mode": "catalog", "schemas": [], "tables": []})
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_discover_under_the_guard_refuses_a_linked_inventory_out(art, victim, kind, monkeypatch):
+    _discovers_nothing(monkeypatch)
+    monkeypatch.setenv("AGAMI_SCRATCH_ONLY", "1")
+    out = art / "local" / "tmp" / "agami-inventory.json"
+    _link(kind, out, victim)
+    rc, _ = _cli(["discover", "--profile", "acme", "--db-type", "duckdb", "--artifacts", str(art),
+                  "--inventory-out", str(out)])
+    assert rc == 2
+    assert victim.read_text() == MARKER + "\n"
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_discover_never_writes_through_a_linked_inventory_out(art, victim, kind, monkeypatch):
+    """Without the guard a person may name any path, but the write still replaces the name."""
+    _discovers_nothing(monkeypatch)
+    out = art / "local" / "tmp" / "agami-inventory.json"
+    _link(kind, out, victim)
+    _cli(["discover", "--profile", "acme", "--db-type", "duckdb", "--artifacts", str(art),
+          "--inventory-out", str(out)])
+    assert victim.read_text() == MARKER + "\n"
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_the_progress_log_is_never_written_through_a_link(tmp_path, victim, kind, monkeypatch):
+    from semantic_model import introspect as INTRO
+
+    monkeypatch.setattr(INTRO, "_introspect", lambda *a, **kw: (None, None))
+    log = tmp_path / "acme" / ".introspect" / "progress.log"
+    log.parent.mkdir(parents=True)
+    _link(kind, log, victim)
+    INTRO.introspect("acme", "duckdb", runner=None, artifacts_dir=tmp_path, progress_path=log,
+                     batch=(1, 2))
+    INTRO._progress(log, "done: appended")
+    INTRO.log_failure(log, RuntimeError("appended"))
+    assert victim.read_text() == MARKER + "\n"
+
+
+def test_the_progress_log_is_still_written_when_plain(tmp_path, monkeypatch):
+    from semantic_model import introspect as INTRO
+
+    log = tmp_path / "acme" / ".introspect" / "progress.log"
+    INTRO.log_failure(log, RuntimeError("it stopped"))
+    assert log.read_text().rstrip().endswith("failed: it stopped")
+    INTRO._progress(log, "one more")
+    assert log.read_text().rstrip().endswith("one more")
+
+
+def test_the_progress_log_appends_without_nofollow_too(tmp_path, victim, no_nofollow):
+    from semantic_model import introspect as INTRO
+
+    log = tmp_path / "progress.log"
+    INTRO._progress(log, "first")
+    INTRO._progress(log, "second")
+    assert log.read_text().splitlines()[-1].endswith("second")
+    other = tmp_path / "other.log"
+    other.symlink_to(victim)
+    INTRO._progress(other, "never")
+    assert victim.read_text() == MARKER + "\n"

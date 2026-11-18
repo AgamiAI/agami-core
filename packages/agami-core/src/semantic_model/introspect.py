@@ -83,6 +83,7 @@ from .models import (
     rows_text,
     table_key,
 )
+from .scratch import open_one_name, write_replacing
 
 Runner = Callable[[str], list[dict]]
 
@@ -180,7 +181,10 @@ def _stamp() -> str:
 
 def _write_line(path: Path, msg: str, *, beat: bool = False) -> None:
     with _LOG_LOCK:
-        with path.open("a", encoding="utf-8") as fh:
+        # Appended only to a plain file with one name: a link or a hard link at the log's name
+        # would carry the line into another file (`LinkedFile`, which `_progress` swallows).
+        fd = open_one_name(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
             fh.write(f"{_stamp()} {msg.rstrip(chr(10))}\n")
             fh.flush()
         now = time.monotonic()
@@ -616,7 +620,9 @@ def introspect(
     if pp is not None:
         try:
             pp.parent.mkdir(parents=True, exist_ok=True)
-            pp.write_text("", encoding="utf-8")  # fresh log per run
+            # fresh log per run, replaced rather than truncated, so a link at the name is never
+            # emptied through (a symlink there leaves the run with no log)
+            write_replacing(pp, "")
         except Exception:
             pp = None
     if batch is not None:
