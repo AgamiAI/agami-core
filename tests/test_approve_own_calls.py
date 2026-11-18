@@ -858,6 +858,134 @@ def test_a_link_inside_the_plugin_pointing_out_says_nothing(art, tmp_path):
         link.unlink()
 
 
+
+# --- UNC and device references inside the model -----------------------------------------------------------
+# The hook refuses a network path the call names, but the model names more: a storage `ref`, a subject
+# area's path, a link's target. A contained load refuses each from its text, before `realpath`,
+# `exists` or a read could reach the host.
+
+
+def _no_model_filesystem_call_on_unc(monkeypatch) -> list:
+    """The hook's spy, widened to what a model load can call: opens, directory listings and link reads."""
+    import io as _io
+
+    touched = _no_filesystem_call_on_unc(monkeypatch)
+    for mod, name in ((os, "open"), (os, "listdir"), (os, "scandir"), (os, "readlink"), (_io, "open")):
+        real = getattr(mod, name)
+
+        def spy(p, *a, _real=real, **k):
+            if "uncprobe" in str(p):
+                touched.append(p)
+            return _real(p, *a, **k)
+
+        monkeypatch.setattr(mod, name, spy)
+    return touched
+
+
+def _model_naming(root: Path, **datasource: object) -> None:
+    import yaml
+
+    _small_model(root, yaml.safe_dump({"datasource": "acme", **datasource}))
+
+
+@pytest.mark.parametrize("value", UNC_FORMS)
+def test_a_unc_reference_in_the_model_is_network(value):
+    from semantic_model import loader
+
+    assert loader._network_path(value) is True
+
+
+def test_a_local_reference_is_not_network():
+    from semantic_model import loader
+
+    for value in ("subject_areas/sales", "/srv/models/acme", "C:\\models\\acme", "sales"):
+        assert loader._network_path(value) is False, value
+
+
+@pytest.mark.parametrize(
+    "where",
+    ["storage_ref", "storage_name", "area_path", "area_dict_path"],
+)
+@pytest.mark.parametrize("value", UNC_FORMS)
+def test_a_unc_reference_in_the_model_is_refused_before_any_filesystem_call(
+    art, monkeypatch, capsys, where, value
+):
+    pytest.importorskip("pydantic")
+    from semantic_model import cli
+
+    root = art / "acme"
+    shutil.rmtree(root)
+    areas = ["subject_areas/sales"]
+    fields: dict = {
+        "storage_ref": {"storage_connections": [{"ref": value}], "subject_areas": areas},
+        "storage_name": {"storage_connections": [{"name": value}], "subject_areas": areas},
+        "area_path": {"subject_areas": [value]},
+        "area_dict_path": {"subject_areas": [{"path": value}]},
+    }[where]
+    _model_naming(root, **fields)
+    touched = _no_model_filesystem_call_on_unc(monkeypatch)
+    assert cli.main(["areas", str(root)]) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "outside_model"
+    assert touched == []
+
+
+@SYMLINKS
+@pytest.mark.parametrize("value", ["//uncprobe/share/area", "\\\\uncprobe\\share\\area"])
+@pytest.mark.parametrize("linked", ["area", "tables", "table_file", "chain"])
+def test_a_link_in_the_model_to_a_unc_path_is_refused_before_following_it(
+    art, monkeypatch, capsys, value, linked
+):
+    """A link's target is read as text and refused; nothing follows it, so nothing reaches the host."""
+    pytest.importorskip("pydantic")
+    from semantic_model import cli
+
+    root = art / "acme"
+    shutil.rmtree(root)
+    _model_naming(root, subject_areas=["subject_areas/sales"])
+    sales = root / "subject_areas" / "sales"
+    if linked == "area":
+        shutil.rmtree(sales)
+        sales.symlink_to(value)
+    elif linked == "tables":
+        shutil.rmtree(sales / "tables")
+        (sales / "tables").symlink_to(value)
+    elif linked == "table_file":
+        (sales / "tables" / "z.yaml").symlink_to(value)
+    else:  # a local link to a link to the host
+        (root / "hop").symlink_to(value)
+        shutil.rmtree(sales)
+        sales.symlink_to(root / "hop")
+    touched = _no_model_filesystem_call_on_unc(monkeypatch)
+    assert cli.main(["areas", str(root)]) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "outside_model"
+    assert touched == []
+
+
+@SYMLINKS
+def test_a_link_loop_in_the_model_is_refused(tmp_path):
+    from semantic_model import loader
+
+    root = tmp_path / "acme"
+    root.mkdir()
+    (root / "a").symlink_to(root / "b")
+    (root / "b").symlink_to(root / "a")
+    with loader.contained(root), pytest.raises(loader.OutsideModel, match="too many links"):
+        loader.check_contained(root / "a" / "x.yaml")
+
+
+@SYMLINKS
+def test_a_local_link_inside_the_model_still_loads_contained(tmp_path):
+    """The link walk follows a link that stays inside the folder, so a model arranged with one loads."""
+    pytest.importorskip("pydantic")
+    from semantic_model import loader
+
+    root = tmp_path / "acme"
+    _small_model(root, "datasource: acme\nsubject_areas:\n  - subject_areas/alias\n")
+    (root / "subject_areas" / "alias").symlink_to("sales")
+    with loader.contained(root):
+        assert [a.name for a in loader.load_datasource(root).subject_areas] == ["sales"]
+
+
 # --- malformed input --------------------------------------------------------------------------------------
 
 
