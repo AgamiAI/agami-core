@@ -209,7 +209,7 @@ fi
 # an install is a network fetch that runs build code, which the person must agree to. A missing or
 # stale library stops them with how to install it. tests/test_approve_own_calls.py holds this list
 # and the hook's table equal.
-NO_INSTALL_VERBS="areas coverage review-queue review-items model-tree bundle"
+NO_INSTALL_VERBS="steps progress timing summary overview areas coverage review-queue review-items model-tree bundle batch-id wait-files"
 case " $NO_INSTALL_VERBS " in
   *" ${1:-} "*)
     if ! { _imports_ok && _version_ok; }; then

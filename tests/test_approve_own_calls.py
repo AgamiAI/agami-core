@@ -118,6 +118,19 @@ def _sm(art: Path, args: str, prefix: str = "bash ") -> str:
 # --- A. approved sm forms ----------------------------------------------------------------------------
 
 APPROVED = [
+    "steps {R}",
+    "steps {R} --mark connect=in_progress",
+    "steps {R} --mark connect=done --mark reports=skipped --mark build=in_progress",
+    "steps {R} --full",
+    "steps --full {R} --mark describe=done",
+    "progress {R}",
+    "progress {R} --wait 20",
+    "progress {R} --wait 0",
+    "progress {R} --wait 600",
+    "timing {R}",
+    "summary {R}",
+    "summary {R} --json",
+    "overview {R}",
     "areas {R}",
     "coverage {R}",
     "review-queue {R}",
@@ -128,9 +141,19 @@ APPROVED = [
     "review-items {R} --scope preseed",
     "review-items --scope preseed {R}",
     "model-tree {R}",
+    "model-tree {R} --out {T}/agami-tree.json",
     "bundle {R} --area sales",
     "bundle --area agami-example {R}",
+    "bundle {R} --area agami-example --out {T}/agami-examples-1-sales.input.json",
+    "batch-id",
+    "wait-files --file {T}/agami-a.result.json",
+    "wait-files --file {T}/agami-a.json --file {T}/agami-b.json --wait 60",
 ]
+
+# The approved forms that write: into the model's own .introspect/ (pinned by
+# test_an_approved_steps_or_progress_call_writes_only_inside_introspect), or to the scratch file
+# --out names. Every other approved form changes no file.
+WRITES = ("steps ", "progress ", "--out ")
 
 
 @pytest.mark.parametrize("args", APPROVED)
@@ -167,7 +190,15 @@ def test_a_model_root_that_does_not_exist_yet_is_allowed(art):
     assert _decision(_bash(f'bash "{SM}" areas {art / "newdb"}'), art) == "allow"
 
 
-@pytest.mark.parametrize("args", APPROVED)
+def test_a_step_mark_on_a_model_root_that_does_not_exist_yet_is_allowed(art):
+    # onboarding marks its first step before the build creates the folder
+    assert (
+        _decision(_bash(f'bash "{SM}" steps {art / "newdb"} --mark connect=in_progress'), art)
+        == "allow"
+    )
+
+
+@pytest.mark.parametrize("args", [a for a in APPROVED if not any(w in a for w in WRITES)])
 def test_an_approved_call_changes_no_file(art, args):
     """Each approved form, run against a real model, leaves every file under the artifacts folder's
     parent as it was: the verbs only read. A verb that started writing would fail here."""
@@ -177,7 +208,9 @@ def test_an_approved_call_changes_no_file(art, args):
     assert _decision(_bash(_sm(art, args)), art) == "allow"
     shutil.rmtree(art / "acme")
     shutil.copytree(PLUGIN / "samples" / "store" / "model", art / "acme")
-    filled = args.format(R=str(art / "acme")).split()
+    filled = args.format(R=str(art / "acme"), T=str(art / "local" / "tmp")).split()
+    if "--wait" in filled:  # the files never appear here: don't sit out the whole wait
+        filled[filled.index("--wait") + 1] = "0"
     if "--area" in filled:  # a subject area the sample model has
         filled[filled.index("--area") + 1] = (
             cli.L.load_datasource(art / "acme").subject_areas[0].name
@@ -193,6 +226,60 @@ def test_an_approved_call_changes_no_file(art, args):
     assert snapshot() == before
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        "steps {R}",
+        "steps {R} --mark describe=in_progress",
+        "steps {R} --full",
+        "progress {R}",
+        "progress {R} --wait 0",
+    ],
+)
+def test_an_approved_steps_or_progress_call_writes_only_inside_introspect(art, args):
+    # `steps` and `progress` keep the list they last printed in <root>/.introspect/steps.last; the
+    # hook approves them because that stays inside the model's own .introspect/ folder.
+    pytest.importorskip("pydantic")
+    from semantic_model import cli
+
+    assert _decision(_bash(_sm(art, args)), art) == "allow"
+    shutil.rmtree(art / "acme")
+    shutil.copytree(PLUGIN / "samples" / "store" / "model", art / "acme")
+
+    def snapshot() -> dict[Path, bytes]:
+        return {p: p.read_bytes() for p in art.parent.rglob("*") if p.is_file()}
+
+    before = snapshot()
+    filled = args.format(R=str(art / "acme")).split()
+    assert cli.main(filled) == 0
+    after = snapshot()
+    touched = {p for p in after if before.get(p) != after[p]} | (set(before) - set(after))
+    assert touched and all(p.parent == art / "acme" / ".introspect" for p in touched), touched
+    assert (art / "acme" / ".introspect" / "steps.last").is_file()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        "model-tree {R} --out {T}/agami-tree.json",
+        "bundle {R} --area agami-example --out {T}/agami-b.json",
+    ],
+)
+def test_an_approved_out_call_writes_only_its_scratch_file(art, args):
+    pytest.importorskip("pydantic")
+    from semantic_model import cli
+
+    assert _decision(_bash(_sm(art, args)), art) == "allow"
+    shutil.rmtree(art / "acme")
+    shutil.copytree(PLUGIN / "samples" / "store" / "model", art / "acme")
+    before = {p: p.read_bytes() for p in art.parent.rglob("*") if p.is_file()}
+    filled = args.format(R=str(art / "acme"), T=str(art / "local" / "tmp")).split()
+    assert cli.main(filled) == 0
+    after = {p: p.read_bytes() for p in art.parent.rglob("*") if p.is_file()}
+    touched = {p for p in after if before.get(p) != after[p]} | (set(before) - set(after))
+    assert touched == {Path(filled[-1])}
+
+
 def test_the_description_field_is_fine(art):
     assert _decision(_bash(_sm(art, "areas {R}"), description="Show the steps"), art) == "allow"
 
@@ -200,7 +287,7 @@ def test_the_description_field_is_fine(art):
 # --- A. refused sm forms: the reviewer's inputs and more ----------------------------------------------
 
 REFUSED = {
-    # abbreviated or `=` options; main's model-tree and bundle take no --out at all
+    # abbreviated or `=` options
     "abbrev --o": "org-draft {R} --o {A}/../.zshrc",
     "abbrev --o model-tree": "model-tree {R} --o {T}/agami-x.json",
     "abbrev --ou model-tree": "model-tree {R} --ou {T}/agami-x.json",
@@ -214,9 +301,11 @@ REFUSED = {
     "abbrev --sc review-items": "review-items {R} --sc all",
     "--scope= review-items": "review-items {R} --scope=all",
     "--area= bundle": "bundle {R} --area=sales",
-    # --out, which main's parser doesn't accept, even into scratch
-    "--out scratch model-tree": "model-tree {R} --out {T}/agami-tree.json",
-    "--out scratch bundle": "bundle {R} --area sales --out {T}/agami-x.json",
+    "abbrev --f wait-files": "wait-files --f {T}/agami-a.json",
+    "abbrev --m steps": "steps {R} --m build=done",
+    "abbrev --fu steps": "steps {R} --fu",
+    "abbrev --wa progress": "progress {R} --wa 5",
+    # --out outside scratch
     "--out home": "model-tree {R} --out {A}/../.zshrc",
     "--out new dirs": "model-tree {R} --out {T}/new/dirs/agami-settings.json",
     "--out not agami-": "model-tree {R} --out {T}/settings.json",
@@ -248,7 +337,24 @@ REFUSED = {
     "root tilde": "areas ~/agami-artifacts/acme",
     "root missing": "areas",
     "two roots": "areas {R} {R}",
+    "root outside, mark": "steps /tmp/elsewhere --mark build=done",
     # option values
+    "mark bad status": "steps {R} --mark build=finished",
+    "mark bad id": "steps {R} --mark Build=done",
+    "mark no value": "steps {R} --mark",
+    "mark option value": "steps {R} --mark --full",
+    "full twice": "steps {R} --full --full",
+    "wait negative": "progress {R} --wait -1",
+    "wait float": "progress {R} --wait 2.5",
+    "wait too long": "progress {R} --wait 601",
+    "wait twice": "progress {R} --wait 1 --wait 2",
+    "wait-files outside": "wait-files --file /tmp/agami-a.json",
+    "wait-files not agami-": "wait-files --file {T}/settings.json",
+    "wait-files none": "wait-files --wait 5",
+    "wait-files too long": "wait-files --file {T}/agami-a.json --wait 601",
+    "batch-id arg": "batch-id {R}",
+    "json on steps": "steps {R} --json",
+    "help on steps": "steps {R} -h",
     "scope bad": "review-items {R} --scope everything",
     "scope case": "review-items {R} --scope ALL",
     "scope no value": "review-items {R} --scope",
@@ -279,16 +385,6 @@ REFUSED = {
     "apply-enrichment": "apply-enrichment {R} --file {T}/agami-x.json --area sales",
     "context": "context {R} --tables orders",
     "unknown verb": "frobnicate {R}",
-    # verbs #662 approved that main does not have (they would only fail in main's parser, but the
-    # table names real verbs only, so a verb added under one of these names is reviewed first)
-    "steps": "steps {R}",
-    "steps mark": "steps {R} --mark connect=in_progress",
-    "progress": "progress {R} --wait 20",
-    "timing": "timing {R}",
-    "summary": "summary {R} --json",
-    "overview": "overview {R}",
-    "batch-id": "batch-id",
-    "wait-files": "wait-files --file {T}/agami-a.json",
 }
 
 
@@ -906,26 +1002,25 @@ def test_edit_and_write_agree_on_every_scratch_path(art, tmp_path):
 # --- the table itself, and the launcher's promise not to install for it ---------------------------------
 
 
-def test_the_table_is_exactly_these_read_only_verbs():
-    """A verb joins the table only after its handler has been read and found to read nothing but
-    the model at its root: no write, no database, no credentials, no file the call names."""
+def test_the_table_is_exactly_these_verbs():
+    """A verb joins the table only after its handler has been read: it reads the model at its root
+    and writes nothing but the model's own .introspect/ and a scratch --out file; no database, no
+    credentials, no file the call names outside the scratch folder."""
     assert set(HOOK_MOD.VERBS) == {
+        "steps",
+        "progress",
+        "timing",
+        "summary",
+        "overview",
         "areas",
         "coverage",
         "review-queue",
         "review-items",
         "model-tree",
         "bundle",
+        "batch-id",
+        "wait-files",
     }
-
-
-@pytest.mark.parametrize(
-    "verb", ["steps", "progress", "timing", "summary", "overview", "batch-id", "wait-files"]
-)
-def test_a_verb_main_does_not_have_is_not_approved(art, verb):
-    assert verb not in HOOK_MOD.VERBS
-    assert _decision(_bash(_sm(art, f"{verb} {{R}}")), art) is None
-    assert _decision(_bash(_sm(art, verb)), art) is None
 
 
 def _no_install_verbs() -> set[str]:
