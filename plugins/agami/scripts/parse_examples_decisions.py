@@ -38,13 +38,13 @@ _KEYS = {"n", "area", "question", "action", "sql", "note"}
 _NEEDS = {"fix": "sql", "note": "note"}
 
 
-def _items(args: list[str], default_area: str | None) -> dict[int, dict]:
+def _items(args: list[str], default_area: str | None, read=None) -> dict[int, dict]:
     """Every items file the page was rendered from, read and numbered exactly as the renderer does:
     its own reader (repeated `--items-file`, `AREA=PATH` labels, a file given twice or several
     unlabelled ones refused), then one global 1..N in the order given."""
     from render_examples_validation import _read_files
 
-    rendered = [it for _, _, items in _read_files(list(args)) for it in items]
+    rendered = [it for _, _, items in _read_files(list(args), read) for it in items]
     out = {}
     for n, it in enumerate(rendered, 1):
         if isinstance(it, dict):
@@ -183,7 +183,8 @@ def main(argv: list[str] | None = None) -> int:
         "--out-dir", help="write each area's keeps and fixes as sm add-example inputs here"
     )
     args = ap.parse_args(argv)
-    guarded = _scratch_out.guarded() and bool(args.out_dir)
+    under_guard = _scratch_out.guarded()
+    guarded = under_guard and bool(args.out_dir)
     if guarded:
         try:
             if _scratch_out._plain(args.out_dir) != _scratch_out.scratch_dir():
@@ -194,10 +195,20 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"ok": False, "error": str(e)}))
             return 2
     try:
-        doc = json.loads(Path(args.decisions_file).read_text(encoding="utf-8"))
-        items = _items(args.items_file, args.area)
+        if under_guard:
+            # The inputs are held to scratch too, with or without an --out-dir.
+            doc = json.loads(_scratch_out.read_scratch_text(args.decisions_file))
+            items = _items(args.items_file, args.area, _scratch_out.read_scratch_text)
+        else:
+            doc = json.loads(Path(args.decisions_file).read_text(encoding="utf-8"))
+            items = _items(args.items_file, args.area)
+    except _scratch_out.Refused as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        return 2
     except (OSError, ValueError, RecursionError) as e:
-        print(json.dumps({"ok": False, "error": f"could not read the files: {e}"}))
+        # Under the guard the files are not the person's to read back, so say nothing of them.
+        why = "" if under_guard else f": {e}"
+        print(json.dumps({"ok": False, "error": f"could not read the files{why}"}))
         return 2
     data, refused, error = parse(doc, items, args.expect_profile)
     if error:

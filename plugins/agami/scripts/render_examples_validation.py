@@ -118,11 +118,14 @@ def render(
     return out
 
 
-def _read_items(path: str) -> tuple[object, list]:
+def _read_items(path: str, read=None) -> tuple[object, list]:
     """A file's parsed JSON and its items: a bare array (one area's `sm seed-validate`) or the
     combined `{areas, items, totals}` object it prints for several areas."""
-    with open(os.path.expanduser(path), encoding="utf-8") as f:
-        doc = json.load(f)
+    if read is not None:  # the scratch-only guard's link-safe reader
+        doc = json.loads(read(path))
+    else:
+        with open(os.path.expanduser(path), encoding="utf-8") as f:
+            doc = json.load(f)
     items = doc.get("items") if isinstance(doc, dict) else doc
     if not isinstance(items, list):
         raise ValueError(f"{path}: must hold a JSON array of items or an object with an "
@@ -139,7 +142,7 @@ def _split_label(arg: str) -> tuple[str | None, str]:
     return None, arg
 
 
-def _read_files(args: list[str]) -> list[tuple[str, object, list]]:
+def _read_files(args: list[str], read=None) -> list[tuple[str, object, list]]:
     """Each `--items-file` as (path, parsed JSON, items), with a file's label copied into its
     items. Refuses a file given twice, and, with several files, an item no area is known for."""
     files, seen = [], {}
@@ -150,7 +153,7 @@ def _read_files(args: list[str]) -> list[tuple[str, object, list]]:
             # Its examples would get two numbers, and write-back keeps only the last.
             raise ValueError(f"{path}: given twice (also as {seen[real]})")
         seen[real] = path
-        doc, items = _read_items(path)
+        doc, items = _read_items(path, read)
         if area:
             for it in items:
                 if isinstance(it, dict):

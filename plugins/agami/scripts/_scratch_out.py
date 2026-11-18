@@ -169,6 +169,13 @@ def read_file(path: Path, cap: int = INPUT_CAP) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def read_scratch_text(path: str) -> str:
+    """The text of `path` when it is one of agami's `agami-<...>.json` scratch files, read link-safe:
+    what a parser reads under the guard, so a call steered by text in the data can't point it at (and
+    get an error quoting) a file the person owns."""
+    return read_file(scratch_file(os.path.expanduser(path), ("json",)))
+
+
 def save(path: Path, text: str) -> None:
     """Write `text` to `path` in one step: a fresh temp file beside it, then a rename, so a link
     planted at the name is replaced and never written through."""
