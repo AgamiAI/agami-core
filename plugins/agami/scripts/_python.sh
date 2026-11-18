@@ -69,14 +69,30 @@ agami_artifacts_dir() {
 # usual umask left it readable by anyone on the machine. A `local` or `tmp` that is a link is left
 # alone, nothing made through it: that would create a folder wherever it points (`sm init-local`
 # refuses one and says how to fix it).
+# On POSIX a `local/` another user owns, or one chmod can't make 0700, fails closed (stderr, return 1,
+# nothing made in it), as agami_paths.ensure_local_dir does: that user could change it back, and the
+# credentials and `.config` go in next. Git Bash on Windows has no such mode to check.
+_local_is_mine() { [ -O "$1" ]; }
+_windows_shell() { case "$(uname -s 2>/dev/null || true)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; esac; return 1; }
 agami_scratch_dir() {
   local art d
   art="$(agami_artifacts_dir)"
   d="$art/local/tmp"
   if [ -d "$art" ] && [ ! -L "$art/local" ] && [ ! -L "$d" ]; then
     [ -d "$art/local" ] || mkdir -m 700 "$art/local" 2>/dev/null || true
+    if [ -d "$art/local" ] && ! _windows_shell; then
+      if ! _local_is_mine "$art/local"; then
+        echo "agami: $art/local belongs to another user, so agami won't keep credentials or settings in it. Choose another artifacts folder, or have its owner remove it." >&2
+        return 1
+      fi
+      if ! chmod 700 "$art/local" 2>/dev/null; then
+        echo "agami: $art/local could not be made private (0700), so agami won't keep credentials or settings in it until it can be." >&2
+        return 1
+      fi
+    else
+      chmod 700 "$art/local" 2>/dev/null || true
+    fi
     [ -d "$d" ] || mkdir -m 700 "$d" 2>/dev/null || true
-    chmod 700 "$art/local" 2>/dev/null || true
   fi
   printf '%s\n' "$d"
 }

@@ -62,7 +62,7 @@ case " $SETUP_VERBS " in *" ${1:-} "*) SETUP_VERB=1 ;; esac
 if [ -n "$APPROVED_VERB" ]; then
   export PYTHONDONTWRITEBYTECODE=1
 else
-  agami_scratch_dir >/dev/null
+  agami_scratch_dir >/dev/null || exit 2   # a `local/` that can't be kept private: refused, said why
 fi
 
 PY="$(resolve_python)"
