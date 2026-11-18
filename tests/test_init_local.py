@@ -303,3 +303,39 @@ def test_a_new_folder_under_the_env_override_says_how_to_switch(first_run, monke
     assert not new.exists()
     rc, out = _run(["choose-folder", str(current)])  # the folder it already names is fine
     assert rc == 0, out
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks")
+@pytest.mark.parametrize("linked", ["local", "local/tmp"])
+@pytest.mark.parametrize("sample", [False, True])
+def test_init_local_writes_nothing_through_a_linked_folder(art, tmp_path, linked, sample):
+    """A linked `local/` (or `local/tmp`) would put the scratch folder and the credential template
+    wherever it points, outside the artifacts folder and outside its 0700 `local/`."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (art / "local").parent.mkdir(parents=True, exist_ok=True)
+    if linked == "local":
+        (art / "local").symlink_to(elsewhere)
+    else:
+        (art / "local").mkdir(mode=0o700)
+        (art / "local" / "tmp").symlink_to(elsewhere)
+    rc, out = _run(["init-local", str(art), *(["--sample"] if sample else [])])
+    assert rc == 2 and "link" in out["error"]
+    assert list(elsewhere.iterdir()) == []
+    assert not (art / ".gitignore").exists()  # refused before any write
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks")
+def test_the_launchers_scratch_folder_is_never_made_through_a_linked_local(art, tmp_path):
+    """`_python.sh` makes `local/tmp` before every `sm` and `py` call; through a linked `local` that
+    would create a folder wherever the link points."""
+    import subprocess
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "local").symlink_to(elsewhere)
+    script = f'. "{PLUGIN / "scripts" / "_python.sh"}"; agami_scratch_dir'
+    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(art)}
+    subprocess.run(["bash", "-c", script], env=env, check=True, capture_output=True, timeout=30)
+    assert list(elsewhere.iterdir()) == []

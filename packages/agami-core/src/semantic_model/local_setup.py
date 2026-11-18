@@ -99,6 +99,18 @@ def sample_credential(art: Path) -> str:
     return f"[{SAMPLE_PROFILE}]\ntype = sqlite\npath = {db}\n"
 
 
+def _refuse_links(*folders: Path) -> None:
+    # Checked before anything is written: through a link, the scratch folder and the credential
+    # template would land wherever it points, outside the artifacts folder and its 0700 `local/`.
+    for folder in folders:
+        if folder.is_symlink():
+            raise SetupRefused(
+                f"{folder} is a link to another place, so agami won't set up its private files "
+                "through it. Replace the link with a real folder (move what it points at here), "
+                "then try again."
+            )
+
+
 def init_local(path: str, sample: bool = False) -> dict[str, Any]:
     """Create `<art>` and `<art>/local/tmp/` (local/ and tmp/ 0700, an existing local/ tightened),
     make `.gitignore` ignore `local/`, and with `sample` write the sample's credential as
@@ -106,6 +118,7 @@ def init_local(path: str, sample: bool = False) -> dict[str, Any]:
     from agami_paths import LOCAL_SUBDIR, ensure_gitignore, ensure_local_dir
 
     art = own_artifacts_dir(path)
+    _refuse_links(art / LOCAL_SUBDIR, art / LOCAL_SUBDIR / "tmp")
     gitignore = art / ".gitignore"
     had_line = (
         gitignore.is_file()
