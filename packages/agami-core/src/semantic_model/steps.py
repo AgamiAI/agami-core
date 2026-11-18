@@ -28,6 +28,7 @@ STEP_IDS = (
     "tables",
     "build",
     "describe",
+    "open_questions",
     "signoff",
     "examples",
     "reports",
@@ -41,11 +42,16 @@ LABELS = {
     "tables": "Pick the tables",
     "build": "Read the tables and joins",
     "describe": "Describe columns and add metrics",
+    "open_questions": "Answer what the data can't settle",
     "signoff": "Sign off definitions and hide personal data",
     "examples": "Write and check example questions",
     "reports": "Check your reports",
     "first_question": "Summary and first question",
 }
+
+# Steps that run only when the person asked for them: 2g only with "Ask me as you go", the report
+# check only when reports were shared. One passed over without a mark is skipped, never done.
+OPTIONAL_STEPS = ("open_questions", "reports")
 
 MARK_STATUSES = ("in_progress", "done", "skipped")
 
@@ -459,14 +465,14 @@ def _later_counts(totals: dict[str, Any]) -> dict[str, Optional[str]]:
 
 
 def _imply(status: dict[str, str]) -> None:
-    """Rule C: a step before the furthest one reached is done (a passed-over report check is
+    """Rule C: a step before the furthest one reached is done (a passed-over optional step is
     skipped), and only the furthest step reached can still be in progress."""
     reached = [n for n, i in enumerate(STEP_IDS) if status[i] in ("in_progress", "done")]
     if not reached:
         return
     for i in STEP_IDS[: reached[-1]]:
         if status[i] == "pending":
-            status[i] = "skipped" if i == "reports" else "done"
+            status[i] = "skipped" if i in OPTIONAL_STEPS else "done"
         elif status[i] == "in_progress":
             status[i] = "done"
 
@@ -485,7 +491,7 @@ def _reopen_from(status: dict[str, str], step_id: str, to: str) -> None:
 
 
 def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, Any]:
-    """The nine steps with status, count and the label text to show, the current step, and a
+    """The ten steps with status, count and the label text to show, the current step, and a
     one-line `problem` when the model on disk or the last build needs the person's attention.
 
     Marks decide status; disk supplies counts and a few clamps on the build: replay the marks (A),

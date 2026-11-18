@@ -3,6 +3,17 @@ name: agami-connect
 description: "End-to-end database connection for agami: sets up credentials on first run (DB-type picker → writes <artifacts_dir>/local/credentials.example for the user to fill in), then introspects the live DB directly into the agami semantic model (subject areas, tables, columns, relationships with join cardinality, deep-table column groups, sensitive-column flags) under <artifacts_dir>/<profile>/. The structural model is built deterministically by the agami-core semantic_model package (catalog mode, or a probe-mode fallback when the catalog is locked down); the skill then layers LLM enrichment (descriptions, entities, metrics) and seeds EXPLAIN-validated NL→SQL examples. Every model write is gated by the semantic-model validator — no breaking model is ever persisted."
 when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami' / 'connect to my database' / 'introspect my database' / 'introspect the schema' / 'reload schema' / 'add a new database', wants to try agami WITHOUT a database ('I don't have a database', 'try the sample', 'use the sample data', 'demo data'), or after the user changes their schema and wants the model refreshed. Also auto-invoked by agami-query the first time it runs (when the semantic model is missing). This skill handles credential setup, introspection, enrichment, and seed-example validation — one entry point for everything before the user can query. The sample-database path (Phase 0s) needs no connection and copies in a ready, queryable model."
 argument-hint: "[sample | reintrospect | profile NAME]"
+allowed-tools:
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
+  - Bash(bash ${CLAUDE_PLUGIN_ROOT}/scripts/sm *)
+  - Bash("${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
+  - Bash(${CLAUDE_PLUGIN_ROOT}/scripts/sm *)
+  - Bash(AGAMI_SQL_MAX_ROWS=* bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
+  - Bash(AGAMI_SQL_MAX_ROWS=* bash ${CLAUDE_PLUGIN_ROOT}/scripts/sm *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" *)
+  - Bash(bash ${CLAUDE_PLUGIN_ROOT}/scripts/py *)
+  - Bash(AGAMI_PROFILE=* bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" *)
+  - Read(/${CLAUDE_PLUGIN_ROOT}/**)
 ---
 
 # agami connect

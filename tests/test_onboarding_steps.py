@@ -1,4 +1,4 @@
-"""The onboarding step list comes from the engine: `sm steps` prints the nine steps with a status
+"""The onboarding step list comes from the engine: `sm steps` prints the ten steps with a status
 and a count read from disk, so every surface draws the same list and a turn that ends loses nothing.
 """
 
@@ -31,6 +31,7 @@ LABELS = (
     "Pick the tables",
     "Read the tables and joins",
     "Describe columns and add metrics",
+    "Answer what the data can't settle",
     "Sign off definitions and hide personal data",
     "Write and check example questions",
     "Check your reports",
@@ -80,7 +81,7 @@ def test_fresh_profile_is_all_pending(tmp_path):
     root = tmp_path / "acme"
     result = steps.onboarding_steps(root)
     assert [s["id"] for s in result["steps"]] == list(steps.STEP_IDS)
-    assert len(result["steps"]) == 9
+    assert len(result["steps"]) == 10
     assert {s["status"] for s in result["steps"]} == {"pending"}
     assert result["current"] == "connect"
     assert not root.exists()
@@ -558,6 +559,8 @@ def test_reports_is_skipped_when_passed_over(model):
     result = steps.onboarding_steps(model)
     s = _by_id(result)
     assert s["reports"]["status"] == "skipped"
+    # 2g runs only when "Ask me as you go" was picked: passed over, it is skipped too
+    assert s["open_questions"]["status"] == "skipped"
     assert [s[i]["status"] for i in ("describe", "signoff", "examples")] == ["done"] * 3
     assert result["current"] == "first_question"
 
@@ -612,7 +615,7 @@ def test_cli_prints_a_compact_list_by_default(model, capsys):
     assert out["list"] == [
         {"done": "✓ ", "in_progress": "▶ ", "pending": "· "}[s["status"]] + s["text"] for s in shown
     ]
-    assert len(out["list"]) == 8  # reports skipped: not listed
+    assert len(out["list"]) == 9  # reports skipped: not listed
     assert out["list"][0] == "✓ Connect your database"
     assert out["list"][3].startswith("✓ Read the tables and joins — ")
     assert out["list"][4].startswith("▶ Describe columns and add metrics")
@@ -1034,162 +1037,162 @@ def _done_marks_before_build(tmp_path):  # a `done` mark is no restart; only `in
 DESCRIBED, EXAMPLES = "40% described, 8 metrics", "14 examples"
 ALL_COUNTS = {"build": BUILT, "describe": DESCRIBED, "signoff": SIGNED, "examples": EXAMPLES}
 
-# (setup, the nine statuses in order, current, counts that must be shown, problem)
+# (setup, the ten statuses in order, current, counts that must be shown, problem)
 STATUS_RULES = {
-    "1-no-root": (_no_root, "ppppppppp", "connect", {}, None),
-    "2-no-marks-model-loads": (_no_marks, "ddddppppp", "describe", {"build": BUILT}, None),
-    "3-forward-first-run": (_forward_run, "ddddddddd", None, ALL_COUNTS, None),
-    "4-build-done-mark-no-yaml": (_done_mark_no_yaml, "dddippppp", "build", {}, None),
+    "1-no-root": (_no_root, "pppppppppp", "connect", {}, None),
+    "2-no-marks-model-loads": (_no_marks, "ddddpppppp", "describe", {"build": BUILT}, None),
+    "3-forward-first-run": (_forward_run, "dddddddddd", None, ALL_COUNTS, None),
+    "4-build-done-mark-no-yaml": (_done_mark_no_yaml, "dddipppppp", "build", {}, None),
     "5-running-first-build": (
         _running_first_build,
-        "dddippppp",
+        "dddipppppp",
         "build",
         {"build": "33 of 34 tables"},
         None,
     ),
-    "6-restart-build-no-new-log": (_restart_build, "dddippppp", "build", {}, None),
+    "6-restart-build-no-new-log": (_restart_build, "dddipppppp", "build", {}, None),
     "7-restart-build-running": (
         _restart_build_running,
-        "dddippppp",
+        "dddipppppp",
         "build",
         {"build": "5 of 11 tables"},
         None,
     ),
     "8-failed-first-build": (
         _failed_first_build,
-        "dddpppppp",
+        "dddppppppp",
         "build",
         {},
         'The build didn\'t finish: "boom"',
     ),
     "9-failed-rebuild-marked": (
         _failed_rebuild_marked,
-        "dddpppppp",
+        "dddppppppp",
         "build",
         {},
         'The rebuild didn\'t finish: "boom"',
     ),
     "10-failed-rebuild-unmarked": (
         _failed_rebuild_unmarked,
-        "ddddppppp",
+        "ddddpppppp",
         "describe",
         {"build": BUILT},
         'The last rebuild didn\'t finish: "boom"',
     ),
     "11-restart-context-over-failed-log": (
         _restart_context_over_failed_log,
-        "dippppppp",
+        "dipppppppp",
         "context",
         {},
         None,
     ),
-    "12-restart-tables": (_restart_tables, "ddipppppp", "tables", {}, None),
-    "13-unloadable-model": (_unloadable, "dddddippp", "signoff", {}, "The model in "),
+    "12-restart-tables": (_restart_tables, "ddippppppp", "tables", {}, None),
+    "13-unloadable-model": (_unloadable, "dddddsippp", "signoff", {}, "The model in "),
     "14-stale-first-build": (
         _stale_first_build,
-        "dddpppppp",
+        "dddppppppp",
         "build",
         {},
         "The build stopped before it finished.",
     ),
-    "15a-done-log-no-yaml-fresh": (_done_log_no_yaml, "dddippppp", "build", {}, None),
+    "15a-done-log-no-yaml-fresh": (_done_log_no_yaml, "dddipppppp", "build", {}, None),
     "15b-done-log-no-yaml-stale": (
         _done_log_no_yaml_stale,
-        "dddpppppp",
+        "dddppppppp",
         "build",
         {},
         "The build stopped before it finished.",
     ),
-    "16-skips-survive": (_skips_survive, "dddipppsp", "build", {"build": "5 of 11 tables"}, None),
+    "16-skips-survive": (_skips_survive, "dddippppsp", "build", {"build": "5 of 11 tables"}, None),
     "17-running-behind-a-finished-step": (
         _behind_a_finished_step,
-        "ddddddppp",
+        "dddddsdppp",
         "examples",
         {"build": BUILT, "describe": DESCRIBED, "signoff": SIGNED},
         None,
     ),
     "18-pending-has-no-count": (
         _describing,
-        "ddddipppp",
+        "ddddippppp",
         "describe",
         {"build": BUILT, "describe": DESCRIBED},
         None,
     ),
-    "19-restart-connect": (_restart_connect, "ipppppppp", "connect", {}, None),
-    "A-restart-drops-later-marks": (_restart_drops_later, "dippppppp", "context", {}, None),
-    "A-done-does-not-restart": (_done_does_not_restart, "dddpppppp", "build", {}, None),
-    "B-unloadable-no-marks": (_unloadable_no_marks, "ddddppppp", "describe", {}, "The model in "),
-    "B-reintrospect-context-done": (_reintrospect_context_done, "ddppppppp", "tables", {}, None),
-    "B-reintrospect-tables-done": (_reintrospect_tables_done, "dddpppppp", "build", {}, None),
+    "19-restart-connect": (_restart_connect, "ippppppppp", "connect", {}, None),
+    "A-restart-drops-later-marks": (_restart_drops_later, "dipppppppp", "context", {}, None),
+    "A-done-does-not-restart": (_done_does_not_restart, "dddppppppp", "build", {}, None),
+    "B-unloadable-no-marks": (_unloadable_no_marks, "ddddpppppp", "describe", {}, "The model in "),
+    "B-reintrospect-context-done": (_reintrospect_context_done, "ddpppppppp", "tables", {}, None),
+    "B-reintrospect-tables-done": (_reintrospect_tables_done, "dddppppppp", "build", {}, None),
     "D5-build-done-mark-failed-rebuild": (
         _built_then_failed_rebuild,
-        "ddddppppp",
+        "ddddpppppp",
         "describe",
         {"build": BUILT},
         'The last rebuild didn\'t finish: "boom"',
     ),
     "D7-unloadable-beats-failed-rebuild": (
         _unloadable_then_failed_rebuild,
-        "ddddppppp",
+        "ddddpppppp",
         "describe",
         {},
         "The model in ",
     ),
     "D-stale-failed-log-stays-failed": (
         _stale_failed_first_build,
-        "dddpppppp",
+        "dddppppppp",
         "build",
         {},
         'The build didn\'t finish: "boom"',
     ),
     "D-log-older-than-model-is-none": (
         _log_older_than_model,
-        "ddddppppp",
+        "ddddpppppp",
         "describe",
         {"build": BUILT},
         None,
     ),
     "D-done-log-with-model-is-none": (
         _done_log_with_model,
-        "ddddppppp",
+        "ddddpppppp",
         "describe",
         {"build": BUILT},
         None,
     ),
     "C-reports-implied-skipped": (
         _reports_passed_over,
-        "dddddddsi",
+        "dddddsddsi",
         "first_question",
         ALL_COUNTS,
         None,
     ),
-    "3-retry-after-failure": (_retry_after_failure, "dddippppp", "build", {}, None),
-    "build-skipped-is-harmless": (_build_skipped, "dddsipppp", "describe", {}, None),
-    "sample-copy-path": (_sample_copied, "dddddddsi", "first_question", ALL_COUNTS, None),
+    "3-retry-after-failure": (_retry_after_failure, "dddipppppp", "build", {}, None),
+    "build-skipped-is-harmless": (_build_skipped, "dddsippppp", "describe", {}, None),
+    "sample-copy-path": (_sample_copied, "dddddsddsi", "first_question", ALL_COUNTS, None),
     "D-stale-mark-no-log": (
         _stale_mark_no_log,
-        "dddpppppp",
+        "dddppppppp",
         "build",
         {},
         "The build stopped before it finished.",
     ),
     "D-stale-mark-older-log": (
         _stale_mark_older_log,
-        "dddpppppp",
+        "dddppppppp",
         "build",
         {},
         "The rebuild stopped before it finished.",
     ),
     "B-model-only-context-done": (
         _context_done_over_model,
-        "ddddppppp",
+        "ddddpppppp",
         "describe",
         {"build": BUILT},
         None,
     ),
     "A-done-before-build-is-no-restart": (
         _done_marks_before_build,
-        "ddddppppp",
+        "ddddpppppp",
         "describe",
         {"build": BUILT},
         None,
