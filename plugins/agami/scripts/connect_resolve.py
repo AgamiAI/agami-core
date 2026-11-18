@@ -23,6 +23,8 @@ Output (the standard refactor contract):
       "config": {"present": bool, "active_profile": ..., "tier": ..., "tool_paths": {...}},
       "interpreter": {"python3": "/path", "has_model_deps": bool,
                       "has_driver": bool|null, "chosen_because": "...",
+                      "has_core": bool,     # semantic_model.cli imports (what `sm` runs)
+                      "core_ready": bool,   # the deps + has_core + a current library: no install needed
                       "plugin_version": "0.9.18"|null, "agami_core": "0.9.18"|null,
                       "candidates_scored": [{..., "has_pip", "agami_core", "skipped", "reason"?}]},
       "tools": {"psql": "/path"|null, "sqlite3": ...},
@@ -201,6 +203,14 @@ def _probe_install(py: str) -> dict:
             "this_checkout": bool(got.get("this_checkout"))}
 
 
+def _dev_layout() -> bool:
+    """A dev checkout, told apart from a marketplace install as `sm`'s _dev_layout does: packages/ beside
+    the plugin, in a folder whose name isn't a version."""
+    plugin_root = Path(__file__).resolve().parent.parent
+    return ((plugin_root.parent.parent / "packages" / "agami-core" / "pyproject.toml").is_file()
+            and not plugin_root.name[:1].isdigit())
+
+
 def _pinned_lacks(pinned: str, entry: dict, db_key: str, want: str | None) -> dict | None:
     """The anomaly for an $AGAMI_PYTHON missing the model deps or the driver: what it lacks and the exact
     line that adds it. It names pip only when pip is missing too, since then the line cannot run yet."""
@@ -288,14 +298,7 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
                           " (the configured interpreter)" if py == configured else ""))
     if pinned:
         best = scored[0]
-        if best["has_model_deps"]:
-            best["has_core"] = _probe(pinned, list(_CORE_MODULES))
         because = "$AGAMI_PYTHON, used as set: agami never replaces it with another Python"
-        lacks = _pinned_lacks(pinned, best, db_key, want)
-        if lacks:
-            # it already says pip is missing, and what to install once it is there
-            warnings = [w for w in warnings if w["kind"] != "agami_python_cannot_be_brought_current"]
-            warnings.append(lacks)
     elif best is None:
         # nothing fully equipped → first working base interpreter (caller installs into it)
         usable = [e for e in scored if not e["skipped"]]
@@ -309,10 +312,23 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
             best = {"python3": shutil.which("python3") or "python3", "has_model_deps": False,
                     "has_driver": None, "agami_core": None}
             because = "no candidate interpreter found"
-    if id(best) not in current and is_older(best.get("agami_core"), want):
+    # `sm` runs semantic_model.cli, so the deps importing is not enough: a fresh Python with pydantic,
+    # sqlglot and yaml but no agami-core skipped the install question, and the setup verbs exited 12.
+    best["has_core"] = bool(best["has_model_deps"]) and _probe(pinned or best["python3"], list(_CORE_MODULES))
+    if pinned:
+        lacks = _pinned_lacks(pinned, best, db_key, want)
+        if lacks:
+            # it already says pip is missing, and what to install once it is there
+            warnings = [w for w in warnings if w["kind"] != "agami_python_cannot_be_brought_current"]
+            warnings.append(lacks)
+    stale = id(best) not in current and is_older(best.get("agami_core"), want)
+    if stale:
         warnings.append({"kind": "library_older_than_plugin", "where": best["python3"],
                          "detail": stale_warning(best["python3"], best["agami_core"], want)})
-    return {**{k: best[k] for k in ("python3", "has_model_deps", "has_driver")}, "chosen_because": because,
+    # The same rule as `sm`'s _version_ok: in a dev checkout only this checkout's library will do.
+    current_enough = id(best) in current if _dev_layout() else not stale
+    return {**{k: best[k] for k in ("python3", "has_model_deps", "has_driver", "has_core")},
+            "core_ready": best["has_core"] and current_enough, "chosen_because": because,
             "plugin_version": want, "agami_core": best.get("agami_core"),
             "candidates_scored": scored, "warnings": warnings}
 
