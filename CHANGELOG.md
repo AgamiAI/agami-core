@@ -12,6 +12,15 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **A join through a step names the relationship it is keyed on.** A step that only lists one
+  table's key column (de-duplicated or filtered), joined to another table on exactly a declared
+  relationship's key, now carries `follows` on its receipt join item: that relationship's name, its
+  two tables and its review state. The join's status stays `undeclarable`, so the double-counting
+  check is unchanged. A computed or renamed key, or a declaration with a condition on the step's
+  side, follows nothing.
+
 ## [0.9.24] — 2026-11-17
 
 ### Security
