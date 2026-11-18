@@ -130,6 +130,9 @@ def test_the_skills_own_commands_are_still_approved():
         f"{PY} connect_resolve.py --db-type sqlite --profile agami-example",
         f'{PY} "{ROOT}/samples/store/build_sample.py" --out "{ART}/local/samples/store.db"',
         f"{PY} promote_credentials.py",
+        f"{SM} init-local {ART}",
+        f"{SM} init-local {ART} --sample",
+        f"{SM} set-config {ART} --tier cli --active-profile acme --python3 /usr/bin/python3",
     ]
     for c in commands:
         assert _approved(c), c

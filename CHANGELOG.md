@@ -44,6 +44,16 @@ below corresponds to one such version.
   `--question-file`), used as written. The permission hook also approves `steps`, `progress`,
   `summary`, `overview`, `batch-id` and `--out` into agami's scratch folder.
 
+- **`sm init-local` and `sm set-config`.** agami writes its own first-run files: `init-local
+  <artifacts_dir>` makes `local/` (0700) and its scratch folder and has `.gitignore` ignore
+  `local/`, and with `--sample` writes the sample database's credential for the promoter;
+  `set-config <artifacts_dir>` writes `.config` (0600) from checked fields (a tier, a profile name,
+  interpreter and tool paths, the reviewer's identity from a scratch file), keeping every other key.
+  Both act only on agami's own artifacts folder. agami-connect uses them instead of a `mkdir` and
+  Writes outside the working folder, which each stopped for permission; agami-model saves the
+  reviewer's identity the same way. On the sample, `sm steps` leaves out the three steps the sample
+  never runs (tables, open questions, reports) from the first list.
+
 ### Changed
 
 - **Every agami-connect command is one literal call.** The skill and the shared files it links

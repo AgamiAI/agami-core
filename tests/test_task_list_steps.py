@@ -228,3 +228,24 @@ def test_build_stops_waiting_on_a_problem():
     assert "post its `say`, do what its `then` says, then handle it" in " ".join(text.split())
     assert '"The validator gates the write"' in text
     assert "\nThe validator gates the write" in _text(CONNECT / "SKILL.md")
+
+
+def test_the_samples_first_list_has_only_its_own_steps(tmp_path):
+    # A live sample run's first list showed "Pick the tables", "Answer what the data can't settle"
+    # and "Check your reports" until the skill marked each skipped; the sample has none of them.
+    root = tmp_path / steps.SAMPLE_PROFILE
+    steps.mark(root, "connect", "in_progress")
+    listed = steps.compact(steps.onboarding_steps(root))["list"]
+    assert not any(
+        x in line
+        for line in listed
+        for x in ("Pick the tables", "Answer what the data", "Check your reports")
+    )
+    assert listed[0] == "▶ Connect your database" and len(listed) == 7
+
+
+def test_another_profile_still_lists_every_step(tmp_path):
+    root = tmp_path / "acme"
+    steps.mark(root, "connect", "in_progress")
+    listed = steps.compact(steps.onboarding_steps(root))["list"]
+    assert len(listed) == 10 and "· Pick the tables" in listed

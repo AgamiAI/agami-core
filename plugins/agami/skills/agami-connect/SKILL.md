@@ -39,6 +39,8 @@ allowed-tools:
   - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" seed-validate *)
   - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" enrich-metadata *)
   - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" batch-id)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" init-local *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-config *)
   - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate *)
   - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add *)
   - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add-example *)
@@ -219,11 +221,11 @@ Items 3 to 5 are handed over on 1.5's context card (its `Definitions or a semant
 **When Phase 0a is skipped** (the credentials already exist), ask this step at the start of 1.4 instead, on a first onboard of that database. Not on `reintrospect`.
 
 ### 0a.1 — Set up `<artifacts_dir>/local/`
-One call, which creates the folder with its private mode:
+If the user chose a non-default `<artifacts_dir>`, first **persist the pointer** so future sessions find it: write the folder's absolute path as the only line of `<home>/.config/agami/path` with the Write tool (your home folder written out; the Write tool makes the folder). Then one call creates the folder, its private `local/` (0700) and scratch folder, and makes `<artifacts_dir>/.gitignore` ignore `local/` (no Write, Read or `mkdir` of your own):
 ```bash
-mkdir -m 700 -p "<artifacts_dir>/local"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" init-local "<artifacts_dir>"
 ```
-If the user chose a non-default `<artifacts_dir>`, **persist the pointer** so future sessions find it, and gitignore `local/`: write the folder's absolute path as the only line of `<home>/.config/agami/path` with the Write tool (your home folder written out; the Write tool makes the folder), then give `<artifacts_dir>/.gitignore` a `local/` line as preflight's `data.gitignore` says, never with `cat` in Bash and never by reading a file that may not be there (a Read of a missing file shows as a failed step): `missing` → write the file with that one line with the Write tool, no Read first; `lacks_local` → Read it with the Read tool, then add the line with the Edit tool; `has_local` → nothing to do.
+It works only on agami's own artifacts folder: an `error` naming another folder means the pointer above wasn't written yet.
 
 ### 0a.2 — Ask the database type
 
@@ -483,17 +485,11 @@ The options follow the operating system the session's environment names (as at t
 (For Other, suggest a team repo path as the example, e.g. `~/code/acme-data/agami`.) Expand `~` / `%USERPROFILE%` to an absolute path. Validate: absolute, not inside `<artifacts_dir>/local/`, parent creatable. Store the **resolved absolute path** in `.config.artifacts_dir`.
 
 ### 0a.7 — Write `<artifacts_dir>/local/.config`
-```json
-{
-  "schema_version": 1,
-  "tier": "<cli | duckdb | python>",
-  "active_profile": "<profile>",
-  "artifacts_dir": "<resolved absolute path>",
-  "tool_paths": { "psql": "...", "python3": "<python3>" },
-  "detected_at": "<ISO8601 UTC, from the stamp `sm batch-id` prints>"
-}
+One call, which checks each value and keeps every other key in the file (written 0600):
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-config "<artifacts_dir>" --tier <tier> --active-profile <profile> --python3 "<python3>" --tool <tool>="<tool_path>"
 ```
-`python3` MUST be the `<python3>` resolved in 0a.5 (the interpreter that has both the model deps and the DB driver) — `sm` and the introspection engine read it from here, so recording the wrong one reintroduces the interpreter mismatch. It holds no secret, but it names the reviewer, so it stays private: `local/` is kept at 0700 by every agami command that writes there.
+`<tier>` is `cli`, `duckdb` or `python`; `--tool` names the native query tool the tier uses (`psql`, `mysql`, `snowsql`, `sqlite3` or `duckdb`) with its absolute path, left out for the `python` tier. `python3` MUST be the `<python3>` resolved in 0a.5 (the interpreter that has both the model deps and the DB driver) — `sm` and the introspection engine read it from here, so recording the wrong one reintroduces the interpreter mismatch. Never write `.config` with the Write tool.
 
 The database's folder is known from here, `<root>` = `<artifacts_dir>/<profile>`: mark the step started and refresh the task list ([shared/task-list.md](../../shared/task-list.md)):
 ```bash
@@ -572,7 +568,7 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
 
 1. **Resolve the environment first**, since the short-circuit skipped preflight step 1: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_resolve.py --db-type sqlite --profile agami-example`. Its output names everything this path uses: `data.artifacts_dir` is `<artifacts_dir>` (on a first run, when `data.artifacts_dir_source` is `default` and there is no `.config`, ask 0a.6's card instead, default `~/agami-artifacts`), `data.interpreter.python3` is `<python3>`, `data.interpreter.has_model_deps` says whether agami-core is importable, and `data.tools.sqlite3` says whether the `sqlite3` CLI is there.
 
-   **Set up `local/`** (same as 0a.1): `mkdir -m 700 -p "<artifacts_dir>/local"`, one call. Ensure `<artifacts_dir>/.gitignore` ignores `local/` as step 1's `data.gitignore` says (0a.1 says how): `missing` (a first run) → write it with the Write tool, no Read first, since a Read of a missing file shows as a failed step; `lacks_local` → Read, then Edit; `has_local` → nothing. Never `cat` in Bash.
+   **Set up `local/`** (same as 0a.1), one call: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" init-local "<artifacts_dir>"`.
 
    Mark the step started and refresh the task list ([shared/task-list.md](../../shared/task-list.md)):
    ```bash
@@ -584,17 +580,16 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" "${CLAUDE_PLUGIN_ROOT}/samples/store/build_sample.py" --out "<artifacts_dir>/local/samples/store.db"
    ```
    Uses the `sqlite3` CLI if present, else the stdlib builder; prints the size.
-4. **Write the `[agami-example]` credential by reusing the deterministic promoter** — don't hand-roll the INI. Write a `credentials.example` whose `[agami-example]` section has the **resolved absolute** path from step 3, then promote it:
-   ```ini
-   [agami-example]
-   type = sqlite
-   path = <resolved abs path to local/samples/store.db>
-   ```
+4. **Write the `[agami-example]` credential with the deterministic promoter** — don't hand-roll the INI, and don't write the file yourself. `--sample` writes `local/credentials.example` with the sample's section (its `path` the database from step 3), never over an existing one; then promote it:
    ```bash
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" init-local "<artifacts_dir>" --sample
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" promote_credentials.py
    ```
    `SECURED`/`APPENDED` → chmod 600, collision-safe. (No placeholders → never trips `PLACEHOLDERS_REMAIN`.)
-5. **Write `<artifacts_dir>/local/.config`** (same shape as 0a.7): `active_profile: agami-example`, `artifacts_dir`, `tool_paths.python3` = `<python3>` (+ `sqlite3` if found), `tier`.
+5. **Write `<artifacts_dir>/local/.config`** (as 0a.7 does), one call; add `--tool sqlite3="<sqlite3_path>"` when step 1 found the `sqlite3` CLI (`tier` `cli`), else leave it out (`tier` `python`):
+   ```bash
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-config "<artifacts_dir>" --tier <tier> --active-profile agami-example --python3 "<python3>"
+   ```
 
    The sample database is ready: mark the step done and refresh the task list ([shared/task-list.md](../../shared/task-list.md)):
    ```bash
@@ -710,7 +705,7 @@ When the user chooses **Onboard another database**, ask (AskUserQuestion, header
 
 - **Same company (the common case)** → the new profile **attaches under the deployment org**: it lands in the **same** `<artifacts_dir>`, shares the same `org_id` from the root `organization.yaml`, and **shares the company context** authored earlier. Do **not** re-ask the company description (1.4 detects the already-authored company context and skips it); the per-database note is still asked. Narrate it: *"This attaches under your **`<company name>`** organization, sharing the company context you set earlier — its per-database notes stay its own."*
 - **Different company** → set up a **new deployment folder**. Pick/confirm a new artifacts dir path, create it, and **repoint** the pointer to it (the same idiom Phase 0a.1 uses for a non-default dir):
-  `mkdir -m 700 -p "<new_artifacts_dir>/local"`, one call that makes the folder and its private `local/`; then the Write tool writes the folder's absolute path as the only line of `<home>/.config/agami/path` (your home folder written out; the Write tool makes the folder); then `<new_artifacts_dir>/.gitignore` gets a `local/` line: the folder was just made, so write the file with that one line with the Write tool, with no Read first (a Read of a missing file shows as a failed step) and never `cat` in Bash; only if the Write tool says the file already exists, Read it, then add the line with the Edit tool.
+  the Write tool writes the folder's absolute path as the only line of `<home>/.config/agami/path` (your home folder written out; the Write tool makes the folder); then one call makes the folder, its private `local/` and the `.gitignore` line, `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" init-local "<new_artifacts_dir>"`.
   The current org's files are **untouched**; the first onboarding in the new folder mints a **fresh** `org_id` + its own company record (1.4 authors it there). This is the only way to run two companies from one machine — one folder each.
 
 ### 1.2 — Scope: schemas, and the no-catalog case
@@ -1512,7 +1507,7 @@ After each card, apply its answers in one `sm curate` batch (approvals with `--s
 - header `Email`, *"Which email should sign-offs be recorded under? Type it in Other below."*: options **Don't sign anything yet** (nothing is approved; the items stay as they are and you go to 4b) and **Go back** (ask again the card that led here, with nothing approved). The email is typed in "Other", e.g. `you@example.com`; it is asked for in the question, never offered as an option, because an option like "Type it in Other" gets clicked with nothing typed ([question-cards rule 5](../../shared/question-cards.md#5-free-text-goes-in-other)).
 - header `Role`, *"What is your role?"*: options **Data Lead**, **Engineer**, **Analyst**; "Other" takes any other role (≤ 40 characters).
 
-The identity is typed by the person: **never infer it** from git config, the environment, the credentials, or the Claude login, and don't pre-fill a domain. An email that doesn't match `\S+@\S+\.\S+` is said back and the same card asked again. Merge the two keys into `<artifacts_dir>/local/.config` (keep every other key; `local/` is already private), so neither this run nor `/agami-model` asks again.
+The identity is typed by the person: **never infer it** from git config, the environment, the credentials, or the Claude login, and don't pre-fill a domain. An email that doesn't match `\S+@\S+\.\S+` is said back and the same card asked again. Save them so neither this run nor `/agami-model` asks again: write `{"email": "<email>", "role": "<role>"}`, as typed, to `<artifacts_dir>/local/tmp/agami-identity.json` with the Write tool, then `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-config "<artifacts_dir>" --identity-file "<artifacts_dir>/local/tmp/agami-identity.json"`, which keeps every other key (the person's words never go on the command line). An `error` from it about the email or role is said back and the same card asked again.
 
 **When `sm sensitive` prints `personal_data: enforced_by_warehouse`, skip this question.** The organisation set that its warehouse controls who sees personal data (`sm set-personal-data`), so the build flagged nothing; say so in one line, *"Personal data: your warehouse controls who sees it, so this build flagged none of it."*, and ask nothing about it. When `sm sensitive`'s `count` is above 0 (flags kept from before the setting, on a reload), add it: *"<count> columns flagged before stay flagged; change them in /agami-model."*
 

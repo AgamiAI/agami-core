@@ -65,7 +65,6 @@ SHORTHAND = re.compile(r"^sm ([a-z][a-z-]*)(?: (.*))?$")
 # Commands other than agami's launchers that a fence may still show, each with the reason it stays.
 # A fenced command whose first word is not here (and not the launcher) fails the allowlist test.
 ALLOWED_HELPERS = {
-    "mkdir": "0a.1 creates the private local/ folder in one call (`mkdir -m 700 -p`); no sm verb does",
     "psql": "the native-CLI query tier: password-free through PGPASSFILE, SQL read from a scratch file",
     "PGPASSFILE": "the env prefix of that psql call (the auth file, never the password)",
     "mysql": "the native-CLI query tier: password-free through --defaults-file, SQL read with `source`",
@@ -209,8 +208,6 @@ HELPER_SPANS = {
     "pip install duckdb pytz": _DRIVER,
     "pip install": _DRIVER,
     "pip install --user": _DRIVER,
-    'mkdir -m 700 -p "<artifacts_dir>/local"': "creates the private local/ folder in one call; no sm verb does",
-    'mkdir -m 700 -p "<new_artifacts_dir>/local"': "a second company's folder and its private local/, one call",
     'mkdir -p "<artifacts_dir>/local/model-spec/<profile>"': "only with a spec workbook: its parser does not create its output folder",
     'mv "<artifacts_dir>/<profile>" "<artifacts_dir>/<profile>.partial-<timestamp>"': "only after a failed spec apply: moves a partial model aside, never deletes it",
     "kill <pid>": "only where the session has no stop tool, to stop the password helper",
@@ -320,7 +317,9 @@ COMMANDS, SHORTHANDS, OTHERS, HELPER_USES, UNLABELLED = scan()
 def test_the_scan_finds_the_commands():
     assert len(COMMANDS) > 60 and len(SHORTHANDS) > 40
     assert any('sm" steps "<root>" --mark first_question=in_progress' in c for _, c in COMMANDS)
-    assert any("mkdir -m 700 -p" in c for _, c in OTHERS) and HELPER_USES
+    # local/ is made by `sm init-local`, never by a mkdir of Claude's own
+    assert any('sm" init-local "<artifacts_dir>"' in c for _, c in COMMANDS)
+    assert not any(c.startswith("mkdir") for _, c in OTHERS) and HELPER_USES
 
 
 def _without_placeholders(command: str) -> str:

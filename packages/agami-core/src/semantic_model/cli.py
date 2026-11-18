@@ -647,6 +647,31 @@ def cmd_batch_id(args) -> int:
     return 0
 
 
+def cmd_init_local(args) -> int:
+    """Set up `<artifacts_dir>/local/` (0700), its scratch folder and `.gitignore`; `--sample` also
+    writes the sample's credential for promote_credentials.py. See semantic_model/local_setup.py."""
+    from . import local_setup as LS
+    try:
+        _print_json(LS.init_local(args.artifacts_dir, sample=args.sample))
+    except LS.SetupRefused as exc:
+        _print_json({"error": str(exc)})
+        return 2
+    return 0
+
+
+def cmd_set_config(args) -> int:
+    """Merge checked fields into `<artifacts_dir>/local/.config` (0600). See local_setup.py."""
+    from . import local_setup as LS
+    try:
+        _print_json(LS.set_config(args.artifacts_dir, tier=args.tier,
+                                  active_profile=args.active_profile, python3=args.python3,
+                                  tools=args.tool, identity_file=args.identity_file))
+    except LS.SetupRefused as exc:
+        _print_json({"error": str(exc)})
+        return 2
+    return 0
+
+
 def cmd_steps(args) -> int:
     """The onboarding step list read from disk, after applying any --mark: by default the compact
     list the skill copies as is, `--full` the whole dict (ids, labels, counts, timeline path).
@@ -2727,6 +2752,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("batch-id", help="print a fresh stamp for the names of one page's scratch files")
     sp.set_defaults(func=cmd_batch_id)
 
+    sp = sub.add_parser("init-local", help="create <artifacts_dir>/local/ (0700) and its scratch folder, and make .gitignore ignore local/; --sample also writes the sample database's credential")
+    sp.add_argument("artifacts_dir", help="agami's artifacts folder, written out in full")
+    sp.add_argument("--sample", action="store_true",
+                    help="write local/credentials.example for the sample database (never over an existing one)")
+    sp.set_defaults(func=cmd_init_local)
+
+    sp = sub.add_parser("set-config", help="write checked fields into <artifacts_dir>/local/.config (0600), keeping every other key")
+    sp.add_argument("artifacts_dir", help="agami's artifacts folder, written out in full")
+    sp.add_argument("--tier", default=None, help="cli | duckdb | python")
+    sp.add_argument("--active-profile", default=None, dest="active_profile")
+    sp.add_argument("--python3", default=None, help="the interpreter agami runs, an absolute path")
+    sp.add_argument("--tool", action="append", default=[], metavar="NAME=PATH",
+                    help="a native query tool's absolute path: psql, mysql, snowsql, sqlite3 or duckdb (repeatable)")
+    sp.add_argument("--identity-file", default=None, dest="identity_file",
+                    help='a scratch file holding {"email": ..., "role": ...}, the reviewer as typed')
+    sp.set_defaults(func=cmd_set_config)
+
     sp = sub.add_parser("progress", help="the build's latest progress line, ready to post, with a bar from its own counts; --wait N returns when the log moves on")
     sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
     sp.add_argument("--wait", type=float, default=0.0,
@@ -3086,7 +3128,7 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
 # besides the model it is given. Under the scratch-only guard each must be a scratch file (or, out,
 # a model's datasource.md): the readers check again as they open, these catch the rest up front.
 _NAMED_INPUTS = ("ops", "ops_file", "file", "tables_file", "sql_file", "plan", "csv_file",
-                 "name_file", "description_file", "question_file", "spec", "items")
+                 "name_file", "description_file", "question_file", "spec", "items", "identity_file")
 _NAMED_OUTPUTS = ("out", "out_file", "inventory_out", "progress")
 
 

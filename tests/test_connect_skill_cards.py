@@ -385,8 +385,10 @@ def test_4a_personal_data_card_hides_columns_with_exclude_ops():
 def test_4a_identity_card_asks_once_and_saves_to_config():
     s = _phase_4()
     assert "reviewer_email" in s and "reviewer_role" in s
-    # `local/` is created private (0a.1), so the merge needs no chmod of its own
-    assert "`local/` is already private" in s
+    # saved by `sm set-config` from a scratch file (0600, every other key kept), never by a Write of
+    # `.config` and never with the person's words on the command line
+    assert 'set-config "<artifacts_dir>" --identity-file' in s
+    assert "`local/` is already private" not in s
     assert "first approval" in s.lower()
     assert "never infer" in s.lower()
     assert "you@example.com" in s

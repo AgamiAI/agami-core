@@ -119,7 +119,8 @@ def test_review_reads_suspected_personal_data():
 def test_identity_card_is_asked_once_and_never_inferred():
     text = _text()
     assert "reviewer_email" in text and "reviewer_role" in text
-    assert "chmod 600" in text
+    # private through `sm set-config` (0600), not a Write of `.config` and a chmod
+    assert 'set-config "<artifacts_dir>" --identity-file' in text
     assert "never infer" in text.lower()
     assert "you@example.com" in text
     assert "Don't sign anything yet" in text

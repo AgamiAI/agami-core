@@ -55,6 +55,12 @@ OPTIONAL_STEPS = ("open_questions", "reports")
 
 MARK_STATUSES = ("in_progress", "done", "skipped")
 
+# The sample database's model folder (agami-connect Phase 0s) and the steps its path never runs: no
+# table picker, no open questions, no reports. They are skipped from the first list, so the person
+# never sees steps the sample doesn't have; a mark still overrides.
+SAMPLE_PROFILE = "agami-example"
+SAMPLE_SKIPS = ("tables", "open_questions", "reports")
+
 # An unfinished build log this long untouched is taken for a build that died without a word (a
 # killed process writes no `failed:` line), so the list doesn't read "building" forever.
 STALE_BUILD_SECONDS = 1800
@@ -559,7 +565,8 @@ def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, An
 
     replay = _replay_marks(root)
     marks = replay.marks
-    status = {i: marks.get(i, "pending") for i in STEP_IDS}
+    unmarked = "skipped" if root.name == SAMPLE_PROFILE else "pending"
+    status = {i: marks.get(i, unmarked if i in SAMPLE_SKIPS else "pending") for i in STEP_IDS}
     since = replay.run.times[0] if replay.run.times else None
     totals, load_problem = _totals(root, since) if model.exists() else (None, None)
     # B: resuming a profile with no marks, or the sample's copied model. Not while a restart is in
