@@ -431,3 +431,31 @@ def test_a_candidates_file_of_the_wrong_shape_is_read_as_empty(tmp_path):
         report.join_candidates_low,
         report.join_candidate_unchecked,
     ) == ([], [], [])
+
+
+def test_each_run_says_how_many_pairs_it_tested_so_a_rerun_loop_stops_on_nothing_new(
+    tmp_path, monkeypatch
+):
+    """The unchecked list can stay the same while each append tests new pairs on a wide table, so the
+    loop that finishes the scan repeats while a run tested something, and stops on a run that tests
+    nothing new: the number is the engine's, in the report and the file."""
+    monkeypatch.setattr(I, "JOIN_CANDIDATE_PROBE_CAP", 1)
+    db = _db(tmp_path, _schema())
+    out = tmp_path / "demo"
+    tables = [f"main.{p}{k}" for k in (1, 2) for p in "ab"]
+    _, report = I.introspect("demo", "sqlite", runner=_runner(db), artifacts_dir=tmp_path,
+                             out_dir=out, tables=tables)
+    counts, lists = [], []
+    for _ in range(12):
+        n = _candidates(out)["pairs_tested_this_run"]
+        assert f"pairs_tested_this_run: {n}" in report.render()
+        counts.append(n)
+        lists.append(_candidates(out)["unchecked_tables"])
+        if not n or not lists[-1]:
+            break
+        _, report = I.introspect("demo", "sqlite", runner=_runner(db), artifacts_dir=tmp_path,
+                                 out_dir=out, tables=lists[-1], append=True)
+    assert counts[0] > 0 and len(counts) > 2
+    # a run that tested new pairs left the list as it was: shrinking is the wrong signal to stop on
+    assert any(a == b and n > 0 for a, b, n in zip(lists, lists[1:], counts[1:]))
+    assert counts[-1] == 0 or lists[-1] == []

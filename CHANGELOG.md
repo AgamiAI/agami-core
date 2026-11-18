@@ -154,8 +154,10 @@ below corresponds to one such version.
   catalog lists it in, or is refused by name; a file line is one name. Once it ran, each append tested
   the same first pairs, so `unchecked_tables` never emptied: a round now tests a column against one
   key at a time, and while tables stay unchecked `join_candidates.json` keeps the pairs already tested
-  (`tested_pairs`), so the next append starts where the last stopped. agami-connect repeats the append
-  while the list shrinks, and says how many tables weren't checked for joins when it can't finish.
+  (`tested_pairs`), so the next append starts where the last stopped. Each run reports
+  `pairs_tested_this_run` (the report's header line and `join_candidates.json`); agami-connect
+  repeats the append while that is above 0, since a wide table can make progress while the list stays
+  the same, and says how many tables weren't checked for joins when it can't finish.
 
 ## [0.9.24] — 2026-11-17
 

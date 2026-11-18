@@ -325,6 +325,9 @@ class IntrospectReport:
     # unchecked, so the appends that finish the scan start where the last stopped instead of spending
     # their cap on the same first pairs, and each pair's stored result stands (#693).
     join_candidate_tested: set[tuple] = field(default_factory=set)
+    # How many of those pairs THIS run tested: a run that finishes a stopped scan repeats while it is
+    # above zero (the unchecked list can stay the same while a wide table makes progress).
+    join_candidate_tested_now: int = 0
     # Every join of the model as checked on the data: its label, and the evidence (`JoinCheck.evidence`).
     join_checks: list[dict] = field(default_factory=list)
     # The column profile of each table this run read, keyed `schema.table` (`profile.profile_table`).
@@ -357,7 +360,8 @@ class IntrospectReport:
             f"schemas: {self.schemas}",
             # Candidates beside the joins: a build that writes no join may still have found some.
             f"tables: {self.table_count}   relationships: {self.relationship_count}   "
-            f"join candidates found: {len(self.join_candidates)}",
+            f"join candidates found: {len(self.join_candidates)}   "
+            f"pairs_tested_this_run: {self.join_candidate_tested_now}",
             f"subject_areas ({len(self.subject_areas)}): {', '.join(self.subject_areas)}",
             *([f"new tables: {', '.join(self.new_tables)}"] if self.new_tables else []),
             *(f"changed {t}: " + "; ".join(f"{k} {', '.join(v)}" for k, v in c.items())
@@ -922,6 +926,7 @@ def _introspect(
     tested = _tested_pairs(prior)
     _scan_join_candidates(dialect, runner, rels, built, report, sg, read=read,
                           offered_columns=_offered_columns(prior, read, tested), tested=tested, pp=pp)
+    report.join_candidate_tested_now = len(report.join_candidate_tested)
     if refreshing:
         _merge_candidates(prior, report, read or set(), rels, built, sg, tested)
     _progress(pp, f"join candidates: {len(report.join_candidates)} found "
@@ -3612,6 +3617,7 @@ def write_join_candidates(out: Path, report: IntrospectReport) -> Optional[Path]
         "probe_cap": JOIN_CANDIDATE_PROBE_CAP,
         "cap_hit": report.join_candidate_cap_hit,
         "unchecked_tables": report.join_candidate_unchecked,
+        "pairs_tested_this_run": report.join_candidate_tested_now,
         # Only while the scan is unfinished: once nothing is unchecked, the next refresh tests afresh.
         "tested_pairs": sorted(([*c, *k] for c, k in report.join_candidate_tested),
                                key=lambda p: [x or "" for x in p]) if report.join_candidate_unchecked else [],
