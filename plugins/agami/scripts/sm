@@ -215,15 +215,16 @@ NO_INSTALL_VERBS="areas coverage review-queue review-items model-tree bundle"
 # them to set up a database that is already connected. 12 is used by nothing sm runs or passes
 # through (sm and the CLI use 0-3, execute_sql 2-11); the skills turn it into the install step.
 STALE_LIBRARY_EXIT=12
+# These verbs never reach ensure_pkg, not even after the check passes: it probes again and installs
+# on a failure, so a library update landing in between would turn an approved call into an install.
 case " $NO_INSTALL_VERBS " in
   *" ${1:-} "*)
     if ! { _imports_ok && _version_ok; }; then
       echo "agami's library needs installing or updating: run  bash \"$(cd "$SCRIPT_DIR/.." && pwd)/scripts/sm\" install" >&2
       exit "$STALE_LIBRARY_EXIT"
     fi ;;
+  *) ensure_pkg ;;
 esac
-
-ensure_pkg
 # Run the CLI from a neutral cwd so a `semantic_model` in the caller's cwd can't shadow the installed
 # package via `python -m` putting cwd on sys.path[0].
 # PYTHONSAFEPATH (3.11+; ignored below) is a belt-and-suspenders second guard; `cd /` is the portable
