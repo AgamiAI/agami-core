@@ -4812,8 +4812,9 @@ def assemble_receipt(
             # metric" reads this first and says nothing about such a column.
             # Followed through steps (ACE-178): a column passing on a step's count aggregates. A
             # column the SELECT it is projected in groups by is that answer's label, never a figure,
-            # whatever a step did to it (a `MAX(priority)` collapsing duplicates per row).
-            "aggregate": result.aggregating and not _is_own_group_key(oc),
+            # when a step only collapsed it (a `MAX(priority)` per row); a step's count grouped on
+            # to de-duplicate rows is still a figure (`_is_collapsed_label`).
+            "aggregate": result.aggregating and not _is_collapsed_label(oc, result, trace),
             # The same scope label `tables` and `joins` carry, from the same composer, so a reader
             # can join the three sections on it for a column that appears in more than one.
             "scope": oc.scope,
@@ -10863,6 +10864,23 @@ def _group_columns(sel: "exp.Select") -> list:
         if isinstance(g, exp.Column):
             out.append(g)
     return out
+
+
+_COLLAPSES = (exp.Max, exp.Min) if _HAVE_SQLGLOT else ()
+
+
+def _is_collapsed_label(oc: "OutputColumn", result: "_ColumnMatch", tr: "_Trace") -> bool:
+    """Whether an output column is a label although a step aggregated it: its own SELECT groups by it
+    and the step only collapsed duplicates (every aggregate in it a MAX or MIN). A COUNT, SUM or AVG
+    grouped on (`GROUP BY 1, 2` over every column, to de-duplicate rows) is still a figure, and so is
+    anything that matched or is written as a metric's binding, whatever the grouping."""
+    if result.status == MATCHED or result.unconfirmed is not None or not _is_own_group_key(oc):
+        return False
+    flow = _flow(oc, tr)
+    if flow.reason or flow.built_on is not None or flow.expr is None:
+        return False
+    aggs = _own_nodes(flow.expr, exp.AggFunc)
+    return bool(aggs) and all(isinstance(a, _COLLAPSES) for a in aggs)
 
 
 def _is_own_group_key(oc: "OutputColumn") -> bool:

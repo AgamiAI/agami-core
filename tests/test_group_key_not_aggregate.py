@@ -83,3 +83,22 @@ def test_a_step_figure_passed_on_ungrouped_stays_a_figure(org):
            "SELECT team, n FROM x")
     items = _items(org, sql)
     assert items["n"]["aggregate"] is True
+
+
+DEDUP = ("WITH x AS (SELECT team, MAX(state) AS state, COUNT(DISTINCT number) AS n, "
+         "SUM(1) AS rows_seen FROM incidents GROUP BY team) ")
+
+
+@pytest.mark.parametrize("sql", [
+    DEDUP + "SELECT team, state, n, rows_seen FROM x GROUP BY 1, 2, 3, 4",
+    DEDUP + "SELECT team, state, n, rows_seen FROM x GROUP BY team, state, n, rows_seen",
+], ids=["ordinal", "names"])
+def test_grouping_on_every_column_to_deduplicate_keeps_the_figures(org, sql):
+    """Grouping on every column only removes duplicate rows: a step's count, matched or not, is
+    still a figure; only a step's MAX/MIN collapse grouped on is the answer's label."""
+    items = _items(org, sql)
+    assert (items["n"]["aggregate"], items["n"]["status"]) == (True, "matched")
+    assert items["rows_seen"]["aggregate"] is True
+    assert items["state"]["aggregate"] is False
+    assert items["team"]["aggregate"] is False
+
