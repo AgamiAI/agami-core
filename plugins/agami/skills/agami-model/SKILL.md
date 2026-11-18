@@ -63,12 +63,13 @@ The identity is typed by the person: **never infer it** from git config, the env
 Read the model from the engine; never walk the YAML yourself:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope all
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope rule1
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope rule2
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" model-tree "$ROOT"
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"
 ```
 
-- `review-items` is a list of `{kind, area, name, title, tab, extra_lines, changes_since_approval?, …}`. What needs sign-off is every item whose `tab` is `review`; count them by `kind` (`metric`, `entity`, `relationship`), and count the ones carrying `changes_since_approval` (signed off before, changed since).
+- `review-items` (the two calls together are the sign-off queue: `rule1` the metrics, `rule2` the joins and entities; both are the served model, so a definition that depends on a hidden table is left out, as in `sm overview`; never `--scope all` for sign-off, which keeps hidden entries and is for full-model curation) is a list of `{kind, area, name, title, tab, extra_lines, changes_since_approval?, …}`. What needs sign-off is every item whose `tab` is `review`; count them by `kind` (`metric`, `entity`, `relationship`), and count the ones carrying `changes_since_approval` (signed off before, changed since).
 - `model-tree` is `{datasource, subject_areas:[{area, description, tables:[{table, review_state, columns:[…]}]}]}`. Per subject area, count its tables, and the hidden ones (`review_state: rejected`) apart.
 - `sensitive` gives `count` (personal-data columns still queryable) and `suspected_count`.
 
@@ -96,10 +97,11 @@ Then call AskUserQuestion, one question (header `Model`), *"What would you like 
 The same pattern and wording as agami-connect Phase 4 (sign-offs, the personal-data question, the identity card); only where it goes afterwards differs. Read the queue from the engine:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope all
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope rule1
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope rule2
 ```
 
-(`--scope preseed` or `--scope rule1` when `$ARGUMENTS` asked for it.) Keep the items whose `tab` is `review`. A metric's meaning is its `extra_lines` entry labelled `Definition`; an entity's is its `maps_to` (and `source_signal` when set); a guessed join's is its `title` and `cardinality`. An item with `changes_since_approval` was signed off before and has changed since: say so on its row, with what changed. Show a markdown table, `Kind | Name | What it means | SQL`, one short line per item taken from those fields (never a meaning you made up), at most 15 rows, then *"Showing 15 of <P>; <P−15> more."* when there are more. The **SQL** column is what the item maps to, so the person checks the formula and not only the words: a metric's binding for this database's engine from `bindings`, with its `source_tables`; a join's condition; an entity's `maps_to` column. Show it in backticks, cut at about 80 characters with `…` (the whole of it is answered on request, question-cards rule 5a).
+(Only `--scope preseed` or `--scope rule1` when `$ARGUMENTS` asked for it. The two calls' items are one list.) Keep the items whose `tab` is `review`. A metric's meaning is its `extra_lines` entry labelled `Definition`; an entity's is its `maps_to` (and `source_signal` when set); a guessed join's is its `title` and `cardinality`. An item with `changes_since_approval` was signed off before and has changed since: say so on its row, with what changed. Show a markdown table, `Kind | Name | What it means | SQL`, one short line per item taken from those fields (never a meaning you made up), at most 15 rows, then *"Showing 15 of <P>; <P−15> more."* when there are more. The **SQL** column is what the item maps to, so the person checks the formula and not only the words: a metric's binding for this database's engine from `bindings`, with its `source_tables`; a join's condition; an entity's `maps_to` column. Show it in backticks, cut at about 80 characters with `…` (the whole of it is answered on request, question-cards rule 5a).
 
 Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do with the <P> definitions waiting for sign-off?"*:
 
@@ -145,7 +147,7 @@ Flagged and suspected columns are picked the same way:
 
 Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them queryable** writes nothing; say in one line what that leaves (flagged columns queryable, raw values never shown). A name in "Other" that isn't a column in the model, or **Keep them queryable** or **Review on a page** picked together with anything else, is said back and the same card asked again; never guess which column was meant.
 
-When the queue is done (or skipped), recount with `sm review-items` and go back to the overview card. **When agami-connect sent the person here** (its Phase 7 `Review what needs sign-off`), go back to agami-connect Phase 8 instead, the starter questions, so onboarding still ends on a first question.
+When the queue is done (or skipped), recount with `sm review-items` (`--scope rule1` and `--scope rule2`) and go back to the overview card. **When agami-connect sent the person here** (its Phase 7 `Review what needs sign-off`), go back to agami-connect Phase 8 instead, the starter questions, so onboarding still ends on a first question.
 
 ---
 

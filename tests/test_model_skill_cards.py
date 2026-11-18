@@ -269,3 +269,11 @@ def test_the_page_link_says_to_come_back_and_press_ive_saved_it() -> None:
 
 def test_approve_all_remaining_marks_its_ops_bulk() -> None:
     assert 'Each of its approve ops carries `"bulk": true`.' in _review()
+
+
+def test_sign_off_reads_the_served_queue_never_scope_all() -> None:
+    # `--scope all` keeps definitions that depend on hidden tables, so counts and the sign-off list
+    # would disagree with `sm overview`; only the full-model curation view may use it.
+    for phase in (_overview(), _review()):
+        assert "--scope rule1" in phase and "--scope rule2" in phase
+        assert "--scope all" not in re.sub(r"never `--scope all`[^)]*\)", "", phase)
