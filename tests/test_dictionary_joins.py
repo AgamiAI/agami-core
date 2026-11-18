@@ -223,6 +223,30 @@ def test_a_stated_reference_that_does_not_hold_is_a_note_with_its_numbers(
     assert not any("other_ref" in c["id"] for c in _file(out)["candidates"])
 
 
+def test_a_dictionary_join_that_stops_holding_leaves_the_candidates_on_the_rerun(
+    tmp_path, monkeypatch, capsys
+):
+    out = _build(tmp_path, [("child", "parent_ref", "FK -> parent.pkey")], monkeypatch, cap=0)
+    assert [c["id"] for c in _run_verb(tmp_path, out, monkeypatch, capsys)["candidates"]] == [_REF]
+    # a scan candidate on another column stays: only the dictionary's own offers are re-decided
+    doc = _file(out)
+    scan = {
+        "id": "main.child.grp->main.grouping.gid",
+        "op": {"from_schema": "main", "from_table": "child", "from_column": "grp"},
+        "evidence": {"found_by": "name", "match_rate": 1.0},
+    }
+    doc["candidates"].append(scan)
+    (out / ".introspect" / "join_candidates.json").write_text(json.dumps(doc))
+    con = sqlite3.connect(_db(tmp_path))
+    con.execute("UPDATE child SET parent_ref = 'Q' || id WHERE id IN (2, 3)")
+    con.commit()
+    con.close()
+    res = _run_verb(tmp_path, out, monkeypatch, capsys)
+    assert res["candidates"] == []
+    assert [n["column"] for n in res["not_proven"]] == ["main.child.parent_ref"]
+    assert [c["id"] for c in _file(out)["candidates"]] == [scan["id"]]
+
+
 def test_a_stated_key_that_repeats_is_a_note_not_a_candidate(tmp_path, monkeypatch, capsys):
     out = _build(tmp_path, [("child", "grp", "references grouping.gid")], monkeypatch, cap=0)
     res = _run_verb(tmp_path, out, monkeypatch, capsys)

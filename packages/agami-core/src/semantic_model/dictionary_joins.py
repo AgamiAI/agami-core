@@ -520,6 +520,26 @@ def one_per_column(cands: list[dict]) -> tuple[list[dict], list[dict]]:
     return kept, notes
 
 
+def _pair(c: dict) -> Optional[tuple]:
+    """A candidate's (column, key) as `Found.tested` keys it, lower-cased."""
+    op = c.get("op") if isinstance(c.get("op"), dict) else {}
+    to = (op.get("to_schema"), op.get("to_table"), op.get("to_column"))
+    frm = _from(c)
+    if frm is None or not to[1] or not to[2]:
+        return None
+    return frm, tuple((x or "").lower() for x in to)
+
+
+def _retested(c: dict, tested: set[tuple]) -> bool:
+    """A dictionary candidate from an earlier run whose pair this run checked: had it held it would
+    be among this run's candidates, so it no longer does. A scan's candidate is never this run's."""
+    ev = c.get("evidence") if isinstance(c.get("evidence"), dict) else {}
+    if ev.get("found_by") != "dictionary":
+        return False
+    low = {tuple(tuple((x or "").lower() for x in end) for end in pair) for pair in tested}
+    return _pair(c) in low
+
+
 def store(root: Path, found: Found) -> Optional[Path]:
     """Fold the dictionary's candidates into `<model>/.introspect/join_candidates.json`: one per
     column, notes beside them, and each tested pair in `tested_pairs` while the scan is unfinished, so
@@ -529,7 +549,7 @@ def store(root: Path, found: Found) -> Optional[Path]:
     prior = [
         c
         for c in INTRO._listed(doc, "candidates")
-        if isinstance(c, dict) and c.get("id") not in ids
+        if isinstance(c, dict) and c.get("id") not in ids and not _retested(c, found.tested)
     ]
     kept, siblings = one_per_column(found.candidates + prior)
     offered = {_from(c) for c in kept}
