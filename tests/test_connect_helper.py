@@ -156,6 +156,7 @@ def test_prints_loopback_url_with_token(tmp_path: Path, art: Path, backend: _Fak
     assert _TOKEN_RE.match(token), token
     assert url.path == f"/{token}/"
     assert first["expires_in"] == 300
+    assert first["pid"] == os.getpid()  # the helper's own process, to stop it where TaskStop isn't available
     status, page = _get(first["url"])
     assert status == 200 and 'type="password"' in page and "demo" in page
     assert _post(first["url"], SECRET) == 200

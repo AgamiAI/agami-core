@@ -64,11 +64,18 @@ agami_artifacts_dir() {
 # file tools and Git Bash don't agree where /tmp is, so a file written to one isn't read by the other.
 # Only inside an artifacts folder that already exists: before agami-connect has chosen one, creating
 # it would leave a stray ~/agami-artifacts behind.
+# `local/` and `tmp/` are made 0700, and an existing `local/` tightened to 0700: this runs before
+# every `sm` and `py` call, so it is usually what creates `local/`, and a plain `mkdir -p` under the
+# usual umask left it readable by anyone on the machine. A `local` that is a link is not chmod-ed.
 agami_scratch_dir() {
   local art d
   art="$(agami_artifacts_dir)"
   d="$art/local/tmp"
-  [ -d "$art" ] && { mkdir -p "$d" 2>/dev/null || true; }
+  if [ -d "$art" ]; then
+    [ -d "$art/local" ] || mkdir -m 700 "$art/local" 2>/dev/null || true
+    [ -d "$d" ] || mkdir -m 700 "$d" 2>/dev/null || true
+    [ -L "$art/local" ] || chmod 700 "$art/local" 2>/dev/null || true
+  fi
   printf '%s\n' "$d"
 }
 

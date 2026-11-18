@@ -198,6 +198,13 @@ def _exe(path: Path, body: str) -> Path:
     return path
 
 
+def _ran_areas(py: Path, root: Path, ran: str) -> bool:
+    """`sm areas` ran the CLI on `py`. An approved verb runs through a `-c` program that checks the
+    library holds it inside the model folder, then calls the CLI, so the entry spans several lines."""
+    start = ran.find(f"{py} -X utf8 -c")
+    return start >= 0 and f" areas {root}\n" in ran[start:]
+
+
 def _run_sm(tmp_path: Path, path_dirs: list[Path]) -> str:
     """Every interpreter call `sm` made, one per log entry (a `-c` program spans several lines)."""
     log = tmp_path / "shim.log"
@@ -221,7 +228,7 @@ def test_sm_reads_the_configured_interpreter_without_a_python(tmp_path):
 
     ran = _run_sm(tmp_path, [stub.parent])
     assert str(stub) not in ran
-    assert f"{real} -X utf8 -m semantic_model.cli areas {tmp_path}" in ran
+    assert _ran_areas(real, tmp_path, ran)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shims; the case simulated is the Windows one")
@@ -232,7 +239,7 @@ def test_sm_skips_the_store_stub_on_path(tmp_path):
     ran = _run_sm(tmp_path, [stub.parent, real.parent])
     # Probed once, found to run nothing, and never used for anything else.
     assert [line for line in ran.splitlines() if line.startswith(str(stub))] == [f'{stub} -c print("agami-python-ok")']
-    assert f"{real} -X utf8 -m semantic_model.cli areas {tmp_path}" in ran
+    assert _ran_areas(real, tmp_path, ran)
 
 
 # --- the other Windows-only failures ------------------------------------------------------------
@@ -395,7 +402,7 @@ def test_sm_uses_a_python_installed_from_the_store(tmp_path):
     store = _exe(tmp_path / "WindowsApps" / "python3", _SHIM)
 
     ran = _run_sm(tmp_path, [store.parent])
-    assert f"{store} -X utf8 -m semantic_model.cli areas {tmp_path}" in ran
+    assert _ran_areas(store, tmp_path, ran)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shims; the case simulated is the Windows one")
@@ -407,4 +414,4 @@ def test_sm_does_not_trust_a_configured_store_stub(tmp_path):
     config.write_text(json.dumps({"tool_paths": {"python3": str(stub)}}), encoding="utf-8")
 
     ran = _run_sm(tmp_path, [real.parent])
-    assert f"{real} -X utf8 -m semantic_model.cli areas {tmp_path}" in ran
+    assert _ran_areas(real, tmp_path, ran)
