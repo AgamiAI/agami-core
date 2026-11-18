@@ -216,3 +216,84 @@ def test_the_progress_log_appends_without_nofollow_too(tmp_path, victim, no_nofo
     other.symlink_to(victim)
     INTRO._progress(other, "never")
     assert victim.read_text() == MARKER + "\n"
+
+
+# --- the model's own files, as the hook-approved verbs read and write them (4614773516) ------------
+
+
+@pytest.fixture
+def model(art) -> Path:
+    import shutil
+
+    from skill_docs import PLUGIN
+
+    pytest.importorskip("pydantic")
+    root = art / "acme"
+    shutil.copytree(PLUGIN / "samples" / "store" / "model", root)
+    (root / ".introspect").mkdir(exist_ok=True)
+    return root
+
+
+def test_progress_does_not_print_a_hard_linked_log(model, tmp_path):
+    victim = tmp_path / "private.log"
+    victim.write_text(f"2026-01-01T00:00:00Z {MARKER}\n")
+    os.link(victim, model / ".introspect" / "progress.log")
+    rc, out = _cli(["progress", str(model)])
+    assert MARKER not in out
+
+
+def test_a_mark_is_not_appended_to_a_hard_linked_timeline(model, victim):
+    os.link(victim, model / ".introspect" / "timeline.jsonl")
+    rc, _ = _cli(["steps", str(model), "--mark", "connect=done"])
+    assert rc == 2
+    assert victim.read_text() == MARKER + "\n"
+
+
+def test_a_hard_linked_timeline_is_not_replayed(model, tmp_path):
+    from semantic_model import steps
+
+    victim = tmp_path / "private.jsonl"
+    victim.write_text('{"id": "build", "status": "in_progress", "at": "2026-01-01T00:00:00+00:00"}\n')
+    os.link(victim, model / ".introspect" / "timeline.jsonl")
+    assert steps.attempt_started_at(model) is None
+
+
+def test_a_hard_linked_steps_last_is_not_read(model, tmp_path):
+    from semantic_model import steps
+
+    victim = tmp_path / "private.json"
+    victim.write_text('{"list": "' + MARKER + '"}')
+    os.link(victim, model / ".introspect" / "steps.last")
+    assert steps.read_printed(model) == {}
+
+
+def test_a_hard_linked_log_is_not_read_for_batches(model, tmp_path):
+    from semantic_model import steps
+
+    victim = tmp_path / "private.log"
+    victim.write_text("2026-01-01T00:00:00Z batch 1 of 3\n")
+    log = model / ".introspect" / "progress.log"
+    os.link(victim, log)
+    assert steps._batches_left(log) is False
+
+
+def test_an_approved_verb_refuses_a_hard_linked_model_file(model, tmp_path):
+    ds = model / "datasource.yaml"
+    victim = tmp_path / "datasource.yaml"
+    victim.write_bytes(ds.read_bytes())
+    ds.unlink()
+    os.link(victim, ds)
+    for verb in ("areas", "summary", "overview", "model-tree"):
+        rc, out = _cli([verb, str(model)])
+        assert "outside_model" in out, verb
+
+
+def test_an_approved_verb_refuses_a_hard_linked_curation_log(model, tmp_path):
+    from semantic_model import curate
+    from semantic_model import loader as L
+
+    victim = tmp_path / "private.jsonl"
+    victim.write_text('{"note": "' + MARKER + '"}\n')
+    os.link(victim, model / curate.CURATION_LOG)
+    with L.contained(model), pytest.raises(L.OutsideModel):
+        curate.read_log(model)

@@ -37,7 +37,7 @@ import yaml
 from . import pii
 from . import validator as V
 from .loader import _read_yaml as _load
-from .loader import check_contained, list_prompt_examples, load_datasource
+from .loader import check_contained, check_one_name, list_prompt_examples, load_datasource
 from .models import (
     Ambiguity,
     CrossSubjectAreaRelationship,
@@ -2754,7 +2754,9 @@ def _read_log_lines(root: Path) -> list[Optional[dict]]:
     try:
         # bytes, so one undecodable line is that line's problem, not the whole log's
         check_contained(root / CURATION_LOG)
-        lines = (root / CURATION_LOG).read_bytes().splitlines()
+        with (root / CURATION_LOG).open("rb") as fh:
+            check_one_name(fh.fileno(), root / CURATION_LOG)
+            lines = fh.read().splitlines()
     except OSError:
         return []
     out: list[Optional[dict]] = []

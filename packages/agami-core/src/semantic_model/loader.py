@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import ntpath
 import os
+import stat
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -166,9 +167,22 @@ def check_contained(path: str | Path) -> None:
                            "files inside it")
 
 
+def check_one_name(fd: int, path: str | Path) -> None:
+    """Raise OutsideModel when a contained read's open file `fd` is not a regular file with one
+    name. A hard link resolves to a path inside the model folder whatever file it shares, so
+    `check_contained` can't see one: the open file can."""
+    if _CONTAINED_ROOT.get() is None:
+        return
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        raise OutsideModel(f"{path} is not a plain file of the model folder (it has another name "
+                           "elsewhere); this command reads only files inside it")
+
+
 def _read_yaml(path: Path) -> Any:
     check_contained(path)
     with path.open("r", encoding="utf-8") as fh:
+        check_one_name(fh.fileno(), path)
         return yaml.safe_load(fh)
 
 
