@@ -19,6 +19,42 @@ below corresponds to one such version.
   `model-tree`, `bundle`) written with plain paths, and agami's own `agami-*` scratch files under
   `<artifacts_dir>/local/tmp/`, plus reads of the plugin's own files. Anything else asks as before, and those six commands no longer
   install the library themselves: they say to run `sm install` instead.
+- **A live task list for onboarding.** `sm steps <root>` prints the ten onboarding steps as a short
+  list to copy into the session's task list, each marked done, in progress or not started, with its
+  numbers read from disk (*"Read the tables and joins — 21 tables, 19 joins"*), never typed by hand.
+  `--mark <id>=<status>` records a step first, in `<root>/.introspect/timeline.jsonl`; what was last
+  printed is kept in `.introspect/steps.last`, so `changed` and `then` say when the list moved. A
+  build that failed, or stopped with no word for 30 minutes, is said once as a `problem`, and a
+  reload reopens the steps from where it starts. agami-connect marks each step where it really
+  starts and ends; agami-query marks the last one done when the first question is answered.
+- **Build progress in the person's words.** `sm progress <root> --wait N` returns as soon as the
+  build's log moves on, with a line ready to post (*"Reading columns ▰▰▱▱▱▱▱▱ 12/34 tables"*, the
+  bar from the log's own counts, rounded down) and the step list. agami-connect runs every build in
+  the background and loops on it, so the turn stays open; a build that raises now ends its log with
+  `failed: <reason>`.
+- **`sm summary`, `sm overview`, `sm timing`.** The closing summary as markdown ready to post
+  (totals, the per-area table, what waits for sign-off, and *"Set up in 6 min 40 s"* from the step
+  marks), the numbers an overview card shows, and how long each step took. Every count is the
+  sign-off card's own: metrics, entities and joins, and only what the person signed in this run.
+- **`sm batch-id`, `sm wait-files`, and `--out`.** A fresh stamp for scratch file names; a wait for
+  result files; and `--out <path>` on `model-tree`, `bundle`, `org-draft`, `open-questions` and
+  `seed-validate`, written atomically, in place of a redirect. `set-org`, `set-description` and
+  `remove-example` take the person's text from a file (`--name-file`, `--description-file`,
+  `--question-file`), used as written. The permission hook also approves `steps`, `progress`,
+  `timing`, `summary`, `overview`, `batch-id`, `wait-files` and `--out` into agami's scratch folder.
+
+### Changed
+
+- **Every agami-connect command is one literal call.** The skill and the shared files it links
+  write each command as the launcher and its arguments, every path in full: no `$ROOT` or `$PY`, no
+  pipe, `;`, `&&`, redirect or heredoc. A line written that way is matched by the skill's new
+  `allowed-tools`, so onboarding no longer stops for permission on its own commands. Native-CLI SQL
+  is read from a scratch file. `sm` no longer accepts an abbreviated option (`--o` for `--out`).
+- **A choice that needs the person is not a failure.** `inventory_summary.py` exits 0 with
+  `status: needs_choice` and a `then` for a name that matches nothing or several, or a choice that
+  keeps no tables; the table picker's `page:` keeps its exit 1. `connect_resolve.py` says where the
+  artifacts folder came from and whether `.gitignore` already ignores `local/`, and the password
+  helper prints its own `pid`.
 
 ## [0.9.24] — 2026-11-17
 
