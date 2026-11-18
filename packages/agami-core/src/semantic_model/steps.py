@@ -112,12 +112,24 @@ def parse_progress(raw: str) -> Optional[tuple[re.Match, str, Optional[str]]]:
     return None
 
 
+def _own_path(root: Path, path: Path) -> bool:
+    """Whether `path`, one of the model's own files under `<root>/.introspect/`, may be touched at
+    all: no UNC or device path on the way to it (a link counts, read as text), then inside the model
+    folder. The network check comes first because on Windows resolving or even stat-ing such a path
+    can open an SMB session and send the person's credentials to the host."""
+    try:
+        L._refuse_network_links(path)
+    except L.OutsideModel:
+        return False
+    return L.inside_model(root, path)
+
+
 def _open_own(root: Path, path: Path):
     """One of the model's own files under `<root>/.introspect/`, open for reading: inside the model
     folder, not a link, and with no other name (a hard link resolves inside the folder whatever file
     it shares, so only the open file shows it). OSError otherwise, which every reader takes as "no
     such file"."""
-    if not L.inside_model(root, path):
+    if not _own_path(root, path):
         raise OSError(f"{path} leads out of the model folder")
     fd = open_one_name(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     return os.fdopen(fd, "r", encoding="utf-8", errors="replace")
@@ -181,7 +193,7 @@ def mark(root: Path, step_id: str, status: str, now: Optional[datetime] = None) 
     at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
     root = Path(root).expanduser()
     path = _timeline(root)
-    if not L.inside_model(root, path):
+    if not _own_path(root, path):
         raise ValueError(f"{path} leads out of the model folder {root}; no mark was written")
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -342,6 +354,8 @@ def _log_state(
     carry the last attempt's failure until the engine truncates the log. Marks are stamped to the
     second, so a log written in the mark's own second is this attempt's. A file that vanishes
     between the two stats (being replaced) reads as no log, never as running."""
+    if not _own_path(log.parent.parent, log):
+        return "none", None
     try:
         log_at = log.stat().st_mtime
         model_at = model.stat().st_mtime if model.exists() else None
@@ -364,6 +378,8 @@ def _log_state(
 
 def _own_log(log: Path, attempt_at: float) -> bool:
     """Whether the build log was written during this attempt (same second-stamp rule as _log_state)."""
+    if not _own_path(log.parent.parent, log):
+        return False
     try:
         return int(log.stat().st_mtime) >= attempt_at
     except OSError:
@@ -739,9 +755,9 @@ def remember_printed(root: Path, before: dict[str, Any], printed: dict[str, Any]
     if not root.is_dir():
         return
     try:
-        path.parent.mkdir(exist_ok=True)
-        if not L.inside_model(root, path):
+        if not _own_path(root, path):
             return
+        path.parent.mkdir(exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".steps.last.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
