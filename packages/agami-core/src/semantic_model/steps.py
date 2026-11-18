@@ -67,15 +67,33 @@ FAILURE_CAP = 200
 # Each progress-log line, in the person's words: (pattern, phrase, unit). The engine's own wording
 # (`columns+grain 30/52`) is for the engine; a person reads "Reading columns … 30/52 tables".
 PROGRESS_PHRASES = (
+    (re.compile(r"^batch (\d+) of (\d+)"), "Batch {0} of {1}", None),
     (re.compile(r"^discovered (\d+) tables"), "Found {0} tables", None),
     (re.compile(r"^columns\+grain (\d+)/(\d+)"), "Reading columns", "tables"),
     (re.compile(r"^relationships: declared FK (\d+)/(\d+)"), "Checking joins", "keys"),
     (re.compile(r"^building relationships"), "Working out the joins", None),
+    (re.compile(r"^joins: checking (\d+) on the data"), "Checking {0} joins on the data", None),
+    (re.compile(r"^joins checked (\d+)/(\d+)"), "Checking joins on the data", "joins"),
+    (re.compile(r"^profiling \d+ tables"), "Profiling columns", None),
+    (re.compile(r"^profiled (\d+)/(\d+) tables"), "Profiling columns", "tables"),
     # The scan's count has no total to show against: which pairs are tested hangs on what earlier ones found.
     (re.compile(r"^join candidates: (\d+) probed"), "Testing possible joins: {0} probed", None),
+    (re.compile(r"^join candidates: (\d+) found"), "Testing possible joins: {0} found", None),
     (re.compile(r"^join candidates"), "Testing possible joins", None),
-    (re.compile(r"^done: (\d+) tables, (\d+) relationships"), "Done: {0} tables, {1} joins", None),
+    (
+        re.compile(r"^done: (\d+) tables, (\d+) (?:relationships|joins)"),
+        "Done: {0} tables, {1} joins",
+        None,
+    ),
 )
+
+# The heartbeat a slow statement writes: how long, then what it waits on (table and column names,
+# which are model text, so the second part is quoted when posted).
+WAITING = re.compile(r"^waiting on the database for ([0-9]+ (?:s|min|h)(?: [0-9]+ min)?): (.*)$")
+
+# The UTC time each log line starts with (`2026-11-17T10:04:00Z columns+grain 30/52`): for the progress
+# page, not for the person, so the reader drops it and matches the message after it.
+_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z ")
 
 
 def parse_progress(raw: str) -> Optional[tuple[re.Match, str, Optional[str]]]:
@@ -88,8 +106,9 @@ def parse_progress(raw: str) -> Optional[tuple[re.Match, str, Optional[str]]]:
 
 
 def last_progress_line(log: Path) -> str:
-    """The build log's latest non-blank line, or "" when there is none (yet), or when the log is a
-    link out of its model folder (`<root>/.introspect/progress.log`): `sm progress` prints the line."""
+    """The build log's latest non-blank line without its time stamp, or "" when there is none (yet),
+    or when the log is a link out of its model folder (`<root>/.introspect/progress.log`): `sm
+    progress` prints the line."""
     if not L.inside_model(Path(log).parent.parent, log):
         return ""
     try:
@@ -97,7 +116,7 @@ def last_progress_line(log: Path) -> str:
         lines = [ln for ln in text.splitlines() if ln.strip()]
     except OSError:
         return ""
-    return lines[-1] if lines else ""
+    return _STAMP.sub("", lines[-1], count=1) if lines else ""
 
 
 def _timeline(root: Path) -> Path:

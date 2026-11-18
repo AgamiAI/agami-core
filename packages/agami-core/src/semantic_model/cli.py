@@ -554,7 +554,11 @@ def _progress_line(raw: str) -> dict:
         # Posted as is (`then`: "Post `line`"), so a line the engine didn't phrase is quoted like
         # other model text (a tampered log's `# …` must not render as a heading), and a failure's
         # reason (the database's or the model's words) is quoted with the longer failure cap.
-        from .say_text import quoted
+        from .say_text import one_line, quoted
+        waiting = steps.WAITING.match(raw)
+        if waiting:
+            return {"line": f"Waiting on the database for {one_line(waiting.group(1))}: "
+                            f"{quoted(waiting.group(2))}", "done": False, "failed": False}
         if raw.startswith("failed:"):
             reason = quoted(steps.strip_paths(raw[len("failed:"):].strip()), steps.FAILURE_CAP)
             return {"line": f"The build didn't finish: {reason}", "done": False, "failed": True}
