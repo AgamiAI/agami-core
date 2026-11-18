@@ -102,6 +102,8 @@ def driver_packages(db_type: str | None) -> dict[str, str]:
         return {}
     return {m: _DRIVER_PIP[m] for m in (driver, *_DRIVER_EXTRA.get(db_key, []))}
 _MODEL_DEPS = ("pydantic", "sqlglot", "yaml")
+# What `sm` runs. Probed by import, not by distribution metadata, which says nothing about a source tree.
+_CORE_MODULES = ("semantic_model.cli",)
 
 # The output lands in the agent's transcript, so a secret's VALUE never goes in it: the skill only
 # needs to know a field is set. A connection URL carries its password inline, so it is masked too.
@@ -208,6 +210,10 @@ def _pinned_lacks(pinned: str, entry: dict, db_key: str, want: str | None) -> di
         lacks.append(f"agami-core {have} without its [model] extra (pydantic, sqlglot, pyyaml)" if have
                      else "no agami-core and none of its model deps (pydantic, sqlglot, pyyaml)")
         pkgs.append(f'"agami-core[model]=={want}"' if want else '"agami-core[model]"')
+    elif entry.get("has_core") is False:
+        # The deps import but `sm` has nothing to run: with the deps missing too, the line above says it.
+        lacks.append("no agami-core (its semantic_model package does not import)")
+        pkgs.append(f'"agami-core[model]=={want}"' if want else '"agami-core[model]"')
     if entry["has_driver"] is False:
         mods = driver_packages(db_key)
         lacks.append(f"the {db_key} driver ({', '.join(mods)})")
@@ -282,6 +288,8 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
                           " (the configured interpreter)" if py == configured else ""))
     if pinned:
         best = scored[0]
+        if best["has_model_deps"]:
+            best["has_core"] = _probe(pinned, list(_CORE_MODULES))
         because = "$AGAMI_PYTHON, used as set: agami never replaces it with another Python"
         lacks = _pinned_lacks(pinned, best, db_key, want)
         if lacks:

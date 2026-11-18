@@ -145,7 +145,8 @@ def test_profile_resolution_order(tmp_path, monkeypatch):
     assert data2["profile_source"] == "active_profile"
 
 
-def _fake_candidates(monkeypatch, paths, *, deps_for, driver_for, no_pip=(), lib=None, plugin="0.9.18"):
+def _fake_candidates(monkeypatch, paths, *, deps_for, driver_for, no_pip=(), lib=None, plugin="0.9.18",
+                     no_core=()):
     """Wire _resolve_interpreter's probe seams to fake interpreters, so the
     scoring/tie-break runs on controlled inputs (the real host Python set can't
     exercise the fix — every interpreter there happens to be fully equipped).
@@ -161,6 +162,8 @@ def _fake_candidates(monkeypatch, paths, *, deps_for, driver_for, no_pip=(), lib
         mods = [m for m in mods if m]
         if not mods:
             return True
+        if mods == list(CR._CORE_MODULES):  # the agami-core import probe; `no_core` lack it
+            return py not in no_core
         # the model-deps probe asks for _MODEL_DEPS; anything else is the driver probe
         is_deps_probe = set(mods) == set(CR._MODEL_DEPS)
         return (py in deps_for) if is_deps_probe else (py in driver_for)
@@ -434,6 +437,20 @@ def test_agami_python_lacking_the_driver_names_the_driver_and_its_install_line(m
     assert "postgres driver (psycopg2)" in lacks["detail"] and "[model]" not in lacks["detail"]
     assert f'"{pinned}" -m pip install psycopg2-binary' in lacks["detail"]
     assert "no pip" not in lacks["detail"]
+
+
+def test_agami_python_with_the_deps_but_no_agami_core_is_named_with_the_install_line(monkeypatch):
+    # #698: the deps import, so has_model_deps is true, yet `sm` has nothing to run. Read from an
+    # import of semantic_model.cli, not from distribution metadata (which can say nothing either way).
+    pinned = "/fake/deps-only/bin/python"
+    monkeypatch.setenv("AGAMI_PYTHON", pinned)
+    _fake_candidates(monkeypatch, [pinned], deps_for={pinned}, driver_for=set(), no_core={pinned},
+                     lib={pinned: None})
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["has_model_deps"] is True
+    (lacks,) = [w for w in res["warnings"] if w["kind"] == "agami_python_lacks"]
+    assert lacks["where"] == pinned and "no agami-core" in lacks["detail"]
+    assert f'"{pinned}" -m pip install "agami-core[model]==0.9.18"' in lacks["detail"]
 
 
 def test_agami_python_with_everything_carries_no_lacks_anomaly(monkeypatch):
