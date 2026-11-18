@@ -153,8 +153,10 @@ def test_stdio_lists_the_same_hints():
 
 @pytest.mark.parametrize("name", sorted(TOOLS))
 def test_every_core_tool_lists_a_title(name):
-    """Claude's connector directory rejects a tool without a title."""
-    assert tool_annotations(TOOLS[name], name)["title"]
+    """Claude's connector directory rejects a tool without a title. The core tools declare their
+    own, so the listing never falls back to the name."""
+    assert TOOLS[name].get("title")
+    assert tool_annotations(TOOLS[name], name)["title"] == TOOLS[name]["title"]
 
 
 def test_title_is_the_name_as_a_sentence_unless_declared():
