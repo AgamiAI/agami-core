@@ -187,12 +187,13 @@ def test_a_model_root_that_does_not_exist_yet_is_allowed(art):
     assert _decision(_bash(f'bash "{SM}" areas {art / "newdb"}'), art) == "allow"
 
 
-def test_a_step_mark_on_a_model_root_that_does_not_exist_yet_is_allowed(art):
-    # onboarding marks its first step before the build creates the folder
-    assert (
-        _decision(_bash(f'bash "{SM}" steps {art / "newdb"} --mark connect=in_progress'), art)
-        == "allow"
-    )
+def test_a_step_mark_on_a_model_root_that_does_not_exist_yet_is_not_approved(art):
+    # A mark creates <root>/.introspect/: approved, it would let any call make a new profile folder
+    # in <artifacts_dir>. Onboarding's first mark comes before the build makes the folder; it runs
+    # inside agami-connect, whose own allowed-tools cover it. Reading the list there is still fine.
+    assert _decision(_bash(f'bash "{SM}" steps {art / "newdb"} --mark connect=in_progress'), art) is None
+    assert _decision(_bash(f'bash "{SM}" steps {art / "newdb"}'), art) == "allow"
+    assert not (art / "newdb").exists()
 
 
 @pytest.mark.parametrize("args", [a for a in APPROVED if not any(w in a for w in WRITES)])
@@ -338,6 +339,8 @@ REFUSED = {
     "root outside, mark": "steps /tmp/elsewhere --mark build=done",
     # option values
     "mark bad status": "steps {R} --mark build=finished",
+    # a mark writes under <root>: approved only on a folder that exists, never one it would create
+    "mark a new folder": "steps {A}/newprofile --mark connect=in_progress",
     "mark bad id": "steps {R} --mark Build=done",
     "mark no value": "steps {R} --mark",
     "mark option value": "steps {R} --mark --full",

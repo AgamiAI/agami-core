@@ -146,8 +146,9 @@ ROOT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 def model_root(value: str) -> bool:
     """A model folder: a direct child of `<artifacts_dir>` (symlinks resolved) with a plain profile
-    name, not `local`. It need not exist yet: onboarding marks its first step before the build
-    makes it, and a skill's first `sm areas` is how it learns whether a model is there (exit 3)."""
+    name, not `local`. It need not exist yet: a skill's first `sm areas` is how it learns whether a
+    model is there (exit 3). A verb that would write under it (`steps --mark`) also needs it to
+    exist (Verb.root_must_exist_with)."""
     if not _plain_path(value):
         return False
     try:
@@ -200,10 +201,14 @@ class Verb:
         positionals: tuple[Kind, ...] = (),
         options: Optional[dict[str, tuple[Optional[Kind], bool]]] = None,
         required: tuple[str, ...] = (),
+        root_must_exist_with: tuple[str, ...] = (),
     ) -> None:
         self.positionals = positionals
         self.options = options or {}
         self.required = required
+        # options that write under <root>: approved only when <root> is already a folder, so an
+        # approved call can't create a new profile folder in <artifacts_dir>
+        self.root_must_exist_with = root_must_exist_with
 
 
 ROOT = (model_root,)
@@ -233,6 +238,7 @@ VERBS: dict[str, Verb] = {
     "steps": Verb(
         ROOT,
         {"--mark": (lambda v: MARK.fullmatch(v) is not None, True), "--full": (None, False)},
+        root_must_exist_with=("--mark",),
     ),
     "progress": Verb(ROOT, {"--wait": (_seconds, False)}),
     "summary": Verb(ROOT, {"--json": (None, False)}),
@@ -285,6 +291,8 @@ def args_allowed(args: list[str]) -> bool:
     if len(positionals) != len(verb.positionals):
         return False
     if not all(kind(v) for kind, v in zip(verb.positionals, positionals)):
+        return False
+    if seen & set(verb.root_must_exist_with) and not os.path.isdir(os.path.realpath(positionals[0])):
         return False
     return all(r in seen for r in verb.required)
 
