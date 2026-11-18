@@ -193,3 +193,43 @@ def test_a_linked_local_folder_is_refused(art, tmp_path):
     rc, out = _run(["set-config", str(art), "--tier", "cli"])
     assert rc == 2 and "link" in out["error"]
     assert not (elsewhere / ".config").exists()
+
+
+PLUGIN = Path(__file__).resolve().parent.parent / "plugins" / "agami"
+
+# A Python whose agami-core is missing and whose pip would install: every pip call leaves a mark.
+_SHIM_MISSING_WITH_PIP = """#!/bin/sh
+case "$1 $2" in
+  "-m pip") [ "$3" = "--version" ] && exit 0; echo "$*" >> "$PIP_MARK"; exit 0 ;;
+  "-c "*) exit 1 ;;
+esac
+exit 0
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell shim")
+@pytest.mark.parametrize("argv", [["init-local"], ["init-local", "--sample"], ["set-config"]])
+def test_setting_up_the_folder_never_installs(art, tmp_path, argv):
+    """Onboarding sets the folder up before the person has agreed to install agami's library, so
+    these verbs must stop with the install step (exit 12) instead of running pip themselves."""
+    import shutil
+    import subprocess
+
+    cache = tmp_path / "agami-core" / "0.0.1"  # a versioned cache folder: no dev checkout beside it
+    shutil.copytree(PLUGIN / "scripts", cache / "scripts")
+    shim = tmp_path / "pyshim"
+    shim.write_text(_SHIM_MISSING_WITH_PIP)
+    shim.chmod(0o755)
+    mark = tmp_path / "pip-calls"
+    env = {**os.environ, "AGAMI_PYTHON": str(shim), "PIP_MARK": str(mark)}
+    verb, *rest = argv
+    r = subprocess.run(
+        ["bash", str(cache / "scripts" / "sm"), verb, str(art), *rest],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert r.returncode == 12, r.stderr
+    assert not mark.exists(), mark.read_text()
+    assert 'sm" install' in r.stderr

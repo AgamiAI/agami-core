@@ -124,8 +124,8 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 
 **Two paths, chosen by the operating system**, which the session's environment already names (the platform: `darwin` is macOS, `win32` is Windows, `linux` is Linux); don't run a command to find it:
 
-- **macOS and Windows: the password page.** **0a.0** → 0a.1 → 0a.2 → **0a.4c** (connection fields card) → 0a.3 (the name, offering the database's own name) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.4k** (the password page) → Phase 1. No file to edit and nothing to paste. The page needs the interpreter, agami-core (with `keyring`) and the artifacts folder in place, which is why 0a.5–0a.8 run before it.
-- **Linux and anything else, and Databricks on every system** (its secret is a `token`, and the page stores a `password`): the file. **0a.0** → 0a.1 → 0a.2 → 0a.3 → **0a.4** (`credentials.example`) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.9** (a card waits for the filled-in file) → 0a.10 → Phase 1.
+- **macOS and Windows: the password page.** **0a.0** → 0a.5b → 0a.1 → 0a.2 → **0a.4c** (connection fields card) → 0a.3 (the name, offering the database's own name) → 0a.5 → 0a.6 → 0a.7 → 0a.8 → **0a.4k** (the password page) → Phase 1. No file to edit and nothing to paste. The page needs the interpreter, agami-core (with `keyring`) and the artifacts folder in place, which is why 0a.5–0a.8 run before it.
+- **Linux and anything else, and Databricks on every system** (its secret is a `token`, and the page stores a `password`): the file. **0a.0** → 0a.5b → 0a.1 → 0a.2 → 0a.3 → **0a.4** (`credentials.example`) → 0a.5 → 0a.6 → 0a.7 → 0a.8 → **0a.9** (a card waits for the filled-in file) → 0a.10 → Phase 1.
 
 ### 0a.0 — Before you start: what to have ready, then the organisation and the source system
 
@@ -162,7 +162,7 @@ If the user chose a non-default `<artifacts_dir>`, first **persist the pointer**
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" init-local "<artifacts_dir>"
 ```
-It works only on agami's own artifacts folder: an `error` naming another folder means the pointer above wasn't written yet.
+It works only on agami's own artifacts folder: an `error` naming another folder means the pointer above wasn't written yet. It never installs anything: exit code 12 means agami's library isn't installed yet, so ask 0a.5b's card and run `sm install` first, then this call again.
 
 ### 0a.2 — Ask the database type
 
@@ -396,7 +396,7 @@ If the driver is missing, **confirm via AskUserQuestion**, then `"<python3>" -m 
 
 ### 0a.5b — Ensure the semantic-model dependencies
 
-The model (introspection, validation, traversal, curation — everything the `sm` wrapper drives) needs **`pydantic` + `sqlglot` + `pyyaml`** in the interpreter agami uses. The resolve step already checked the interpreter it picked: `data.interpreter.has_model_deps` in its output (re-run in 0a.5 with the database type) says whether they are there, so no command is needed here.
+**This runs first, right after 0a.0**: setting up the folder (0a.1) and writing `.config` (0a.7) need agami's library, and neither installs it (each stops with exit code 12 and the install step instead), so the person agrees to the install before anything is set up. The model (introspection, validation, traversal, curation — everything the `sm` wrapper drives) needs **`pydantic` + `sqlglot` + `pyyaml`** in the interpreter agami uses. The resolve step already checked the interpreter it picked: `data.interpreter.has_model_deps` in its output (preflight step 1) says whether they are there, so no command is needed here.
 
 If they're present, continue. If missing, **confirm via AskUserQuestion before installing** (same convention as the DB-driver install above — agami never installs silently):
 > agami needs the **agami-core** package (which pulls `pydantic`, `sqlglot`, `pyyaml`) to build and read the semantic model. Install it now? (one-time, user-site — `pip install --user`)
@@ -505,13 +505,15 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
 
 1. **Resolve the environment first**, since the short-circuit skipped preflight step 1: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_resolve.py --db-type sqlite --profile agami-example`. Its output names everything this path uses: `data.artifacts_dir` is `<artifacts_dir>` (on a first run, when `data.artifacts_dir_source` is `default` and there is no `.config`, ask 0a.6's card instead, default `~/agami-artifacts`), `data.interpreter.python3` is `<python3>`, `data.interpreter.has_model_deps` says whether agami-core is importable, and `data.tools.sqlite3` says whether the `sqlite3` CLI is there.
 
-   **Set up `local/`** (same as 0a.1), one call: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" init-local "<artifacts_dir>"`.
+   **The agami-core package first** (trimmed 0a.5/0a.5b), because setting up `local/` needs it and never installs it: SQLite needs **no DB driver** (stdlib), so only ensure the **agami-core** package is importable in `<python3>`. When `has_model_deps` is false, confirm via AskUserQuestion, then `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install` (the one, one-time install via the `sm` launcher; brings pydantic/sqlglot/pyyaml and works with no `packages/` dir).
+
+   **Then set up `local/`** (same as 0a.1), one call: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" init-local "<artifacts_dir>"`.
 
    Mark the step started and refresh the task list ([shared/task-list.md](../../shared/task-list.md)):
    ```bash
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" steps "<root>" --mark connect=in_progress
    ```
-2. **The agami-core package** (trimmed 0a.5/0a.5b): SQLite needs **no DB driver** (stdlib), so only ensure the **agami-core** package is importable in `<python3>`. When step 1's `has_model_deps` is false, confirm via AskUserQuestion, then `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install` (the one, one-time install via the `sm` launcher; brings pydantic/sqlglot/pyyaml and works with no `packages/` dir). `tier` is `cli` when step 1's `data.tools.sqlite3` is a path, else `python`; no `which` call.
+2. **The tier**: `tier` is `cli` when step 1's `data.tools.sqlite3` is a path, else `python`; no `which` call. (agami-core was installed in step 1, before `local/` was set up.)
 3. **Build the `.db`** into the gitignored `local/` (it's regenerable machine state, not committed):
    ```bash
    AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" "${CLAUDE_PLUGIN_ROOT}/samples/store/build_sample.py" --out "<artifacts_dir>/local/samples/store.db"
