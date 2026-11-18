@@ -206,6 +206,15 @@ def _within_model(handler):
     return run
 
 
+def _reads_no_file(handler):
+    """Mark `handler` as safe for the hook's approved path the way `_within_model` does, for a verb
+    that takes no model folder and opens no file (`batch-id`): every read it makes is inside the
+    model because it makes none. `sm` runs an approved verb only when its handler carries the mark,
+    so without it the verb would stop with the install step on a library that is current."""
+    handler.within_model = True
+    return handler
+
+
 @_within_model
 def cmd_bundle(args) -> int:
     org = L.load_datasource(args.root)
@@ -655,6 +664,7 @@ def cmd_progress(args) -> int:
     return 0
 
 
+@_reads_no_file
 def cmd_batch_id(args) -> int:
     """Print `{"batch": "<YYYYMMDD-HHMMSS>-<4 hex>"}`: a stamp the skill puts in the names of one
     page's scratch files (the page, its items, the decisions it saves). Without it a file left by an

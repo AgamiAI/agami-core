@@ -34,6 +34,7 @@ Nothing here imports Pydantic-free; the whole module is v2-only.
 
 from __future__ import annotations
 
+import ntpath
 import os
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -95,6 +96,7 @@ _CONTAINED_ROOT: ContextVar[Optional[str]] = ContextVar("_CONTAINED_ROOT", defau
 
 @contextmanager
 def contained(root: str | Path) -> Iterator[None]:
+    _refuse_network_links(root)
     token = _CONTAINED_ROOT.set(os.path.realpath(root))
     try:
         yield
@@ -102,12 +104,58 @@ def contained(root: str | Path) -> Iterator[None]:
         _CONTAINED_ROOT.reset(token)
 
 
+def _network_path(value: str) -> bool:
+    """A UNC or device path (`\\\\host\\share`, `//host/share`, `\\\\?\\`, `\\\\.\\`), either slash style."""
+    lead = value[:2].replace("/", "\\")
+    return lead == "\\\\" or ntpath.splitdrive(ntpath.normpath(value))[0].startswith("\\\\")
+
+
+# More links than this on one path is a loop, or a model built to stall the check.
+_MAX_LINKS = 40
+
+
+def _refuse_network_links(path: str | Path) -> None:
+    """Raise OutsideModel when `path`, or the target of any link on the way to it, is a UNC or device
+    path, judged by text alone. On Windows, resolving or even checking such a path can open an SMB
+    session and send the person's credentials to the host, so `realpath` must never see one. Each
+    link's target is read as text (`readlink`, which does not follow it), and the walk restarts on
+    the substituted path, so a chain of links is read the way the OS would follow it. A local
+    `\\\\?\\C:\\` target (how Windows reports a junction) is refused too: refusing costs an
+    `outside_model`, guessing costs a network call."""
+    todo, hops = os.fspath(path), 0
+    while True:
+        if _network_path(todo):
+            raise OutsideModel(f"{todo} is a network or device path; this command reads only "
+                               "files inside the model folder")
+        parts = Path(todo).parts
+        for i in range(1, len(parts) + 1):
+            here = os.path.join(*parts[:i])
+            try:
+                target = os.readlink(here)
+            except (OSError, ValueError):  # not a link, or not there: nothing to follow
+                continue
+            if _network_path(target):  # by its own text: joined, a relative-looking one would hide
+                raise OutsideModel(f"{here} links to a network or device path; this command reads "
+                                   "only files inside the model folder")
+            hops += 1
+            if hops > _MAX_LINKS:
+                raise OutsideModel(f"{path} goes through too many links; this command reads only "
+                                   "files inside the model folder")
+            # every component before `here` is a real directory, so its parent is exact
+            todo = os.path.join(os.path.dirname(here), target, *parts[i:])
+            break
+        else:
+            return
+
+
 def check_contained(path: str | Path) -> None:
     """Raise OutsideModel when a contained read of `path` would leave the model folder, links
-    resolved. Says the path as the model wrote it, never anything read from it."""
+    resolved. Says the path as the model wrote it, never anything read from it. A network or device
+    path, or a link to one, is refused from its text before anything resolves it."""
     root = _CONTAINED_ROOT.get()
     if root is None:
         return
+    _refuse_network_links(path)
     real = os.path.realpath(path)
     try:
         inside = os.path.commonpath([root, real]) == root
@@ -132,6 +180,28 @@ def inside_model(root: str | Path, path: str | Path) -> bool:
     root_real = Path(os.path.realpath(root))
     real = Path(os.path.realpath(path))
     return real == root_real or root_real in real.parents
+
+
+def _present(path: Path) -> bool:
+    """`path.exists()`, after the contained check: `exists` follows links and, on Windows, can reach
+    a network path as surely as a read does."""
+    check_contained(path)
+    return path.exists()
+
+
+def _model_path(root: Path, *parts: Any) -> Path:
+    """`root / parts…` for a path the model itself names (a storage `ref` or connection name, a
+    subject area's path), with a network or device part refused from its text first, when contained:
+    joined to `root` on POSIX, `\\\\host\\share` is an ordinary name and the joined path would no
+    longer show it."""
+    if _CONTAINED_ROOT.get() is not None:
+        for part in parts:
+            if _network_path(str(part)):
+                raise OutsideModel(f"{part} is a network or device path; this command reads only "
+                                   "files inside the model folder")
+    path = root.joinpath(*parts)
+    check_contained(path)
+    return path
 
 
 # The top-level keys `load_datasource` reads, which are exactly `Datasource`'s fields. Every other
@@ -164,7 +234,7 @@ def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Data
     """
     root = Path(root)
     datasource_path = root / "datasource.yaml"
-    if not datasource_path.exists():
+    if not _present(datasource_path):
         raise FileNotFoundError(f"no datasource.yaml at {datasource_path}")
     ds_doc: dict[str, Any] = _read_yaml(datasource_path) or {}
 
@@ -172,25 +242,25 @@ def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Data
     connections: list[StorageConnection] = []
     for sc in ds_doc.get("storage_connections", []) or []:
         if isinstance(sc, dict) and "ref" in sc:
-            ref_path = root / sc["ref"]
+            ref_path = _model_path(root, sc["ref"])
             connections.append(StorageConnection(**(_read_yaml(ref_path) or {})))
         elif isinstance(sc, dict) and "storage_type" in sc:
             connections.append(StorageConnection(**sc))
         else:
             # {name, ref} where ref missing -> try datasources/<name>/storage.yaml
             name = sc.get("name") if isinstance(sc, dict) else str(sc)
-            guess = root / "datasources" / str(name) / "storage.yaml"
-            if guess.exists():
+            guess = _model_path(root, "datasources", str(name), "storage.yaml")
+            if _present(guess):
                 connections.append(StorageConnection(**(_read_yaml(guess) or {})))
 
     # subject areas — each referenced by directory name
     subject_areas: list[SubjectArea] = []
     hidden = _Hidden()   # what is on disk but not served, by (schema, table)
     for sa_ref in ds_doc.get("subject_areas", []) or []:
-        sa_dir = root / (sa_ref if isinstance(sa_ref, str) else sa_ref.get("path", ""))
-        if not sa_dir.exists():
+        sa_dir = _model_path(root, sa_ref if isinstance(sa_ref, str) else sa_ref.get("path", ""))
+        if not _present(sa_dir):
             # also accept a bare name under subject_areas/
-            sa_dir = root / "subject_areas" / str(sa_ref)
+            sa_dir = _model_path(root, "subject_areas", str(sa_ref))
         subject_areas.append(_load_subject_area(sa_dir, include_rejected=include_rejected, hidden=hidden))
 
     org = Datasource(
@@ -531,7 +601,7 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
 
     tables_defined: list[Table] = []
     tdir = sa_dir / "tables"
-    if tdir.exists():
+    if _present(tdir):
         for tf in sorted(tdir.glob("*.yaml")):
             t = Table(**(_read_yaml(tf) or {}))
             if not include_rejected:
@@ -562,7 +632,7 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
 
     entities: list[Entity] = []
     edir = sa_dir / "entities"
-    if edir.exists():
+    if _present(edir):
         for ef in sorted(edir.glob("*.yaml")):
             e = Entity(**(_read_yaml(ef) or {}))
             if not include_rejected and _rejected(e):
@@ -571,7 +641,7 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
 
     metrics: list[Metric] = []
     mdir = sa_dir / "metrics"
-    if mdir.exists():
+    if _present(mdir):
         for mf in sorted(mdir.glob("*.yaml")):
             mm = Metric(**(_read_yaml(mf) or {}))
             if not include_rejected and _rejected(mm):
@@ -582,7 +652,7 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
 
     relationships: list[Relationship] = []
     rel_file = sa_dir / "relationships.yaml"
-    if rel_file.exists():
+    if _present(rel_file):
         rels_doc = _read_yaml(rel_file) or []
         if isinstance(rels_doc, dict):
             rels_doc = rels_doc.get("relationships", [])
@@ -624,7 +694,7 @@ def _load_cross_rels(root: Path, ds_doc: dict) -> list[CrossSubjectAreaRelations
         out.append(CrossSubjectAreaRelationship(**r))
     # or a sidecar file
     f = root / "cross_subject_area_relationships.yaml"
-    if f.exists():
+    if _present(f):
         doc = _read_yaml(f) or {}
         for r in doc.get("edges", doc if isinstance(doc, list) else []):
             out.append(CrossSubjectAreaRelationship(**r))
@@ -634,7 +704,7 @@ def _load_cross_rels(root: Path, ds_doc: dict) -> list[CrossSubjectAreaRelations
 def _load_cross_entities(root: Path, ds_doc: dict) -> list[Entity]:
     out = [Entity(**e) for e in (ds_doc.get("cross_subject_area_entities", []) or [])]
     f = root / "cross_subject_area_entities.yaml"
-    if f.exists():
+    if _present(f):
         doc = _read_yaml(f) or {}
         for e in doc.get("entities", doc if isinstance(doc, list) else []):
             out.append(Entity(**e))
@@ -644,7 +714,7 @@ def _load_cross_entities(root: Path, ds_doc: dict) -> list[Entity]:
 def _load_cross_metrics(root: Path, ds_doc: dict) -> list[Metric]:
     out = [Metric(**mm) for mm in (ds_doc.get("cross_subject_area_metrics", []) or [])]
     f = root / "cross_subject_area_metrics.yaml"
-    if f.exists():
+    if _present(f):
         doc = _read_yaml(f) or {}
         for mm in doc.get("metrics", doc if isinstance(doc, list) else []):
             out.append(Metric(**mm))
@@ -1201,7 +1271,7 @@ def list_prompt_examples(root: str | Path, area: str,
     view (re-render, dedup, audit), where a rejected example must still be visible.
     """
     f = Path(root) / "prompt_examples" / area / "examples.yaml"
-    if not f.exists():
+    if not _present(f):
         return []
     doc = _read_yaml(f) or {}
     items = doc if isinstance(doc, list) else doc.get("examples", [])

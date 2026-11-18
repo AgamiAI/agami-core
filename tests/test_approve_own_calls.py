@@ -280,6 +280,73 @@ def test_an_approved_out_call_writes_only_its_scratch_file(art, args, monkeypatc
     assert touched == {Path(filled[-1])}
 
 
+def _tree(top: Path) -> dict[str, tuple]:
+    """Every entry under `top`, links not followed: kind, and a file's bytes and mtime."""
+    out: dict[str, tuple] = {}
+    for dirpath, dirs, files in os.walk(top):
+        for name in dirs + files:
+            p = Path(dirpath) / name
+            if p.is_symlink():
+                out[str(p)] = ("link", os.readlink(p))
+            elif p.is_dir():
+                out[str(p)] = ("dir",)
+            else:
+                out[str(p)] = ("file", p.read_bytes(), p.stat().st_mtime_ns)
+    return out
+
+
+@SYMLINKS
+@pytest.mark.parametrize("args", APPROVED)
+def test_an_approved_call_through_the_launcher_writes_only_what_its_row_allows(art, tmp_path, args):
+    """The same promise through the real `sm`, the way the hook lets it run, for every form the table
+    approves, so a verb added later is covered without a new case. With <artifacts_dir>/local a link
+    to a folder elsewhere, the launcher's own setup (the scratch folder, Python's bytecode cache)
+    writes nothing, there or anywhere under the test's folder; the verb itself writes only what its
+    row allows: `steps` and `progress` inside the model's .introspect/, `--out` its scratch file.
+    An `--out` form is approved only with a real scratch folder, so it runs with one."""
+    pytest.importorskip("pydantic")
+    from semantic_model import cli
+
+    shutil.rmtree(art / "acme")
+    shutil.copytree(PLUGIN / "samples" / "store" / "model", art / "acme")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    if "--out" not in args:
+        shutil.rmtree(art / "local")
+        (art / "local").symlink_to(elsewhere)
+    filled = (
+        re.sub(r"--wait \d+", "--wait 0", args)  # the log never moves here: don't sit out the wait
+        .format(R=str(art / "acme"), T=str(art / "local" / "tmp"))
+        .split()
+    )
+    if "--area" in filled:
+        filled[filled.index("--area") + 1] = (
+            cli.L.load_datasource(art / "acme").subject_areas[0].name
+        )
+    env = {
+        **os.environ,
+        "AGAMI_ARTIFACTS_DIR": str(art),
+        "HOME": str(tmp_path),
+        "AGAMI_PYTHON": sys.executable,
+    }
+    before = _tree(tmp_path)
+    proc = subprocess.run(
+        ["bash", SM, *filled], capture_output=True, env=env, cwd=tmp_path, timeout=120
+    )
+    assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+    after = _tree(tmp_path)
+    touched = {p for p in after if before.get(p) != after[p]} | (set(before) - set(after))
+    if "--out" in filled:
+        allowed = {filled[filled.index("--out") + 1]}
+    elif filled[0] in ("steps", "progress"):
+        introspect = str(art / "acme" / ".introspect")
+        allowed = {p for p in touched if p == introspect or p.startswith(introspect + os.sep)}
+    else:
+        allowed = set()
+    assert touched == allowed, sorted(touched - allowed)
+    assert list(elsewhere.iterdir()) == []
+
+
 # --- what an approved verb reads: only files inside the model folder --------------------------------
 # The hook checks the folder a call names, but the model inside it names more files: a storage `ref`,
 # a subject area's path, a link. Before this, a ref to a credentials file outside the model reached
@@ -401,7 +468,9 @@ def test_every_approved_verb_runs_contained():
     for verb in HOOK_MOD.VERBS:
         if verb == "batch-id":
             # Takes no model folder and reads no file: it prints a stamp from the clock and urandom.
+            # Marked all the same, since `sm` runs an approved verb only on a marked handler.
             assert HOOK_MOD.VERBS[verb].positionals == (), verb
+            assert cli._parse_args([verb]).func.within_model is True, verb
             continue
         extra = ["--area", "x"] if verb == "bundle" else []
         handler = cli._parse_args([verb, "/r", *extra]).func
@@ -988,6 +1057,139 @@ def test_a_link_inside_the_plugin_pointing_out_says_nothing(art, tmp_path):
         link.unlink()
 
 
+# --- UNC and device references inside the model -----------------------------------------------------------
+# The hook refuses a network path the call names, but the model names more: a storage `ref`, a subject
+# area's path, a link's target. A contained load refuses each from its text, before `realpath`,
+# `exists` or a read could reach the host.
+
+
+def _no_model_filesystem_call_on_unc(monkeypatch) -> list:
+    """The hook's spy, widened to what a model load can call: opens, directory listings and link reads."""
+    import io as _io
+
+    touched = _no_filesystem_call_on_unc(monkeypatch)
+    for mod, name in (
+        (os, "open"),
+        (os, "listdir"),
+        (os, "scandir"),
+        (os, "readlink"),
+        (_io, "open"),
+    ):
+        real = getattr(mod, name)
+
+        def spy(p, *a, _real=real, **k):
+            if "uncprobe" in str(p):
+                touched.append(p)
+            return _real(p, *a, **k)
+
+        monkeypatch.setattr(mod, name, spy)
+    return touched
+
+
+def _model_naming(root: Path, **datasource: object) -> None:
+    import yaml
+
+    _small_model(root, yaml.safe_dump({"datasource": "acme", **datasource}))
+
+
+@pytest.mark.parametrize("value", UNC_FORMS)
+def test_a_unc_reference_in_the_model_is_network(value):
+    from semantic_model import loader
+
+    assert loader._network_path(value) is True
+
+
+def test_a_local_reference_is_not_network():
+    from semantic_model import loader
+
+    for value in ("subject_areas/sales", "/srv/models/acme", "C:\\models\\acme", "sales"):
+        assert loader._network_path(value) is False, value
+
+
+@pytest.mark.parametrize(
+    "where",
+    ["storage_ref", "storage_name", "area_path", "area_dict_path"],
+)
+@pytest.mark.parametrize("value", UNC_FORMS)
+def test_a_unc_reference_in_the_model_is_refused_before_any_filesystem_call(
+    art, monkeypatch, capsys, where, value
+):
+    pytest.importorskip("pydantic")
+    from semantic_model import cli
+
+    root = art / "acme"
+    shutil.rmtree(root)
+    areas = ["subject_areas/sales"]
+    fields: dict = {
+        "storage_ref": {"storage_connections": [{"ref": value}], "subject_areas": areas},
+        "storage_name": {"storage_connections": [{"name": value}], "subject_areas": areas},
+        "area_path": {"subject_areas": [value]},
+        "area_dict_path": {"subject_areas": [{"path": value}]},
+    }[where]
+    _model_naming(root, **fields)
+    touched = _no_model_filesystem_call_on_unc(monkeypatch)
+    assert cli.main(["areas", str(root)]) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "outside_model"
+    assert touched == []
+
+
+@SYMLINKS
+@pytest.mark.parametrize("value", ["//uncprobe/share/area", "\\\\uncprobe\\share\\area"])
+@pytest.mark.parametrize("linked", ["area", "tables", "table_file", "chain"])
+def test_a_link_in_the_model_to_a_unc_path_is_refused_before_following_it(
+    art, monkeypatch, capsys, value, linked
+):
+    """A link's target is read as text and refused; nothing follows it, so nothing reaches the host."""
+    pytest.importorskip("pydantic")
+    from semantic_model import cli
+
+    root = art / "acme"
+    shutil.rmtree(root)
+    _model_naming(root, subject_areas=["subject_areas/sales"])
+    sales = root / "subject_areas" / "sales"
+    if linked == "area":
+        shutil.rmtree(sales)
+        sales.symlink_to(value)
+    elif linked == "tables":
+        shutil.rmtree(sales / "tables")
+        (sales / "tables").symlink_to(value)
+    elif linked == "table_file":
+        (sales / "tables" / "z.yaml").symlink_to(value)
+    else:  # a local link to a link to the host
+        (root / "hop").symlink_to(value)
+        shutil.rmtree(sales)
+        sales.symlink_to(root / "hop")
+    touched = _no_model_filesystem_call_on_unc(monkeypatch)
+    assert cli.main(["areas", str(root)]) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "outside_model"
+    assert touched == []
+
+
+@SYMLINKS
+def test_a_link_loop_in_the_model_is_refused(tmp_path):
+    from semantic_model import loader
+
+    root = tmp_path / "acme"
+    root.mkdir()
+    (root / "a").symlink_to(root / "b")
+    (root / "b").symlink_to(root / "a")
+    with loader.contained(root), pytest.raises(loader.OutsideModel, match="too many links"):
+        loader.check_contained(root / "a" / "x.yaml")
+
+
+@SYMLINKS
+def test_a_local_link_inside_the_model_still_loads_contained(tmp_path):
+    """The link walk follows a link that stays inside the folder, so a model arranged with one loads."""
+    pytest.importorskip("pydantic")
+    from semantic_model import loader
+
+    root = tmp_path / "acme"
+    _small_model(root, "datasource: acme\nsubject_areas:\n  - subject_areas/alias\n")
+    (root / "subject_areas" / "alias").symlink_to("sales")
+    with loader.contained(root):
+        assert [a.name for a in loader.load_datasource(root).subject_areas] == ["sales"]
+
+
 # --- malformed input --------------------------------------------------------------------------------------
 
 
@@ -1326,6 +1528,92 @@ def _stale_library_exit() -> int:
     return int(code)
 
 
+_OLD_CLI = """
+import argparse
+
+
+def _parse_args(argv):
+    return argparse.Namespace(func=lambda args: 0)
+
+
+def main(argv=None):
+    print("RAN")
+    return 0
+"""
+_CONTAINED_CLI = """
+import argparse
+import contextlib
+
+
+class L:
+    contained = staticmethod(contextlib.nullcontext)
+
+
+def handler(args):
+    return 0
+
+
+handler.within_model = True
+
+
+def _parse_args(argv):
+    return argparse.Namespace(func=handler)
+
+
+def main(argv=None):
+    print("RAN")
+    return 0
+"""
+
+
+@pytest.mark.parametrize(
+    "cli_source, runs",
+    [
+        (_OLD_CLI, False),  # a handler with no containment
+        ("def main(argv=None):\n    print('RAN')\n    return 0\n", False),  # older still
+        (_CONTAINED_CLI, True),  # the stub itself is what runs, once it holds the verb
+    ],
+)
+@pytest.mark.parametrize("verb", sorted(_no_install_verbs()))
+def test_an_approved_verb_runs_only_on_a_library_that_contains_it(
+    art, tmp_path, cli_source, runs, verb
+):
+    """A `semantic_model` with no install metadata on PYTHONPATH passes the import and version checks
+    (an unknown version is not a stale one), so the launcher must ask the code itself whether it
+    holds the verb inside the model folder, and exit 12 having run nothing when it does not."""
+    pytest.importorskip("pydantic")
+    cache = tmp_path / "cache" / "agami-core" / "0.0.1" / "scripts"  # a marketplace layout
+    cache.mkdir(parents=True)
+    for name in ("sm", "_python.sh", "_plugin_version.py"):
+        shutil.copy2(PLUGIN / "scripts" / name, cache / name)
+    stub = tmp_path / "stub" / "semantic_model"
+    stub.mkdir(parents=True)
+    (stub / "__init__.py").write_text("")
+    main_block = '\nif __name__ == "__main__":\n    raise SystemExit(main())\n'
+    (stub / "cli.py").write_text(cli_source + main_block)
+    env = {
+        **os.environ,
+        "AGAMI_ARTIFACTS_DIR": str(art),
+        "HOME": str(tmp_path),
+        "AGAMI_PYTHON": sys.executable,
+        "PYTHONPATH": str(stub.parent),
+    }
+    extra = ["--area", "sales"] if verb == "bundle" else []
+    proc = subprocess.run(
+        ["bash", str(cache / "sm"), verb, str(art / "acme"), *extra],
+        capture_output=True,
+        env=env,
+        timeout=120,
+    )
+    out, err = proc.stdout.decode(), proc.stderr.decode(errors="replace")
+    if runs:
+        assert (proc.returncode, out.strip()) == (0, "RAN"), err
+    else:
+        assert proc.returncode == _stale_library_exit(), err
+        assert "RAN" not in out
+        assert 'sm" install' in err
+
+
 def test_the_stale_library_refusal_is_not_the_no_model_code(tmp_path):
     """A skill reads exit 3 from its first `sm areas` as "no model here, set the database up". A
     library left stale by a plugin update must not read the same, or the person is sent to connect
@@ -1466,4 +1754,7 @@ def test_an_approved_verb_never_reaches_the_installer_after_its_guard(art, tmp_p
     )
     assert not pip.exists(), pip.read_text()
     assert r.returncode == 0, r.stderr
-    assert "semantic_model.cli " + verb in ran.read_text()
+    # the run is the one that checks the verb is contained, then calls the CLI (no second probe)
+    runs = ran.read_text()
+    assert "from semantic_model import cli" in runs
+    assert f" {verb} {art / 'acme'}" in runs
