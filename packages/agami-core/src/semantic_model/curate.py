@@ -37,7 +37,7 @@ import yaml
 from . import pii
 from . import validator as V
 from .loader import _read_yaml as _load
-from .loader import load_datasource
+from .loader import check_contained, load_datasource
 from .models import (
     Ambiguity,
     CrossSubjectAreaRelationship,
@@ -2652,6 +2652,7 @@ def _read_log_lines(root: Path) -> list[Optional[dict]]:
     """Each line of the curation log, parsed; None for a line that isn't a JSON object."""
     try:
         # bytes, so one undecodable line is that line's problem, not the whole log's
+        check_contained(root / CURATION_LOG)
         lines = (root / CURATION_LOG).read_bytes().splitlines()
     except OSError:
         return []

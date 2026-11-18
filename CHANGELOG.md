@@ -12,6 +12,15 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **Fewer permission prompts.** A plugin hook approves, with no prompt, only agami's own harmless
+  calls: six read-only model commands (`areas`, `coverage`, `review-queue`, `review-items`,
+  `model-tree`, `bundle`) written with plain paths, and agami's own `agami-*` scratch files under
+  `<artifacts_dir>/local/tmp/`, plus reads of the plugin's own files. Anything else asks as before, and those six commands no longer
+  install the library themselves: they stop with an exit code of their own, which the skills turn
+  into the `sm install` step, so a stale library is never mistaken for a missing model.
+
 ## [0.9.24] — 2026-11-17
 
 ### Security

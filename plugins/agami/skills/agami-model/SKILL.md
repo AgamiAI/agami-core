@@ -58,6 +58,8 @@ The identity is typed by the person: **never infer it** from git config, the env
 
 ## Phase 1: Overview and the card
 
+**If an `sm` call exits 12, agami's library is older than the plugin:** run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install` (the person approves it), then repeat the call. It is not "no model" (exit 3): never send the person to agami-connect for it.
+
 Read the model from the engine; never walk the YAML yourself:
 
 ```bash
