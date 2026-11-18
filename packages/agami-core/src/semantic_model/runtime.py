@@ -10871,13 +10871,16 @@ _COLLAPSES = (exp.Max, exp.Min) if _HAVE_SQLGLOT else ()
 
 def _is_collapsed_label(oc: "OutputColumn", result: "_ColumnMatch", tr: "_Trace") -> bool:
     """Whether an output column is a label although a step aggregated it: its own SELECT groups by it
-    and the step only collapsed duplicates (every aggregate in it a MAX or MIN). A COUNT, SUM or AVG
+    and the step only collapsed duplicates (every aggregate in it a MAX or MIN), or the trace could
+    not follow it to a step at all (the rule as it was before the collapse test). A COUNT, SUM or AVG
     grouped on (`GROUP BY 1, 2` over every column, to de-duplicate rows) is still a figure, and so is
     anything that matched or is written as a metric's binding, whatever the grouping."""
     if result.status == MATCHED or result.unconfirmed is not None or not _is_own_group_key(oc):
         return False
     flow = _flow(oc, tr)
-    if flow.reason or flow.built_on is not None or flow.expr is None:
+    if flow.reason:
+        return True   # not followed, so nothing says it is a count: grouped on, it is the label
+    if flow.built_on is not None or flow.expr is None:
         return False
     aggs = _own_nodes(flow.expr, exp.AggFunc)
     return bool(aggs) and all(isinstance(a, _COLLAPSES) for a in aggs)

@@ -121,3 +121,13 @@ def test_the_same_prefix_or_one_source_still_matches(org):
     assert _items(org, TWO + "SELECT s.total FROM s JOIN o ON s.team = o.team "
                              "GROUP BY s.total")["total"]["aggregate"] is False
     assert _items(org, TWO + "SELECT s.total FROM s GROUP BY total")["total"]["aggregate"] is False
+
+
+def test_a_grouped_label_the_trace_cannot_follow_stays_a_label(org):
+    """A value drawn from two steps is not followed (the trace stops with a reason); grouped on, it
+    is the answer's label as before the collapse rule, not a figure."""
+    sql = ("WITH a AS (SELECT team, MAX(state) AS st FROM incidents GROUP BY team), "
+           "b AS (SELECT team, MAX(state) AS st FROM incidents GROUP BY team) "
+           "SELECT a.st || b.st AS label, COUNT(*) AS n FROM a JOIN b ON a.team = b.team GROUP BY 1")
+    items = _items(org, sql)
+    assert items["label"]["aggregate"] is False and items["n"]["aggregate"] is True
