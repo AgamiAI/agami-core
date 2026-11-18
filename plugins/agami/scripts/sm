@@ -51,7 +51,7 @@ case " $NO_INSTALL_VERBS " in *" ${1:-} "*) APPROVED_VERB=1 ;; esac
 # The verbs that set up the artifacts folder run before the person is asked about installing the
 # library (agami-connect asks for `sm install` first), so they never install either: they ask for the
 # hook's approval like any write, but a missing or stale library stops them with the install step.
-SETUP_VERBS="init-local set-config"
+SETUP_VERBS="choose-folder init-local set-config"
 SETUP_VERB=""
 case " $SETUP_VERBS " in *" ${1:-} "*) SETUP_VERB=1 ;; esac
 

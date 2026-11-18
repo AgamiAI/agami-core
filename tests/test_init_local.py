@@ -208,7 +208,9 @@ exit 0
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell shim")
-@pytest.mark.parametrize("argv", [["init-local"], ["init-local", "--sample"], ["set-config"]])
+@pytest.mark.parametrize(
+    "argv", [["choose-folder"], ["init-local"], ["init-local", "--sample"], ["set-config"]]
+)
 def test_setting_up_the_folder_never_installs(art, tmp_path, argv):
     """Onboarding sets the folder up before the person has agreed to install agami's library, so
     these verbs must stop with the install step (exit 12) instead of running pip themselves."""
@@ -233,3 +235,51 @@ def test_setting_up_the_folder_never_installs(art, tmp_path, argv):
     assert r.returncode == 12, r.stderr
     assert not mark.exists(), mark.read_text()
     assert 'sm" install' in r.stderr
+
+
+@pytest.fixture
+def first_run(tmp_path, monkeypatch) -> Path:
+    """A brand-new install: no AGAMI_ARTIFACTS_DIR, no saved pointer, nothing at the default."""
+    import agami_paths
+
+    monkeypatch.delenv("AGAMI_ARTIFACTS_DIR", raising=False)
+    home = Path(os.path.realpath(tmp_path))
+    monkeypatch.setattr(agami_paths, "POINTER_PATH", home / ".config" / "agami" / "path")
+    monkeypatch.setattr(agami_paths, "DEFAULT_ARTIFACTS_DIR", home / "agami-artifacts")
+    return home
+
+
+def test_the_first_run_with_a_folder_of_its_own_goes_through_the_verbs(first_run):
+    """agami-connect's first run, in its order: 0a.6 picks a folder other than the default and
+    `choose-folder` saves it, then 0a.1's `init-local` and 0a.7's `set-config` take that folder."""
+    import agami_paths
+
+    chosen = first_run / "code" / "acme-data" / "agami"
+    rc, out = _run(["choose-folder", str(chosen)])
+    assert rc == 0, out
+    assert out["artifacts_dir"] == str(chosen)
+    assert agami_paths.POINTER_PATH.read_text().strip() == str(chosen)
+    rc, out = _run(["init-local", str(chosen)])
+    assert rc == 0, out
+    assert (chosen / "local" / "tmp").is_dir()
+    rc, out = _run(["set-config", str(chosen), "--tier", "python", "--active-profile", "acme"])
+    assert rc == 0, out
+    doc = json.loads((chosen / "local" / ".config").read_text())
+    assert doc["artifacts_dir"] == str(chosen) and doc["active_profile"] == "acme"
+    assert not (first_run / "agami-artifacts").exists()  # no stray default folder
+
+
+@pytest.mark.parametrize("where", ["relative", "a file", "inside local"])
+def test_choose_folder_refuses_a_folder_it_cannot_use(first_run, where):
+    import agami_paths
+
+    (first_run / "agami-artifacts" / "local").mkdir(parents=True)
+    (first_run / "notes.txt").write_text("x")
+    target = {
+        "relative": "agami",
+        "a file": str(first_run / "notes.txt"),
+        "inside local": str(first_run / "agami-artifacts" / "local" / "x"),
+    }[where]
+    rc, out = _run(["choose-folder", target])
+    assert rc == 2 and "error" in out
+    assert not agami_paths.POINTER_PATH.exists()

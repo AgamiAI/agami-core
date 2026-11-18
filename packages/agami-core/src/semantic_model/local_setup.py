@@ -1,6 +1,10 @@
-"""`sm init-local` and `sm set-config`: the first-run files under `<artifacts_dir>/local/`, written by
-agami, so a skill needs neither a `mkdir` nor a Write outside the working folder (each of which
-stopped onboarding for permission) and the calls can be pre-approved.
+"""`sm choose-folder`, `sm init-local` and `sm set-config`: the first-run files under
+`<artifacts_dir>/local/`, written by agami, so a skill needs neither a `mkdir` nor a Write outside the
+working folder (each of which stopped onboarding for permission) and the calls can be pre-approved.
+
+`choose-folder` is the one that names a folder: it saves the person's choice as agami's artifacts
+folder (the pointer at `~/.config/agami/path`), and is never pre-approved. It runs before the other
+two, which then act on that folder only.
 
 Nothing a call carries is written as content. `init-local` writes only text agami defines (the
 `.gitignore` line, the sample's credential section). `set-config` writes `.config` from fields it
@@ -51,6 +55,29 @@ def own_artifacts_dir(path: str) -> Path:
             "~/.config/agami/path first."
         )
     return art
+
+
+def choose_folder(path: str) -> dict[str, Any]:
+    """Save `path` as agami's artifacts folder (the pointer file), after checking it can be one:
+    absolute, not a file, and not inside the current folder's `local/`. Creates nothing else;
+    `init-local` makes the folder."""
+    import agami_paths
+
+    if not path or not os.path.isabs(os.path.expanduser(path)):
+        raise SetupRefused(f"{path!r}: pass the artifacts folder as an absolute path")
+    given = Path(os.path.expanduser(path)).resolve()
+    if given.exists() and not given.is_dir():
+        raise SetupRefused(f"{given} is a file, not a folder: choose a folder for agami's files")
+    current_local = agami_paths.local_dir(agami_paths.artifacts_dir())
+    if given == current_local or current_local in given.parents:
+        raise SetupRefused(
+            f"{given} is inside {current_local}, agami's private folder: choose a folder outside it"
+        )
+    try:
+        saved = agami_paths.set_artifacts_dir(given)
+    except OSError as exc:
+        raise SetupRefused(f"could not save the folder in {agami_paths.POINTER_PATH}: {exc}") from None
+    return {"artifacts_dir": str(saved), "pointer": str(agami_paths.POINTER_PATH)}
 
 
 def sample_credential(art: Path) -> str:

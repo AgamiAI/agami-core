@@ -678,6 +678,18 @@ def cmd_batch_id(args) -> int:
     return 0
 
 
+def cmd_choose_folder(args) -> int:
+    """Save the person's chosen artifacts folder (the pointer) before init-local sets it up. See
+    semantic_model/local_setup.py."""
+    from . import local_setup as LS
+    try:
+        _print_json(LS.choose_folder(args.artifacts_dir))
+    except LS.SetupRefused as exc:
+        _print_json({"error": str(exc)})
+        return 2
+    return 0
+
+
 def cmd_init_local(args) -> int:
     """Set up `<artifacts_dir>/local/` (0700), its scratch folder and `.gitignore`; `--sample` also
     writes the sample's credential for promote_credentials.py. See semantic_model/local_setup.py."""
@@ -2828,6 +2840,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("batch-id", help="print a fresh stamp for the names of one page's scratch files")
     sp.set_defaults(func=cmd_batch_id)
+
+    sp = sub.add_parser("choose-folder", help="save the folder the person chose as agami's artifacts folder (~/.config/agami/path), checked first; run before init-local")
+    sp.add_argument("artifacts_dir", help="the chosen folder, written out in full")
+    sp.set_defaults(func=cmd_choose_folder)
 
     sp = sub.add_parser("init-local", help="create <artifacts_dir>/local/ (0700) and its scratch folder, and make .gitignore ignore local/; --sample also writes the sample database's credential")
     sp.add_argument("artifacts_dir", help="agami's artifacts folder, written out in full")
