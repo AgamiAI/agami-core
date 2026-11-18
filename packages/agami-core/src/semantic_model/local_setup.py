@@ -164,14 +164,39 @@ def _not_ignored(gi: Path, why: str) -> str:
     )
 
 
+def _sample_template_present(example: Path, art: Path) -> bool:
+    """True when `example` is the sample's own template (a re-run), False when there is none;
+    SetupRefused when it is anything else. A template left by an earlier connection attempt is
+    that connection's: the sample flow would promote it and never write its own."""
+    if not (example.exists() or example.is_symlink()):
+        return False
+    try:
+        same = not example.is_symlink() and example.read_text(encoding="utf-8") == (
+            sample_credential(art)
+        )
+    except (OSError, UnicodeDecodeError):
+        same = False
+    if same:
+        return True
+    raise SetupRefused(
+        f"{example} already holds another connection's template, from an earlier attempt to "
+        "connect a database, and agami won't replace it with the sample's. Finish that connection "
+        "first (agami-connect picks the file up once it is filled in), or move the file somewhere "
+        "else, then try the sample again."
+    )
+
+
 def init_local(path: str, sample: bool = False) -> dict[str, Any]:
     """Create `<art>` and `<art>/local/tmp/` (local/ and tmp/ 0700, an existing local/ tightened),
     make `.gitignore` ignore `local/`, and with `sample` write the sample's credential as
-    `local/credentials.example` for promote_credentials.py to take in (never over an existing one)."""
+    `local/credentials.example` for promote_credentials.py to take in (never over an existing one,
+    and refused, the file kept, when an existing one isn't the sample's)."""
     from agami_paths import ensure_local_dir
 
     art = own_artifacts_dir(path)
     _refuse_links(art / LOCAL_SUBDIR, art / LOCAL_SUBDIR / "tmp")
+    example = art / LOCAL_SUBDIR / "credentials.example"
+    have_sample = sample and _sample_template_present(example, art)
     art.mkdir(parents=True, exist_ok=True)
     gitignore = _ensure_ignored(art)
     local = ensure_local_dir(art)
@@ -182,8 +207,7 @@ def init_local(path: str, sample: bool = False) -> dict[str, Any]:
         pass
     out: dict[str, Any] = {"artifacts_dir": str(art), "local": str(local), "gitignore": gitignore}
     if sample:
-        example = local / "credentials.example"
-        if example.exists() or example.is_symlink():
+        if have_sample:
             out["credentials_example"] = "exists"
         else:
             fd = os.open(example, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

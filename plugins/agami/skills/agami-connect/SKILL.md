@@ -528,7 +528,7 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" init-local "<artifacts_dir>" --sample
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" promote_credentials.py
    ```
-   `SECURED`/`APPENDED` → chmod 600, collision-safe. (No placeholders → never trips `PLACEHOLDERS_REMAIN`.)
+   `SECURED`/`APPENDED` → chmod 600, collision-safe. (No placeholders → never trips `PLACEHOLDERS_REMAIN`.) An `error` from `init-local --sample` means `credentials.example` is another connection's template, left from an earlier attempt: don't run the promoter. Say the `error` in plain words, and ask a card, header `Template`: `Finish that connection` (0a.9) / `Stop here` (the person moves the file, then tries the sample again).
 5. **Write `<artifacts_dir>/local/.config`** (as 0a.7 does), one call; add `--tool sqlite3="<sqlite3_path>"` when step 1 found the `sqlite3` CLI (`tier` `cli`), else leave it out (`tier` `python`):
    ```bash
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-config "<artifacts_dir>" --tier <tier> --active-profile agami-example --python3 "<python3>"

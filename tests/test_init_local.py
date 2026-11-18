@@ -73,9 +73,19 @@ def test_sample_writes_the_sample_credential_once(art):
     assert example.read_text() == (
         f"[agami-example]\ntype = sqlite\npath = {art / 'local' / 'samples' / 'store.db'}\n"
     )
+    rc, out = _run(["init-local", str(art), "--sample"])  # the sample's own, from a re-run
+    assert rc == 0 and out["credentials_example"] == "exists"
+
+
+def test_the_sample_never_takes_over_another_connections_template(art):
+    """A template left by an earlier connection attempt is that connection's: promoted by the
+    sample flow it would connect the wrong database and lose the person's file. Refuse, keep it."""
+    _run(["init-local", str(art)])
+    example = art / "local" / "credentials.example"
     example.write_text("[acme]\ntype = postgres\n")  # the person's own template
     rc, out = _run(["init-local", str(art), "--sample"])
-    assert out["credentials_example"] == "exists"
+    assert rc == 2 and "credentials.example" in out["error"]
+    assert "acme" in out["error"] or "another" in out["error"]
     assert example.read_text() == "[acme]\ntype = postgres\n"
 
 
