@@ -35,9 +35,11 @@ Nothing here imports Pydantic-free; the whole module is v2-only.
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 import yaml
 
@@ -80,7 +82,44 @@ SIGNER_FIELDS = frozenset({"signed_off_by", "signed_off_role", "signed_off_at"})
 # ---------------------------------------------------------------------------
 
 
+class OutsideModel(ValueError):
+    """A contained read named a file outside the model folder, or reached one through a link."""
+
+
+# The model folder a read must stay inside, while `contained` is active; None reads anywhere. The
+# verbs the plugin's permission hook runs with no prompt load under it: the hook checks the folder a
+# call names, but the model names more files (a storage `ref`, a subject area's path, a link), and
+# one outside could be a credentials file whose values the schema error would then quote.
+_CONTAINED_ROOT: ContextVar[Optional[str]] = ContextVar("_CONTAINED_ROOT", default=None)
+
+
+@contextmanager
+def contained(root: str | Path) -> Iterator[None]:
+    token = _CONTAINED_ROOT.set(os.path.realpath(root))
+    try:
+        yield
+    finally:
+        _CONTAINED_ROOT.reset(token)
+
+
+def check_contained(path: str | Path) -> None:
+    """Raise OutsideModel when a contained read of `path` would leave the model folder, links
+    resolved. Says the path as the model wrote it, never anything read from it."""
+    root = _CONTAINED_ROOT.get()
+    if root is None:
+        return
+    real = os.path.realpath(path)
+    try:
+        inside = os.path.commonpath([root, real]) == root
+    except ValueError:  # another drive on Windows
+        inside = False
+    if not inside:
+        raise OutsideModel(f"{path} is outside the model folder {root}; this command reads only "
+                           "files inside it")
+
+
 def _read_yaml(path: Path) -> Any:
+    check_contained(path)
     with path.open("r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
 

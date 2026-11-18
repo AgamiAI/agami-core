@@ -280,6 +280,168 @@ def test_an_approved_out_call_writes_only_its_scratch_file(art, args, monkeypatc
     assert touched == {Path(filled[-1])}
 
 
+# --- what an approved verb reads: only files inside the model folder --------------------------------
+# The hook checks the folder a call names, but the model inside it names more files: a storage `ref`,
+# a subject area's path, a link. Before this, a ref to a credentials file outside the model reached
+# Claude through the load's own error (the schema error quotes each unexpected value), and a subject
+# area pointed outside printed that folder's text. Every approved verb now refuses any read outside
+# the folder, before the read.
+
+_AREA = "name: sales\ndescription: d\n"
+_TABLE = "name: orders\ndescription: o\ncolumns:\n  - name: id\n    type: integer\n"
+
+
+def _small_model(root: Path, datasource: str) -> None:
+    tables = root / "subject_areas" / "sales" / "tables"
+    tables.mkdir(parents=True)
+    (tables.parent / "subject_area.yaml").write_text(_AREA)
+    (tables / "orders.yaml").write_text(_TABLE)
+    (root / "datasource.yaml").write_text(datasource)
+
+
+def _outside_area(tmp_path: Path) -> Path:
+    area = tmp_path / "outside" / "area"
+    (area / "tables").mkdir(parents=True)
+    (area / "subject_area.yaml").write_text("name: sales\ndescription: SECRET-AREA\n")
+    (area / "tables" / "t.yaml").write_text(
+        _TABLE.replace("description: o", "description: SECRET-T")
+    )
+    return area
+
+
+def _secret_ref(root: Path, tmp_path: Path) -> None:
+    secret = tmp_path / "outside" / "creds.json"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_text('{"name": "x", "storage_type": "PostgreSQL", "password": "SECRET-PW"}')
+    _small_model(
+        root,
+        "datasource: acme\nstorage_connections:\n  - ref: ../../outside/creds.json\n"
+        "subject_areas:\n  - subject_areas/sales\n",
+    )
+
+
+def _absolute_area(root: Path, tmp_path: Path) -> None:
+    _small_model(root, f"datasource: acme\nsubject_areas:\n  - {_outside_area(tmp_path)}\n")
+
+
+def _relative_area(root: Path, tmp_path: Path) -> None:
+    _outside_area(tmp_path)
+    _small_model(root, "datasource: acme\nsubject_areas:\n  - ../../outside/area\n")
+
+
+def _linked_area(root: Path, tmp_path: Path) -> None:
+    _small_model(root, "datasource: acme\nsubject_areas:\n  - subject_areas/linked\n")
+    (root / "subject_areas" / "linked").symlink_to(_outside_area(tmp_path))
+
+
+def _linked_table(root: Path, tmp_path: Path) -> None:
+    _small_model(root, "datasource: acme\nsubject_areas:\n  - subject_areas/sales\n")
+    outside = tmp_path / "outside" / "t.yaml"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("name: other\ndescription: SECRET-LINK\ncolumns: []\n")
+    (root / "subject_areas" / "sales" / "tables" / "z.yaml").symlink_to(outside)
+
+
+@SYMLINKS
+@pytest.mark.parametrize(
+    "build", [_secret_ref, _absolute_area, _relative_area, _linked_area, _linked_table]
+)
+@pytest.mark.parametrize("args", [a for a in APPROVED if a != "batch-id"])
+def test_an_approved_verb_reads_nothing_outside_the_model(
+    art, tmp_path, capsys, monkeypatch, build, args
+):
+    pytest.importorskip("pydantic")
+    import builtins
+    import io
+
+    from semantic_model import cli
+
+    shutil.rmtree(art / "acme")
+    build(art / "acme", tmp_path)
+    # `progress --wait N` would sit out N seconds on a log that never moves; the reads are the same.
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))  # where `--out` may write
+    filled = (
+        re.sub(r"--wait \d+", "--wait 0", args)
+        .format(R=str(art / "acme"), T=str(art / "local" / "tmp"))
+        .split()
+    )
+    # Every file opened while the verb runs, so a verb that turns a refused load into a view (the
+    # step list reads an unreadable model as not built yet) is held to the same rule as one that
+    # stops with `outside_model`: nothing outside the folder is opened at all.
+    opened: list[str] = []
+    real_open = builtins.open
+
+    def spy(file, *a, **k):
+        if isinstance(file, (str, bytes, os.PathLike)):
+            opened.append(os.path.realpath(file))
+        return real_open(file, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", spy)
+    monkeypatch.setattr(io, "open", spy)
+    try:
+        rc = cli.main(filled)
+    finally:
+        monkeypatch.setattr(builtins, "open", real_open)
+        monkeypatch.setattr(io, "open", real_open)
+    out, err = capsys.readouterr()
+    assert "SECRET" not in out + err
+    outside = str(tmp_path / "outside")
+    assert not [f for f in opened if f.startswith(os.path.realpath(outside))], opened
+    if rc != 0:
+        assert rc == 1 and json.loads(out)["error"] == "outside_model"
+    else:
+        assert args.split()[0] in ("steps", "progress"), (args, out)
+
+
+def test_every_approved_verb_runs_contained():
+    """Structural: the CLI handler of each verb the hook approves is the contained one, so a verb
+    added to the table without it fails here rather than in someone's session."""
+    from semantic_model import cli
+
+    for verb in HOOK_MOD.VERBS:
+        if verb == "batch-id":
+            # Takes no model folder and reads no file: it prints a stamp from the clock and urandom.
+            assert HOOK_MOD.VERBS[verb].positionals == (), verb
+            continue
+        extra = ["--area", "x"] if verb == "bundle" else []
+        handler = cli._parse_args([verb, "/r", *extra]).func
+        assert getattr(handler, "within_model", False) is True, verb
+
+
+def test_a_verb_the_hook_does_not_approve_still_reads_a_ref_outside(tmp_path):
+    """The containment is only for the approved verbs: a model with a shared storage file outside
+    its folder still loads everywhere else."""
+    pytest.importorskip("pydantic")
+    from semantic_model import loader
+
+    shared = tmp_path / "shared" / "storage.yaml"
+    shared.parent.mkdir()
+    shared.write_text("name: wh\nstorage_type: PostgreSQL\n")
+    root = tmp_path / "acme"
+    _small_model(
+        root,
+        "datasource: acme\nstorage_connections:\n  - ref: ../shared/storage.yaml\n"
+        "subject_areas:\n  - subject_areas/sales\n",
+    )
+    assert loader.load_datasource(root).storage_connections[0].name == "wh"
+    with loader.contained(root), pytest.raises(loader.OutsideModel):
+        loader.load_datasource(root)
+
+
+@SYMLINKS
+def test_a_curation_log_linked_out_is_refused_when_contained(tmp_path):
+    from semantic_model import curate, loader
+
+    root = tmp_path / "acme"
+    root.mkdir()
+    outside = tmp_path / "log.jsonl"
+    outside.write_text('{"op": "SECRET"}\n')
+    (root / curate.CURATION_LOG).symlink_to(outside)
+    assert curate._read_log_lines(root)  # uncontained: read as before
+    with loader.contained(root), pytest.raises(loader.OutsideModel):
+        curate._read_log_lines(root)
+
+
 def test_the_description_field_is_fine(art):
     assert _decision(_bash(_sm(art, "areas {R}"), description="Show the steps"), art) == "allow"
 
@@ -735,6 +897,85 @@ def test_reading_outside_the_plugin_says_nothing(art, path):
     assert _decision(_file("Read", path), art) is None
 
 
+# --- UNC and device paths --------------------------------------------------------------------------------
+# On Windows, resolving `\\host\share\x` (either slash style) can open an SMB session and send the
+# person's Windows credentials to `host` before anything has been approved. So such a path is refused
+# by its text alone, before any filesystem call, in every check that takes a path from the call.
+
+UNC_FORMS = [
+    "\\\\uncprobe\\share\\agami-x.json",
+    "//uncprobe/share/agami-x.json",
+    "/\\uncprobe/share/agami-x.json",
+    "\\/uncprobe\\share\\agami-x.json",
+    "\\\\?\\C:\\uncprobe\\agami-x.json",
+    "\\\\?\\UNC\\uncprobe\\share\\agami-x.json",
+    "\\\\.\\pipe\\uncprobe",
+    "//?/C:/uncprobe/agami-x.json",
+]
+
+
+@pytest.mark.parametrize("value", UNC_FORMS)
+def test_a_unc_or_device_path_is_not_a_plain_path(value):
+    assert HOOK_MOD._plain_path(value) is False
+
+
+def _no_filesystem_call_on_unc(monkeypatch) -> list:
+    """Every filesystem call the hook's checks make, made to fail the test when its argument is the
+    UNC probe: the refusal must come from the text alone."""
+    touched: list = []
+    for name in ("realpath", "exists", "isfile", "isdir", "islink", "lexists"):
+        real = getattr(os.path, name)
+
+        def spy(p, *a, _real=real, **k):
+            if "uncprobe" in str(p):
+                touched.append(p)
+            return _real(p, *a, **k)
+
+        monkeypatch.setattr(os.path, name, spy)
+    for name in ("stat", "lstat"):
+        real = getattr(os, name)
+
+        def spy(p, *a, _real=real, **k):
+            if "uncprobe" in str(p):
+                touched.append(p)
+            return _real(p, *a, **k)
+
+        monkeypatch.setattr(os, name, spy)
+    return touched
+
+
+@pytest.mark.parametrize("value", UNC_FORMS)
+def test_every_path_check_refuses_a_unc_path_before_touching_it(art, monkeypatch, value):
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    touched = _no_filesystem_call_on_unc(monkeypatch)
+    assert HOOK_MOD.scratch_file(value) is False
+    assert HOOK_MOD.plugin_file(value) is False
+    assert HOOK_MOD.model_root(value) is False
+    assert HOOK_MOD._is_launcher(value) is False
+    assert touched == []
+
+
+@pytest.mark.parametrize("tool", ["Write", "Read", "Edit"])
+@pytest.mark.parametrize("value", UNC_FORMS)
+def test_a_unc_file_path_says_nothing(art, tool, value):
+    assert _decision(_file(tool, value), art) is None
+
+
+@pytest.mark.parametrize("value", UNC_FORMS)
+def test_a_unc_model_root_or_launcher_says_nothing(art, value):
+    assert _decision(_bash(f"bash '{SM}' areas '{value}'"), art) is None
+    assert _decision(_bash(f"bash '{value}' areas '{art / 'acme'}'"), art) is None
+
+
+def test_a_doubled_leading_slash_on_an_allowed_path_says_nothing(art):
+    """POSIX leaves `//x` to the system and Windows reads it as a server, so an otherwise approved
+    path written with two leading slashes is refused too."""
+    assert _decision(_file("Read", "/" + str(PLUGIN / "scripts" / "sm")), art) is None
+    assert _decision(_file("Write", "/" + str(art / "local" / "tmp" / "agami-x.json")), art) is None
+    assert _decision(_bash(f"bash '{SM}' areas '/{art / 'acme'}'"), art) is None
+    assert _decision(_bash(f"bash '/{SM}' areas '{art / 'acme'}'"), art) is None
+
+
 @SYMLINKS
 def test_a_link_inside_the_plugin_pointing_out_says_nothing(art, tmp_path):
     outside = tmp_path / "secret.txt"
@@ -831,8 +1072,11 @@ def test_hooks_json_runs_python3_from_path_never_the_plugin_launcher():
     assert entry["matcher"] == "Bash|Write|Read|Edit"
     (hook,) = entry["hooks"]
     assert hook["type"] == "command"
+    # Each interpreter is accepted only once it has printed the probe's word: the Windows Store
+    # `python3` alias can exit 0 without running anything, and the loop must then try `python`.
     assert hook["command"] == (
         "in=$(cat); for p in python3 python; do "
+        '[ "$("$p" -I -c \'print(end="agami-ok")\' </dev/null 2>/dev/null)" = agami-ok ] && '
         'out=$(printf \'%s\' "$in" | "$p" -I "${CLAUDE_PLUGIN_ROOT}/scripts/approve_own_calls.py" '
         "2>/dev/null) && { printf '%s' \"$out\"; break; }; done; true"
     )
@@ -908,6 +1152,58 @@ def test_a_failing_python3_stub_prints_nothing_and_python_answers(art, tmp_path,
         timeout=60,
     )
     assert refused.returncode == 0 and refused.stdout == b""
+    (bin_dir / "python").unlink()
+    (bin_dir / "python").write_text(stub.read_text())
+    (bin_dir / "python").chmod(0o755)
+    neither = subprocess.run(
+        ["sh", "-c", command],
+        input=json.dumps(_bash(_sm(art, "areas {R}"))).encode(),
+        capture_output=True,
+        env=env,
+        timeout=60,
+    )
+    assert neither.returncode == 0 and neither.stdout == b""
+
+
+@pytest.mark.skipif(shutil.which("sh") is None or sys.platform == "win32", reason="needs sh")
+@pytest.mark.parametrize("stub_out", ["", "agami-ok-not", '{"hookSpecificOutput": "garbage"}'])
+def test_a_python3_that_exits_0_without_running_python_is_skipped(art, tmp_path, stub_out):
+    """The Windows Store `python3` alias can exit 0 having run nothing. The loop must not stop on
+    it: `python` still answers, and nothing the stub printed reaches the hook's output."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "python3"
+    stub.write_text(f"#!/bin/sh\ncat >/dev/null\nprintf '%s' '{stub_out}'\nexit 0\n")
+    stub.chmod(0o755)
+    (bin_dir / "python").symlink_to(sys.executable)
+    doc = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    command = doc["hooks"]["PreToolUse"][0]["hooks"][0]["command"].replace(
+        "${CLAUDE_PLUGIN_ROOT}", str(PLUGIN)
+    )
+    env = {
+        **os.environ,
+        "AGAMI_ARTIFACTS_DIR": str(art),
+        "HOME": str(art.parent),
+        "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+    }
+    allowed = subprocess.run(
+        ["sh", "-c", command],
+        input=json.dumps(_bash(_sm(art, "areas {R}"))).encode(),
+        capture_output=True,
+        env=env,
+        timeout=60,
+    )
+    assert allowed.returncode == 0
+    assert json.loads(allowed.stdout)["hookSpecificOutput"]["permissionDecision"] == "allow"
+    refused = subprocess.run(
+        ["sh", "-c", command],
+        input=json.dumps(_bash("rm -rf /")).encode(),
+        capture_output=True,
+        env=env,
+        timeout=60,
+    )
+    assert refused.returncode == 0 and refused.stdout == b""
+    # with no working interpreter at all, no output: no decision
     (bin_dir / "python").unlink()
     (bin_dir / "python").write_text(stub.read_text())
     (bin_dir / "python").chmod(0o755)
@@ -1122,3 +1418,52 @@ def test_an_approved_verb_never_installs(art, tmp_path, verb):
         timeout=60,
     )
     assert mark.exists()
+
+
+# A Python whose library is ready the first time each readiness probe asks and broken after: a
+# concurrent update landing between `sm`'s guard and anything that probes again. The CLI run itself
+# leaves a mark, and so does every pip call.
+_SHIM_READY_THEN_BROKEN = """#!/bin/sh
+case "$1" in
+  -m) [ "$2 $3" = "pip --version" ] && exit 0; echo "$*" >> "$PIP_MARK"; exit 0 ;;
+  -X) echo "$*" >> "$RAN_MARK"; exit 0 ;;
+  -c|-)
+    [ "$1" = "-" ] && cat >/dev/null
+    key=$(printf '%s' "$1 $2" | cksum | cut -d' ' -f1)
+    if grep -qx "$key" "$SEEN" 2>/dev/null; then exit 1; fi
+    echo "$key" >> "$SEEN"; exit 0 ;;
+esac
+exit 0
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell shim")
+@pytest.mark.parametrize("verb", sorted(HOOK_MOD.VERBS))
+def test_an_approved_verb_never_reaches_the_installer_after_its_guard(art, tmp_path, verb):
+    """Once the guard has passed, nothing probes again: a library that breaks in between makes the
+    CLI fail on its own, and never turns an approved call into a pip install."""
+    cache = tmp_path / "agami-core" / "0.0.1"
+    shutil.copytree(PLUGIN / "scripts", cache / "scripts")
+    shim = tmp_path / "pyshim"
+    shim.write_text(_SHIM_READY_THEN_BROKEN)
+    shim.chmod(0o755)
+    pip, ran = tmp_path / "pip-calls", tmp_path / "cli-runs"
+    env = {
+        **os.environ,
+        "AGAMI_PYTHON": str(shim),
+        "AGAMI_ARTIFACTS_DIR": str(art),
+        "PIP_MARK": str(pip),
+        "RAN_MARK": str(ran),
+        "SEEN": str(tmp_path / "seen"),
+    }
+    args = [verb, str(art / "acme"), *(["--area", "sales"] if verb == "bundle" else [])]
+    r = subprocess.run(
+        ["bash", str(cache / "scripts" / "sm"), *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert not pip.exists(), pip.read_text()
+    assert r.returncode == 0, r.stderr
+    assert "semantic_model.cli " + verb in ran.read_text()

@@ -193,12 +193,27 @@ def cmd_context(args) -> int:
     return 0
 
 
+def _within_model(handler):
+    """Run `handler` with every file read held inside `args.root`, links resolved (OutsideModel
+    otherwise). For the verbs the plugin's permission hook (scripts/approve_own_calls.py, VERBS)
+    runs with no prompt: the hook checks only the folder a call names, and the model can name more."""
+    def run(args) -> int:
+        with L.contained(args.root):
+            return handler(args)
+    run.within_model = True
+    run.__name__ = handler.__name__
+    run.__doc__ = handler.__doc__
+    return run
+
+
+@_within_model
 def cmd_bundle(args) -> int:
     org = L.load_datasource(args.root)
     _print_json(L.get_subject_area_bundle(org, args.area))
     return 0
 
 
+@_within_model
 def cmd_areas(args) -> int:
     org = L.load_datasource(args.root)
     _print_json(RT.list_subject_areas(org))
@@ -516,6 +531,7 @@ def cmd_filter_values_judge(args) -> int:
     return 0
 
 
+@_within_model
 def cmd_review_queue(args) -> int:
     from . import curate
     org = L.load_datasource(args.root)
@@ -523,6 +539,7 @@ def cmd_review_queue(args) -> int:
     return 0
 
 
+@_within_model
 def cmd_review_items(args) -> int:
     from . import curate
     org = L.load_datasource(args.root, include_rejected=True)
@@ -552,6 +569,7 @@ def cmd_curate_gate(args) -> int:
     return 0
 
 
+@_within_model
 def cmd_model_tree(args) -> int:
     from . import curate
     org = L.load_datasource(args.root, include_rejected=True)
@@ -587,6 +605,7 @@ def _progress_line(raw: str) -> dict:
     return {"line": phrase.format(*m.groups()), "done": raw.startswith("done:"), "failed": False}
 
 
+@_within_model
 def cmd_progress(args) -> int:
     """The build's latest progress line, ready to post, from <root>/.introspect/progress.log.
 
@@ -672,6 +691,7 @@ def cmd_set_config(args) -> int:
     return 0
 
 
+@_within_model
 def cmd_steps(args) -> int:
     """The onboarding step list read from disk, after applying any --mark: by default the compact
     list the skill copies as is, `--full` the whole dict (ids, labels, counts, timeline path).
@@ -738,6 +758,7 @@ def _with_refresh(out: dict, root: Path) -> dict:
     return {**out, **fresh, "then": (then + steps.THEN_AND_UPDATE) if then else steps.THEN_UPDATE}
 
 
+@_within_model
 def cmd_summary(args) -> int:
     """The onboarding's closing summary as markdown, ready to post as printed; `--json` wraps it
     with the overview's totals."""
@@ -750,6 +771,7 @@ def cmd_summary(args) -> int:
     return 0
 
 
+@_within_model
 def cmd_overview(args) -> int:
     """The numbers an overview card shows: per subject area its tables, columns described, metrics
     and joins (and how many await sign-off) and examples, plus totals. One call, so a card never
@@ -760,6 +782,7 @@ def cmd_overview(args) -> int:
     return 0
 
 
+@_within_model
 def cmd_coverage(args) -> int:
     """Per-table column-description coverage + the enrichment-completeness verdict.
     The skill runs this at the end of Phase 2 (and reports it in the Phase 7 summary):
@@ -3163,6 +3186,10 @@ def main(argv=None) -> int:
         if getattr(args, "out_file", None):
             return _run_to_out(args)
         return args.func(args)
+    except L.OutsideModel as e:
+        # The path as the model wrote it, never what is in the file.
+        _print_json({"error": "outside_model", "detail": str(e)})
+        return 1
     except FileNotFoundError as e:
         # No model at this root yet. This is an expected, clean signal (not a crash):
         # callers fold the "does a model exist?" check into their first real command

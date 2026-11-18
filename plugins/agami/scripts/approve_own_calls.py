@@ -7,9 +7,10 @@ harm whoever chose the arguments: no database connection, no credentials, no pac
 refuses to install for these verbs, see NO_INSTALL_VERBS there), no write anywhere except a file
 in agami's scratch folder and a model's own `.introspect/` (`timeline.jsonl`, and `steps.last`, the
 step list `steps` and `progress` last printed), no read of a file the call names outside that
-folder and this plugin, and no change to a model's content or trust state. Everything else gets no
-output, so the normal permission flow applies (a skill's `allowed-tools` still cover its own turn).
-It never denies.
+folder and this plugin, no read by an approved `sm` verb of anything outside the model folder it
+names (the CLI holds those verbs inside it, links and the model's own file references included),
+and no change to a model's content or trust state. Everything else gets no output, so the normal
+permission flow applies (a skill's `allowed-tools` still cover its own turn). It never denies.
 
   A. Bash: one call of this plugin's `scripts/sm` (an optional leading `bash`, nothing else before
      it, no shell syntax at all) whose verb is in VERBS and whose every argument passes that
@@ -23,6 +24,8 @@ The plugin root is where this file is, never anything the call names. Every chec
 any doubt (an input it can't parse, a path it can't resolve, an exception) prints nothing. It
 imports nothing from the plugin or the agami package, and hooks.json starts it with `python3` from
 PATH, not through `scripts/py`, which reads its interpreter from `<artifacts_dir>/local/.config`.
+It takes `python3`, else `python`, only once that one has printed a probe word: the Windows Store
+alias can exit 0 without running anything.
 
 Contract (https://code.claude.com/docs/en/hooks, "PreToolUse decision control"): stdin is JSON with
 `hook_event_name`, `tool_name` and `tool_input`; printing `hookSpecificOutput.permissionDecision`
@@ -78,8 +81,14 @@ def _norm(p: str) -> str:
 
 
 def _plain_path(value: str) -> bool:
-    """An absolute path with no `.` or `..` segment and no `~` (which the shell would expand)."""
+    """An absolute path with no `.` or `..` segment and no `~` (which the shell would expand), and
+    not a UNC or device path. Every check calls this before any filesystem call: on Windows,
+    resolving `\\\\host\\share\\x` (either slash style) can open an SMB session and send the person's
+    credentials to `host` before anything is approved. POSIX `//x` is refused with it."""
     if value.startswith("~") or not (os.path.isabs(value) or ntpath.isabs(value)):
+        return False
+    lead = value[:2].replace("/", "\\")
+    if lead == "\\\\" or ntpath.splitdrive(ntpath.normpath(value))[0].startswith("\\\\"):
         return False
     return not any(p in (".", "..") for p in re.split(r"[\\/]", value))
 
@@ -222,6 +231,11 @@ ROOT = (model_root,)
 # handler in semantic_model/cli.py, and pinned by test_an_approved_call_changes_no_file and
 # test_an_approved_steps_or_progress_call_writes_only_inside_introspect. Only the options cli.py
 # gives each verb are listed.
+# The model names files of its own (a storage `ref`, a subject area's path) and may hold links, so
+# cli.py runs each of these verbs contained (`_within_model`): a read that would leave <root>, links
+# resolved, stops with `outside_model` before it happens, and the error names the path, never its
+# content. `batch-id` takes no root and reads nothing. Pinned by
+# test_an_approved_verb_reads_nothing_outside_the_model and test_every_approved_verb_runs_contained.
 #
 # NOT approved, by design; do not add one without reading its handler. Many connect to a database,
 # use credentials, install a package, read a file the call names, write, or change the model or its
