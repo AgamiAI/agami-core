@@ -30,6 +30,7 @@ from semantic_model import loader as L  # noqa: E402
 from semantic_model import runtime as rt  # noqa: E402
 
 from receipt_trick_queries import STEP_TRICK_TWINS, STEP_TRICKS  # noqa: E402
+from timing_bound import assert_assembly_within  # noqa: E402
 
 # --- fixture ----------------------------------------------------------------
 
@@ -1047,10 +1048,9 @@ def test_most_step_shaped_numbers_are_settled(tmp_path):
 
 
 def test_a_long_statement_of_nested_steps_stays_inside_the_bound(org):
-    """A 50,000-character statement with 10 nested steps assembles in under a second. Like ACE-177's
+    """A 50,000-character statement with 10 nested steps assembles within a bounded multiple of its own
+    parse. Like ACE-177's
     clock, it runs in the untraced pass: under coverage it would measure the tracer."""
-    import time
-
     try:
         import coverage
 
@@ -1074,12 +1074,11 @@ def test_a_long_statement_of_nested_steps_stays_inside_the_bound(org):
     assert len(sql) >= 50_000
     # Best of five: a full parallel run once measured 1.05 s here against 0.45 s alone. The bound
     # is the code's, and a busy machine's slowest moments are not.
-    timings = []
-    for _ in range(5):
-        started = time.perf_counter()
-        receipt = rt.assemble_receipt(org, sql)
-        timings.append(time.perf_counter() - started)
-    assert min(timings) < 1.0, timings
+    # Relative to a parse-and-walk of the same statement (tests/timing_bound.py): locally ~4.5x
+    # that, so 14x passes a slower runner and fails a quadratic blow-up.
+    assert_assembly_within(lambda: rt.assemble_receipt(org, sql), sql, "postgres",
+                           repeats=5, ratio=14)
+    receipt = rt.assemble_receipt(org, sql)
     (item,) = [i for i in receipt["columns"]["items"] if i["kind"] == "output"]
     assert (item["status"], item["name"]) == (rt.MATCHED, "total_sales")
 
