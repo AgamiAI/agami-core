@@ -339,3 +339,52 @@ def test_the_launchers_scratch_folder_is_never_made_through_a_linked_local(art, 
     env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(art)}
     subprocess.run(["bash", "-c", script], env=env, check=True, capture_output=True, timeout=30)
     assert list(elsewhere.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "existing",
+    ["local/\n!local/\n", "/local/\n!/local\n", "local\n!loc*\n", "*\n!local/\n"],
+)
+def test_a_later_negation_does_not_cancel_the_exclusion(art, existing):
+    """git takes the last rule that matches, so a `local/` line followed by `!local/` ignores
+    nothing. The exclusion is checked by that rule, and made the last word when it isn't."""
+    import shutil
+    import subprocess
+
+    art.mkdir(parents=True)
+    (art / ".gitignore").write_text(existing)
+    rc, out = _run(["init-local", str(art)])
+    assert rc == 0, out
+    assert out["gitignore"] == "added_local"
+    assert (art / ".gitignore").read_text().startswith(existing)  # the person's lines kept
+    if shutil.which("git"):
+        subprocess.run(["git", "init", "-q", str(art)], check=True)
+        r = subprocess.run(["git", "-C", str(art), "check-ignore", "-q", "local/credentials"])
+        assert r.returncode == 0
+
+
+@pytest.mark.parametrize("existing", ["local/\n", "# x\n/local/\n!other\n", "local\n"])
+def test_an_effective_exclusion_is_left_as_it_is(art, existing):
+    art.mkdir(parents=True)
+    (art / ".gitignore").write_text(existing)
+    rc, out = _run(["init-local", str(art)])
+    assert rc == 0 and out["gitignore"] == "had_local"
+    assert (art / ".gitignore").read_text() == existing
+
+
+@pytest.mark.parametrize("broken", ["a folder", "read-only"])
+def test_no_credential_template_without_the_exclusion(art, broken):
+    """When `.gitignore` can't be made to ignore `local/`, setup stops with an error before the
+    credential template exists: a credential must never be one `git add` away from a commit."""
+    art.mkdir(parents=True)
+    gi = art / ".gitignore"
+    if broken == "a folder":
+        gi.mkdir()
+    else:
+        if os.name == "nt" or os.geteuid() == 0:
+            pytest.skip("POSIX permissions, not root")
+        gi.write_text("*.bak\n")
+        gi.chmod(0o444)
+    rc, out = _run(["init-local", str(art), "--sample"])
+    assert rc == 2 and ".gitignore" in out["error"]
+    assert not (art / "local" / "credentials.example").exists()

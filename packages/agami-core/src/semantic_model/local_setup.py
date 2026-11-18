@@ -18,12 +18,15 @@ call names elsewhere: a pre-approved call can't be pointed at another place to c
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+from agami_paths import LOCAL_SUBDIR
 
 from .scratch import LinkedTarget
 
@@ -90,7 +93,9 @@ def choose_folder(path: str) -> dict[str, Any]:
     try:
         saved = agami_paths.set_artifacts_dir(given)
     except OSError as exc:
-        raise SetupRefused(f"could not save the folder in {agami_paths.POINTER_PATH}: {exc}") from None
+        raise SetupRefused(
+            f"could not save the folder in {agami_paths.POINTER_PATH}: {exc}"
+        ) from None
     return {"artifacts_dir": str(saved), "pointer": str(agami_paths.POINTER_PATH)}
 
 
@@ -111,31 +116,71 @@ def _refuse_links(*folders: Path) -> None:
             )
 
 
+def ignores_local(text: str) -> bool:
+    """Whether a `.gitignore` with this text, at the artifacts folder's top, ignores `local/`.
+
+    git applies the last rule that matches, so a `local/` line followed by `!local/` ignores
+    nothing. Only rules that can match the folder itself count: once it is ignored, git can't
+    re-include a file inside it, so a later `!local/credentials` changes nothing."""
+    ignored = False
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line or line.startswith("#"):
+            continue
+        negated = line.startswith("!")
+        pattern = line[1:] if negated else line
+        pattern = pattern.removeprefix("\\").rstrip("/")
+        pattern = pattern.removeprefix("/").removeprefix("**/")
+        if pattern and "/" not in pattern and fnmatch.fnmatchcase(LOCAL_SUBDIR, pattern):
+            ignored = not negated
+    return ignored
+
+
+def _ensure_ignored(art: Path) -> str:
+    """`had_local` when `<art>/.gitignore` already ignores `local/`, `added_local` once agami's line
+    is appended and the file then does; SetupRefused, before any credential exists, when neither."""
+    gi = art / ".gitignore"
+    try:
+        existing = gi.read_text(encoding="utf-8", errors="replace") if gi.exists() else ""
+        if ignores_local(existing):
+            return "had_local"
+        with gi.open("a", encoding="utf-8", newline="\n") as fh:
+            if existing and not existing.endswith("\n"):
+                fh.write("\n")
+            fh.write(f"# agami secrets + per-user state — never commit\n{LOCAL_SUBDIR}/\n")
+        effective = ignores_local(gi.read_text(encoding="utf-8", errors="replace"))
+    except OSError as exc:
+        raise SetupRefused(_not_ignored(gi, str(exc))) from None
+    if not effective:
+        raise SetupRefused(_not_ignored(gi, "a rule in it still lets local/ through"))
+    return "added_local"
+
+
+def _not_ignored(gi: Path, why: str) -> str:
+    return (
+        f"{gi} can't be made to ignore local/ ({why}), so agami won't put credentials there. "
+        f"Make it a file you can edit with a line reading local/ after any !local rule, then try "
+        "again."
+    )
+
+
 def init_local(path: str, sample: bool = False) -> dict[str, Any]:
     """Create `<art>` and `<art>/local/tmp/` (local/ and tmp/ 0700, an existing local/ tightened),
     make `.gitignore` ignore `local/`, and with `sample` write the sample's credential as
     `local/credentials.example` for promote_credentials.py to take in (never over an existing one)."""
-    from agami_paths import LOCAL_SUBDIR, ensure_gitignore, ensure_local_dir
+    from agami_paths import ensure_local_dir
 
     art = own_artifacts_dir(path)
     _refuse_links(art / LOCAL_SUBDIR, art / LOCAL_SUBDIR / "tmp")
-    gitignore = art / ".gitignore"
-    had_line = (
-        gitignore.is_file()
-        and f"{LOCAL_SUBDIR}/" in gitignore.read_text(encoding="utf-8", errors="replace").split()
-    )
+    art.mkdir(parents=True, exist_ok=True)
+    gitignore = _ensure_ignored(art)
     local = ensure_local_dir(art)
     tmp = local / "tmp"
     try:
         os.mkdir(tmp, 0o700)
     except FileExistsError:
         pass
-    ensure_gitignore(art)
-    out: dict[str, Any] = {
-        "artifacts_dir": str(art),
-        "local": str(local),
-        "gitignore": "had_local" if had_line else "added_local",
-    }
+    out: dict[str, Any] = {"artifacts_dir": str(art), "local": str(local), "gitignore": gitignore}
     if sample:
         example = local / "credentials.example"
         if example.exists() or example.is_symlink():
