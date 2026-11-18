@@ -129,6 +129,46 @@ def model_file(path: str, *rel: str, profile_at: int | None = None) -> Path:
     return p
 
 
+# How Windows marks a symlink or a junction; `lstat` reports it in `st_file_attributes`.
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+INPUT_CAP = 16 * 1024 * 1024
+
+
+def read_file(path: Path, cap: int = INPUT_CAP) -> str:
+    """The text of a file a check above passed, opened so that a link swapped in since is not
+    followed and checked on the open file: a regular file with one name, at most `cap` bytes.
+    Where the OS has no `O_NOFOLLOW` (Windows) the name is `lstat`ed first, a link or reparse point
+    refused, and the open file must be the one it saw; with no inode to compare it is refused.
+    Mirrors `semantic_model.scratch.open_one_name`."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    before = None
+    if not nofollow:
+        try:
+            before = os.lstat(path)
+        except OSError as exc:
+            raise Refused(f"could not read {path}: {exc.strerror}") from None
+        if stat.S_ISLNK(before.st_mode) or getattr(before, "st_file_attributes", 0) & _REPARSE_POINT:
+            raise Refused(f"{path} is a link; agami reads only its own files")
+        if not before.st_ino:
+            raise Refused(f"{path}: can't tell whether it is a link, so it is not read")
+    try:
+        fd = os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0))
+    except OSError as exc:
+        raise Refused(f"could not read {path} (a link is refused): {exc.strerror}") from None
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if before is not None and (st.st_dev, st.st_ino) != (before.st_dev, before.st_ino):
+            raise Refused(f"{path} was replaced while it was opened")
+        if not stat.S_ISREG(st.st_mode):
+            raise Refused(f"{path} is not a regular file")
+        if st.st_nlink != 1:
+            raise Refused(f"{path} has another name elsewhere (a hard link); agami reads only its own files")
+        data = fh.read(cap + 1)
+    if len(data) > cap:
+        raise Refused(f"{path} is larger than {cap} bytes")
+    return data.decode("utf-8", errors="replace")
+
+
 def save(path: Path, text: str) -> None:
     """Write `text` to `path` in one step: a fresh temp file beside it, then a rename, so a link
     planted at the name is replaced and never written through."""

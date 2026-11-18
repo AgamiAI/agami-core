@@ -297,3 +297,99 @@ def test_an_approved_verb_refuses_a_hard_linked_curation_log(model, tmp_path):
     os.link(victim, model / curate.CURATION_LOG)
     with L.contained(model), pytest.raises(L.OutsideModel):
         curate.read_log(model)
+
+
+# --- inventory_summary.py reads only scratch files, or the build's own inventory, under the guard
+# (4614773616) ------------------------------------------------------------------------------------
+
+INVENTORY_SUMMARY = (Path(__file__).resolve().parent.parent / "plugins" / "agami" / "scripts"
+                     / "inventory_summary.py")
+INVENTORY = {"schemas": ["sales"], "tables": [
+    {"schema": "sales", "table": "orders", "columns": [{"name": "id", "type": "int"}]}]}
+
+
+def _summary(*args: str, guard: bool = True) -> tuple[int, str]:
+    import subprocess
+
+    env = {**os.environ, "AGAMI_SCRATCH_ONLY": "1" if guard else ""}
+    proc = subprocess.run([sys.executable, str(INVENTORY_SUMMARY), *args], capture_output=True,
+                          text=True, timeout=60, env=env)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+@pytest.fixture
+def inv(art) -> Path:
+    import json
+
+    p = art / "local" / "tmp" / "agami-inventory.json"
+    p.write_text(json.dumps(INVENTORY))
+    return p
+
+
+@pytest.fixture
+def outside(tmp_path) -> Path:
+    """A file outside scratch whose lines would be echoed back if it were read."""
+    p = tmp_path / "home" / "notes.txt"
+    p.parent.mkdir()
+    p.write_text(f"sales.orders.{MARKER}\n{MARKER}\n")
+    return p
+
+
+def _file_options(art: Path, f: str) -> dict[str, list[str]]:
+    keep_out = ["--tables-out", str(art / "local" / "tmp" / "agami-keep.txt")]
+    return {
+        "check-columns": ["--check-columns", f],
+        "keep names": ["--keep", f"names:{f}", *keep_out],
+        "keep page": ["--keep", f"page:{f}", *keep_out],
+        "keep pick": ["--keep", f"pick:{f}", *keep_out],
+        "used-by": ["--used-by", f],
+    }
+
+
+OPTIONS = ["check-columns", "keep names", "keep page", "keep pick", "used-by"]
+
+
+@pytest.mark.parametrize("option", OPTIONS)
+def test_inventory_summary_refuses_a_file_outside_scratch(art, inv, outside, option):
+    rc, out = _summary("--inventory", str(inv), *_file_options(art, str(outside))[option])
+    assert rc == 2, out
+    assert MARKER not in out
+
+
+@pytest.mark.parametrize("option", OPTIONS)
+def test_inventory_summary_refuses_a_hard_link_in_scratch(art, inv, outside, option):
+    hard = art / "local" / "tmp" / "agami-names.txt"
+    os.link(outside, hard)
+    rc, out = _summary("--inventory", str(inv), *_file_options(art, str(hard))[option])
+    assert rc == 2, out
+    assert MARKER not in out
+
+
+def test_inventory_summary_refuses_an_inventory_outside_scratch(art, tmp_path):
+    import json
+
+    other = tmp_path / "inventory.json"
+    other.write_text(json.dumps({"schemas": [MARKER], "tables": [
+        {"schema": MARKER, "table": "t", "columns": []}]}))
+    rc, out = _summary("--inventory", str(other))
+    assert rc == 2, out
+    assert MARKER not in out
+
+
+def test_inventory_summary_takes_the_builds_own_inventory(art):
+    import json
+
+    own = art / "acme" / ".introspect" / "inventory.json"
+    own.parent.mkdir(parents=True)
+    own.write_text(json.dumps(INVENTORY))
+    rc, out = _summary("--inventory", str(own))
+    assert rc == 0, out
+    names = art / "local" / "tmp" / "agami-names.txt"
+    names.write_text("sales.orders.id\n")
+    rc, out = _summary("--inventory", str(own), "--check-columns", str(names))
+    assert rc == 0 and "sales.orders.id" in out, out
+
+
+def test_without_the_guard_inventory_summary_reads_any_file(art, inv, outside):
+    rc, out = _summary("--inventory", str(inv), "--check-columns", str(outside), guard=False)
+    assert rc == 0 and "unmatched" in out, out
