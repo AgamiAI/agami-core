@@ -9,8 +9,9 @@ two, which then act on that folder only.
 Nothing a call carries is written as content. `init-local` writes only text agami defines (the
 `.gitignore` line, the sample's credential section). `set-config` writes `.config` from fields it
 checks one by one: a tier from a fixed list, a profile name, interpreter and tool paths that are
-executables of the expected name, and the reviewer's identity read from a scratch file (the
-person's words never go on a command line) and checked as an email and a one-line role.
+executables of the expected name (or the interpreter `$AGAMI_PYTHON` names, saved as its path), and
+the reviewer's identity read from a scratch file (the person's words never go on a command line)
+and checked as an email and a one-line role.
 
 Both act only on agami's own artifacts folder (`agami_paths.artifacts_dir()`), never on a folder the
 call names elsewhere: a pre-approved call can't be pointed at another place to create or overwrite.
@@ -22,6 +23,7 @@ import fnmatch
 import json
 import os
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -227,6 +229,22 @@ def _executable(path: str, name_ok, what: str) -> str:
     return path
 
 
+def _python_pin(given: str) -> Optional[str]:
+    """The absolute path of the executable `$AGAMI_PYTHON` names, when `given` is that pin (as set,
+    or already resolved); None otherwise. The launchers run the pin as set, a bare `python3` or a
+    custom-named interpreter included, and the resolve step reports it as set; `.config` needs a
+    path. Nothing else escapes the name check: set-config chooses what later calls run, so the
+    text on the line never picks an executable by itself."""
+    pin = os.environ.get("AGAMI_PYTHON")
+    if not pin:
+        return None
+    found = shutil.which(os.path.expanduser(pin))
+    if not found:
+        return None
+    found = os.path.abspath(found)
+    return found if given in (pin, found) else None
+
+
 def _identity(file: str) -> dict[str, str]:
     """`{"reviewer_email", "reviewer_role"}` from the scratch JSON file the skill wrote."""
     from . import scratch
@@ -270,9 +288,15 @@ def set_config(
         if not PROFILE.fullmatch(active_profile) or active_profile.lower() == "local":
             raise SetupRefused(f"{active_profile!r} is not a profile name")
         fields["active_profile"] = active_profile
+    doc = BS._read(art)
     paths: dict[str, str] = {}
     if python3 is not None:
-        paths["python3"] = _executable(python3, PYTHON_NAME.fullmatch, "a Python interpreter")
+        configured = (doc.get("tool_paths") or {}).get("python3")
+        paths["python3"] = _python_pin(python3) or _executable(
+            python3,
+            lambda b: PYTHON_NAME.fullmatch(b) or python3 == configured,
+            "a Python interpreter",
+        )
     for spec in tools or []:
         name, sep, where = spec.partition("=")
         if not sep or name not in TOOLS:
@@ -283,7 +307,6 @@ def set_config(
     if identity_file is not None:
         fields.update(_identity(identity_file))
     cfg = BS.config_path(art)
-    doc = BS._read(art)
     doc.update(fields)
     if paths:
         doc["tool_paths"] = {**(doc.get("tool_paths") or {}), **paths}

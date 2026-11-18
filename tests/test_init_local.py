@@ -28,6 +28,7 @@ from semantic_model import cli  # noqa: E402
 def art(tmp_path, monkeypatch) -> Path:
     art = tmp_path / "art"
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    monkeypatch.delenv("AGAMI_PYTHON", raising=False)
     return art.resolve() if art.exists() else Path(os.path.realpath(tmp_path)) / "art"
 
 
@@ -398,3 +399,51 @@ def test_no_credential_template_without_the_exclusion(art, broken):
     rc, out = _run(["init-local", str(art), "--sample"])
     assert rc == 2 and ".gitignore" in out["error"]
     assert not (art / "local" / "credentials.example").exists()
+
+
+def _interpreter(folder: Path, name: str) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    exe = folder / name
+    exe.write_text("#!/bin/sh\nexit 0\n")
+    exe.chmod(0o755)
+    return exe
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executables")
+@pytest.mark.parametrize("pin", ["bare name", "custom name"])
+def test_the_agami_python_pin_is_saved_as_an_absolute_path(art, tmp_path, monkeypatch, pin):
+    """Both launchers run `$AGAMI_PYTHON` as given, and the resolve step reports it as given, so
+    set-config takes that value and saves the executable it names, whatever it is called."""
+    bin_dir = Path(os.path.realpath(tmp_path)) / "bin"
+    if pin == "bare name":
+        exe = _interpreter(bin_dir, "python3")
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        given = "python3"
+    else:
+        exe = _interpreter(bin_dir, "acme-interp")
+        given = str(exe)
+    monkeypatch.setenv("AGAMI_PYTHON", given)
+    _run(["init-local", str(art)])
+    rc, out = _run(["set-config", str(art), "--python3", given])
+    assert rc == 0, out
+    doc = json.loads((art / "local" / ".config").read_text())
+    assert doc["tool_paths"]["python3"] == str(exe)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executables")
+def test_only_the_pin_or_the_configured_one_may_have_another_name(art, tmp_path, monkeypatch):
+    """set-config chooses what later calls run, so a custom-named executable is taken only when
+    it is what `$AGAMI_PYTHON` names or what `.config` already runs, never just any path."""
+    bin_dir = Path(os.path.realpath(tmp_path)) / "bin"
+    pinned, other = _interpreter(bin_dir, "acme-interp"), _interpreter(bin_dir, "demo-tool")
+    _run(["init-local", str(art)])
+    rc, out = _run(["set-config", str(art), "--python3", str(pinned)])  # no pin
+    assert rc == 2 and "Python" in out["error"]
+    monkeypatch.setenv("AGAMI_PYTHON", str(pinned))
+    rc, out = _run(["set-config", str(art), "--python3", str(other)])  # not the pin
+    assert rc == 2 and "Python" in out["error"]
+    rc, out = _run(["set-config", str(art), "--python3", str(pinned)])
+    assert rc == 0, out
+    monkeypatch.delenv("AGAMI_PYTHON")
+    rc, out = _run(["set-config", str(art), "--python3", str(pinned)])  # already configured
+    assert rc == 0, out

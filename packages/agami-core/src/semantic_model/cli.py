@@ -2855,7 +2855,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("artifacts_dir", help="agami's artifacts folder, written out in full")
     sp.add_argument("--tier", default=None, help="cli | duckdb | python")
     sp.add_argument("--active-profile", default=None, dest="active_profile")
-    sp.add_argument("--python3", default=None, help="the interpreter agami runs, an absolute path")
+    sp.add_argument("--python3", default=None, help="the interpreter agami runs: an absolute path, or $AGAMI_PYTHON as set (saved as the path it names)")
     sp.add_argument("--tool", action="append", default=[], metavar="NAME=PATH",
                     help="a native query tool's absolute path: psql, mysql, snowsql, sqlite3 or duckdb (repeatable)")
     sp.add_argument("--identity-file", default=None, dest="identity_file",
