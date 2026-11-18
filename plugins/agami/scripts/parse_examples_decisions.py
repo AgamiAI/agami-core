@@ -22,9 +22,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import _scratch_out  # noqa: E402
 
 ACTIONS = {"keep", "drop", "fix", "note"}
 _TOP_KEYS = {"page", "profile", "decisions", "note_all"}
@@ -138,16 +143,26 @@ def parse(
     return data, refused, None
 
 
-def _write(out_dir: Path, data: dict) -> dict:
+def _write(out_dir: Path, data: dict, flat: bool = False) -> dict:
     """Each area's keeps and fixes as `sm add-example --file` inputs, in a new private folder under
-    `out_dir`, so another save checked at the same time can never overwrite the files this one returns."""
+    `out_dir`, so another save checked at the same time can never overwrite the files this one returns.
+    `flat` (the scratch-only guard) writes them as fresh files directly in `out_dir` instead, since
+    `sm add-example` under the guard reads a file only directly inside agami's scratch folder."""
     files: dict = {"keep": {}, "fix": {}}
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_dir = Path(tempfile.mkdtemp(dir=out_dir, prefix="agami-page-examples-"))
+    if not flat:
+        out_dir = Path(tempfile.mkdtemp(dir=out_dir, prefix="agami-page-examples-"))
     for kind in ("keep", "fix"):
         for area, examples in data[kind].items():
-            path = out_dir / f"agami-page-{kind}.{area}.json"
-            path.write_text(json.dumps(examples, indent=2), encoding="utf-8")
+            text = json.dumps(examples, indent=2)
+            if flat:
+                fd, name = tempfile.mkstemp(dir=out_dir, prefix=f"agami-page-{kind}.", suffix=".json")
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                path = Path(name)
+            else:
+                path = out_dir / f"agami-page-{kind}.{area}.json"
+                path.write_text(text, encoding="utf-8")
             files[kind][area] = str(path)
     return files
 
@@ -168,6 +183,16 @@ def main(argv: list[str] | None = None) -> int:
         "--out-dir", help="write each area's keeps and fixes as sm add-example inputs here"
     )
     args = ap.parse_args(argv)
+    guarded = _scratch_out.guarded() and bool(args.out_dir)
+    if guarded:
+        try:
+            if _scratch_out._plain(args.out_dir) != _scratch_out.scratch_dir():
+                raise _scratch_out.Refused(
+                    f"--out-dir {args.out_dir} is not agami's scratch folder {_scratch_out.scratch_dir()}"
+                )
+        except _scratch_out.Refused as e:
+            print(json.dumps({"ok": False, "error": str(e)}))
+            return 2
     try:
         doc = json.loads(Path(args.decisions_file).read_text(encoding="utf-8"))
         items = _items(args.items_file, args.area)
@@ -178,7 +203,9 @@ def main(argv: list[str] | None = None) -> int:
     if error:
         print(json.dumps({"ok": False, "error": error}))
         return 2
-    data["files"] = _write(Path(args.out_dir), data) if args.out_dir else {"keep": {}, "fix": {}}
+    data["files"] = (
+        _write(Path(args.out_dir), data, flat=guarded) if args.out_dir else {"keep": {}, "fix": {}}
+    )
     print(json.dumps({"ok": True, "data": data, "refused": refused}, indent=2))
     return 0
 

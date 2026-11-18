@@ -29,7 +29,7 @@ statement left is graded as this one's. Nothing here writes `query_log.jsonl`, a
 
 Usage:
 
-    "$PY" check_statement.py --profile main --area sales --row-dir <artifacts_dir>/local/reconcile/<ts>/rows/3
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" check_statement.py --profile main --area sales --row-dir <artifacts_dir>/local/reconcile/<ts>/rows/3
 
 Exit codes: `0` the row was checked, whatever the statement's outcome (a refusal is a finding);
 `2` cannot start (no `statement.sql`, or this interpreter lacks agami-core with its model extra);
@@ -64,7 +64,7 @@ def _missing_library_message(exc: ImportError) -> str:
     sm = Path(__file__).resolve().parent / "sm"
     return (
         "check_statement needs agami-core and its model extra (pydantic, sqlglot, pyyaml): run "
-        f'`bash "{sm}" install` and call this with "$PY". '
+        f'`bash "{sm}" install` and run this again. '
         f"({type(exc).__name__})"
     )
 

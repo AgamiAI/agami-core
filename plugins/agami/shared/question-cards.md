@@ -144,7 +144,7 @@ local file outside the project folder as a frozen snapshot. Run `serve_page.py` 
 `run_in_background`: it keeps serving until its time is up or the page is saved, so in the foreground
 it would hold the turn and the URL would never reach the person. A view-only page:
 
-```
+```bash
 bash "<plugin_root>/scripts/py" serve_page.py <file.html> --minutes 30
 # run_in_background; its first line is {"url": "http://localhost:<port>/<name>"}, and it exits when the time is up
 ```
@@ -164,10 +164,11 @@ Read that first line from the background task's output and give the person the U
    shows and cannot change. A page that will take approvals needs that identity first: when it is
    missing, ask the identity card before rendering.
 3. **Start the helper in the background** with `run_in_background`, writing to a new decisions file
-   whose `<ts>` is the time plus a random part, so two pages never share one:
+   whose `<batch>` is the stamp `bash "<plugin_root>/scripts/sm" batch-id` prints (the time plus a
+   random part), so two pages never share one:
 
-   ```
-   bash "<plugin_root>/scripts/py" serve_page.py <file.html> --decisions "<artifacts_dir>/local/tmp/agami-page-<ts>.json" --minutes 30
+   ```bash
+   bash "<plugin_root>/scripts/py" serve_page.py <file.html> --decisions "<artifacts_dir>/local/tmp/agami-page-<batch>.json" --minutes 30
    ```
 
    Wait for its first line with the Monitor tool (an until-loop on the task's output file that stops

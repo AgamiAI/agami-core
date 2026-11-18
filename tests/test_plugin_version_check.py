@@ -248,3 +248,73 @@ def test_no_python_anywhere_is_explained_not_a_silent_exit(tmp_path, script):
     r = subprocess.run(["bash", str(SCRIPTS / script), "validate"], env=env, capture_output=True, text=True)
     assert r.returncode == 3
     assert "agami: no Python interpreter found" in r.stderr
+
+
+# #692: `sm` and connect_resolve.py must agree on the interpreter. The field case: $AGAMI_PYTHON set to
+# a build venv holding the current agami-core without its [model] extra and with no pip, and a fully
+# equipped Python with an OLDER agami-core on PATH. The resolver picked the older one; `sm` used the
+# pinned one.
+_SHIM_EQUIPPED_OLDER = """#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    --probe) echo '{"has_pip": true, "agami_core": "0.9.1", "this_checkout": false}'; exit 0 ;;
+    *sys.executable*) echo "$0"; exit 0 ;;
+  esac
+done
+exit 0
+"""
+
+
+def _equipped_older(root: Path) -> Path:
+    """A python3 on PATH that answers every import probe and has pip, carrying agami-core 0.9.1."""
+    root.mkdir(parents=True)
+    shim = root / "python3"
+    shim.write_text(_SHIM_EQUIPPED_OLDER)
+    shim.chmod(0o755)
+    return shim
+
+
+def _resolve_both(tmp_path: Path, path_dirs: list[Path], pinned: Path | None) -> tuple[str, dict]:
+    env = {k: v for k, v in os.environ.items() if k not in ("AGAMI_PYTHON", "VIRTUAL_ENV", "AGAMI_PROFILE")}
+    env.update(PATH=os.pathsep.join([*map(str, path_dirs), str(_tools_without_python(tmp_path))]),
+               AGAMI_ARTIFACTS_DIR=str(tmp_path / "art"), HOME=str(tmp_path))
+    if pinned:
+        env["AGAMI_PYTHON"] = str(pinned)
+    shell = subprocess.run(["bash", "-c", f'. "{SCRIPTS / "_python.sh"}"; resolve_python'], env=env,
+                           capture_output=True, text=True, check=True).stdout.strip()
+    out = subprocess.run([sys.executable, str(SCRIPTS / "connect_resolve.py")], env=env,
+                         capture_output=True, text=True, check=True).stdout
+    return shell, json.loads(out)
+
+
+@POSIX
+def test_sm_and_connect_resolve_use_the_pinned_python_that_lacks_the_model_extra(tmp_path):
+    pinned = _pipless_venv(tmp_path / "build", PLUGIN_VERSION)
+    older = _equipped_older(tmp_path / "usr")
+    shell, got = _resolve_both(tmp_path, [older.parent], pinned)
+    assert shell == got["data"]["interpreter"]["python3"] == str(pinned)
+    (lacks,) = [a for a in got["anomalies"] if a["kind"] == "agami_python_lacks"]
+    assert str(pinned) in lacks["detail"]
+    assert f"agami-core {PLUGIN_VERSION} without its [model] extra (pydantic, sqlglot, pyyaml)" in lacks["detail"]
+    assert f'"{pinned}" -m pip install "agami-core[model]=={PLUGIN_VERSION}"' in lacks["detail"]
+
+
+@POSIX
+def test_sm_and_connect_resolve_agree_with_no_pin(tmp_path):
+    bad = _pipless_venv(tmp_path / "bad", None)
+    older = _equipped_older(tmp_path / "usr")
+    shell, got = _resolve_both(tmp_path, [bad.parent, older.parent], None)
+    assert shell == got["data"]["interpreter"]["python3"] == str(older)
+
+
+@POSIX
+def test_sm_names_the_missing_model_extra_and_the_missing_pip(tmp_path):
+    py = _pipless_venv(tmp_path / "venv", PLUGIN_VERSION)
+    env = {**os.environ, "AGAMI_PYTHON": str(py), "AGAMI_ARTIFACTS_DIR": str(tmp_path / "art")}
+    r = subprocess.run(["bash", str(SCRIPTS / "sm"), "install"], env=env, capture_output=True, text=True)
+    assert r.returncode == 3
+    assert (f"agami-core {PLUGIN_VERSION} is installed in {py} but without its model extra "
+            "(pydantic, sqlglot, pyyaml)") in r.stderr
+    assert "no pip" in r.stderr and "ensurepip" in r.stderr
+    assert f'"{py}" -m pip install "agami-core[model]=={PLUGIN_VERSION}"' in r.stderr
+    assert "agami-core can't be installed into it" not in r.stderr

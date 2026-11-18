@@ -15,6 +15,8 @@ Output (the standard refactor contract):
       "profile": "main" | null,   # null on a first-time bootstrap (no profile yet — don't invent a name)
       "profile_source": "explicit" | "env" | "active_profile" | "default",
       "artifacts_dir": "/Users/me/agami-artifacts",
+      "artifacts_dir_source": "env" | "pointer" | "default",  # where artifacts_dir came from
+      "gitignore": "missing" | "has_local" | "lacks_local",  # <artifacts_dir>/.gitignore vs `local/`
       "credentials": {"present": bool, "chmod_ok": bool, "type": "sqlite"|null,
                       "fields": {...}, "missing_fields": [...]},
       "example_present": bool,
@@ -27,6 +29,7 @@ Output (the standard refactor contract):
       "next": "ready" | "build" | "promote" | "bootstrap"
     },
     "anomalies": [...],   # incl. library_older_than_plugin, agami_python_cannot_be_brought_current,
+                          # agami_python_lacks ($AGAMI_PYTHON lacks the model deps / driver; it is used anyway),
                           # env_profile_has_no_model (AGAMI_PROFILE names a database with no model)
     "needs_judgment": null
   }
@@ -175,6 +178,14 @@ def _candidate_interpreters() -> list[str]:
     return uniq
 
 
+def _canonical(py: str) -> str:
+    try:
+        return subprocess.run([py, "-X", "utf8", "-c", "import sys;print(sys.executable)"],
+                              capture_output=True, text=True, encoding="utf-8", timeout=10).stdout.strip() or py
+    except Exception:
+        return py
+
+
 def _probe_install(py: str) -> dict:
     """Whether `py` has pip and which agami-core it carries, read from metadata (nothing is imported or
     installed). Unknown values come back as None, and an unknown never gets a candidate skipped."""
@@ -188,14 +199,41 @@ def _probe_install(py: str) -> dict:
             "this_checkout": bool(got.get("this_checkout"))}
 
 
+def _pinned_lacks(pinned: str, entry: dict, db_key: str, want: str | None) -> dict | None:
+    """The anomaly for an $AGAMI_PYTHON missing the model deps or the driver: what it lacks and the exact
+    line that adds it. It names pip only when pip is missing too, since then the line cannot run yet."""
+    lacks, pkgs = [], []
+    if not entry["has_model_deps"]:
+        have = entry["agami_core"]
+        lacks.append(f"agami-core {have} without its [model] extra (pydantic, sqlglot, pyyaml)" if have
+                     else "no agami-core and none of its model deps (pydantic, sqlglot, pyyaml)")
+        pkgs.append(f'"agami-core[model]=={want}"' if want else '"agami-core[model]"')
+    if entry["has_driver"] is False:
+        mods = driver_packages(db_key)
+        lacks.append(f"the {db_key} driver ({', '.join(mods)})")
+        pkgs.extend(mods.values())
+    if not lacks:
+        return None
+    fix = f'"{pinned}" -m pip install {" ".join(pkgs)}'
+    if entry["has_pip"] is False:
+        fix = (f"it has no pip either, so add pip first:  \"{pinned}\" -m ensurepip --upgrade  (where its Python "
+               f"ships ensurepip), then:  {fix}")
+    else:
+        fix = f"Fix:  {fix}"
+    return {"kind": "agami_python_lacks", "where": pinned,
+            "detail": (f"$AGAMI_PYTHON is {pinned}, and agami uses exactly that Python, but it has "
+                       f"{' and '.join(lacks)}. {fix}. Or unset AGAMI_PYTHON, or point it at a Python that has them.")}
+
+
 def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
     """Score candidates on (driver + model deps); pick the best. A configured
     interpreter that still satisfies everything wins (no churn). Mirrors 0a.5 — but
     deterministically, so we never record a Python that's missing a dep.
 
     A candidate that can't install packages and whose agami-core is missing or older than the plugin is
-    skipped: `sm install` could never fix it. $AGAMI_PYTHON is the user's explicit choice and is never
-    skipped; it gets a warning instead."""
+    skipped: `sm install` could never fix it. $AGAMI_PYTHON is the user's explicit choice and is the only
+    candidate when set, as it is for `sm` (#692): another Python carries another library version. What it
+    lacks comes back as an `agami_python_lacks` warning instead."""
     db_key = (db_type or "").lower()
     driver = _DRIVER_MOD.get(db_key, None)
     want_driver = bool(driver)
@@ -203,9 +241,12 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
     want = plugin_version()
     pinned = os.environ.get("AGAMI_PYTHON") or None
     candidates = []
-    if configured and os.access(configured, os.X_OK):
-        candidates.append(configured)
-    candidates += [c for c in _candidate_interpreters() if c != configured]
+    if pinned:
+        candidates.append(pinned)
+    else:
+        if configured and os.access(configured, os.X_OK):
+            candidates.append(configured)
+        candidates += [c for c in _candidate_interpreters() if c != configured]
 
     scored = []
     best = None
@@ -216,12 +257,8 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
         has_deps = _probe(py, list(_MODEL_DEPS))
         has_driver = _probe(py, driver_mods) if want_driver else None
         score = (1 if has_deps else 0) + (1 if (has_driver or not want_driver) else 0)
-        # canonical path
-        try:
-            canon = subprocess.run([py, "-X", "utf8", "-c", "import sys;print(sys.executable)"],
-                                   capture_output=True, text=True, encoding="utf-8", timeout=10).stdout.strip() or py
-        except Exception:
-            canon = py
+        # canonical path; $AGAMI_PYTHON is kept as written, so it reads the same as the path `sm` uses
+        canon = py if py == pinned else _canonical(py)
         inst = _probe_install(py)
         why_not = cannot_be_brought_current(inst, want)
         is_pinned = py == pinned
@@ -243,7 +280,15 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
                        + (f" and the {db_key} driver" if want_driver else "")
                        + (" ($AGAMI_PYTHON)" if is_pinned else
                           " (the configured interpreter)" if py == configured else ""))
-    if best is None:
+    if pinned:
+        best = scored[0]
+        because = "$AGAMI_PYTHON, used as set: agami never replaces it with another Python"
+        lacks = _pinned_lacks(pinned, best, db_key, want)
+        if lacks:
+            # it already says pip is missing, and what to install once it is there
+            warnings = [w for w in warnings if w["kind"] != "agami_python_cannot_be_brought_current"]
+            warnings.append(lacks)
+    elif best is None:
         # nothing fully equipped → first working base interpreter (caller installs into it)
         usable = [e for e in scored if not e["skipped"]]
         if usable:
@@ -287,6 +332,34 @@ def _env_profile_has_no_model(profile: str, art: Path) -> dict | None:
             "existing": existing,
             "detail": (f"AGAMI_PROFILE is set to '{profile}', and that database has no model. Databases with a "
                        f"model: {', '.join(existing)}. Unset AGAMI_PROFILE or set it to one of them.")}
+
+
+def artifacts_dir_source() -> str:
+    """Where `agami_paths.artifacts_dir()` found the folder, in its own order: `env`
+    (AGAMI_ARTIFACTS_DIR), `pointer` (a non-empty ~/.config/agami/path) or `default`. The skill
+    asks for a folder only on `default`, so it never has to read the pointer file itself."""
+    if os.environ.get("AGAMI_ARTIFACTS_DIR"):
+        return "env"
+    try:
+        if agami_paths.POINTER_PATH.exists() and agami_paths.POINTER_PATH.read_text(encoding="utf-8").strip():
+            return "pointer"
+    except OSError:
+        pass
+    return "default"
+
+
+def gitignore_state(art: Path) -> str:
+    """Whether `<art>/.gitignore` already ignores `local/`: "missing" (no file: write it with that one
+    line), "has_local" (nothing to do) or "lacks_local" (read it, then add the line). Read here so the
+    skill never Reads a file that may not exist: a live run showed that Read as a failed step."""
+    try:
+        text = (art / ".gitignore").read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "lacks_local"
+    lines = {line.strip() for line in text.splitlines()}
+    return "has_local" if lines & {"local/", "local", "/local/", "/local"} else "lacks_local"
 
 
 def main(argv=None) -> int:
@@ -370,6 +443,8 @@ def main(argv=None) -> int:
         "profile": emitted_profile,
         "profile_source": profile_source,
         "artifacts_dir": str(art),
+        "artifacts_dir_source": artifacts_dir_source(),
+        "gitignore": gitignore_state(art),
         "credentials": creds,
         "example_present": example_present,
         "config": config,

@@ -23,7 +23,9 @@ local-only execution path the rest of agami uses; no new egress.
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import functools
 import io
 import json
 import os
@@ -32,10 +34,12 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta, timezone
+from itertools import chain
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
 
@@ -317,6 +321,16 @@ class IntrospectReport:
     # Tables (`schema.table`) with columns the scan never tested because the cap stopped it; an
     # append carries them until a run reads the table again.
     join_candidate_unchecked: list[str] = field(default_factory=list)
+    # (column, key) pairs the scan tested, each end (schema, table, column). Kept while tables stay
+    # unchecked, so the appends that finish the scan start where the last stopped instead of spending
+    # their cap on the same first pairs, and each pair's stored result stands (#693).
+    join_candidate_tested: set[tuple] = field(default_factory=set)
+    # How many of those pairs THIS run tested: a run that finishes a stopped scan repeats while it is
+    # above zero (the unchecked list can stay the same while a wide table makes progress).
+    join_candidate_tested_now: int = 0
+    # What `sm dictionary-joins` stored beside the candidates (its notes, the names it could not
+    # resolve), carried over an append: only a run of that verb decides them again.
+    join_candidate_dictionary: dict = field(default_factory=dict)
     # Every join of the model as checked on the data: its label, and the evidence (`JoinCheck.evidence`).
     join_checks: list[dict] = field(default_factory=list)
     # The column profile of each table this run read, keyed `schema.table` (`profile.profile_table`).
@@ -349,7 +363,8 @@ class IntrospectReport:
             f"schemas: {self.schemas}",
             # Candidates beside the joins: a build that writes no join may still have found some.
             f"tables: {self.table_count}   relationships: {self.relationship_count}   "
-            f"join candidates found: {len(self.join_candidates)}",
+            f"join candidates found: {len(self.join_candidates)}   "
+            f"pairs_tested_this_run: {self.join_candidate_tested_now}",
             f"subject_areas ({len(self.subject_areas)}): {', '.join(self.subject_areas)}",
             *([f"new tables: {', '.join(self.new_tables)}"] if self.new_tables else []),
             *(f"changed {t}: " + "; ".join(f"{k} {', '.join(v)}" for k, v in c.items())
@@ -461,6 +476,10 @@ class ConnectionUnusable(RuntimeError):
     """The database connection could not be used, so introspection or discovery stopped before writing anything."""
 
 
+class TableSchemaUnknown(RuntimeError):
+    """A listed table has no schema and the catalog cannot settle one, so nothing was read (#693)."""
+
+
 class _ConnectionWatch:
     """A runner that remembers the first failure about the connection.
 
@@ -546,6 +565,31 @@ def make_execute_sql_runner(
 # ---------------------------------------------------------------------------
 
 
+def _logs_failure(fn: Callable) -> Callable:
+    """End the progress log with `failed: <reason>` when the run raises, then re-raise unchanged.
+    Without it a failed run leaves an unfinished log, which `sm steps` reads as a build still going."""
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        # BaseException, not Exception: a Ctrl-C must also end the log with `failed:`; it is re-raised.
+        except BaseException as exc:
+            log_failure(kwargs.get("progress_path"), exc)
+            raise
+    return run
+
+
+def log_failure(path: Optional[str | Path], exc: BaseException) -> None:
+    """End the progress log at `path` with `failed: <the exception's first line>`."""
+    reason = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+    if path:
+        # a run that fails before the engine made the folder (a missing --tables-file) still logs
+        with contextlib.suppress(OSError):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+    _progress(Path(path) if path else None, f"failed: {reason}")
+
+
+@_logs_failure
 def introspect(
     profile: str,
     db_type: str,
@@ -882,10 +926,12 @@ def _introspect(
                                               watch=_watch(pp))
     _progress(pp, "join candidates: testing columns no join covers…")
     prior = _stored_candidates(out) if refreshing else {}
+    tested = _tested_pairs(prior)
     _scan_join_candidates(dialect, runner, rels, built, report, sg, read=read,
-                          offered_columns=_offered_columns(prior, read), pp=pp)
+                          offered_columns=_offered_columns(prior, read, tested), tested=tested, pp=pp)
+    report.join_candidate_tested_now = len(report.join_candidate_tested)
     if refreshing:
-        _merge_candidates(prior, report, read or set(), rels, built, sg)
+        _merge_candidates(prior, report, read or set(), rels, built, sg, tested)
     _progress(pp, f"join candidates: {len(report.join_candidates)} found "
                   f"({report.join_candidate_probes} probe(s) this run)")
     # Every probe above swallows its own failure, which is right for one probe's bad statement and
@@ -1613,6 +1659,8 @@ def _discover_tables(
                 out.append((s, t))
             else:
                 out.append((None, item))
+        if dialect.needs_schema and any(s is None for s, _ in out):
+            out = _resolve_schemas(dialect, runner, out)
         return out
 
     # catalog mode: schemas -> tables
@@ -1634,6 +1682,38 @@ def _discover_tables(
         "discover tables; re-run with an explicit table list."
     )
     return []
+
+
+def _resolve_schemas(dialect: D.Dialect, runner: Runner,
+                     pairs: list[tuple[Optional[str], str]]) -> list[tuple[Optional[str], str]]:
+    """`pairs` with each bare table name given the one schema the catalog lists it in: exactly as
+    written, else ignoring case (taking the catalog's spelling). Every catalog read but SQLite's names
+    the schema, so a bare name left as it was would reach one as None (#693). A name no schema lists,
+    or several do, is refused with the names, before anything is read."""
+    rows = _catalog_read(runner, dialect.sql_schemas()) or []
+    found: dict[str, list[tuple[str, str]]] = {}   # lower-cased table -> [(schema, table)]
+    for sch in (r.get("schema_name") for r in rows):
+        for r in _catalog_read(runner, dialect.sql_tables(sch)) or []:
+            hit = (r.get("schema_name") or sch, r["table_name"])
+            found.setdefault(hit[1].lower(), []).append(hit)
+    out, refused = [], []
+    for schema, table in pairs:
+        if schema is not None:
+            out.append((schema, table))
+            continue
+        same = found.get(table.lower(), [])
+        exact = [h for h in same if h[1] == table]
+        hits = exact or same
+        if len(hits) == 1:
+            out.append(hits[0])
+        else:
+            where = ", ".join(f"{s}.{t}" for s, t in hits)
+            refused.append(f"{table} ({'in ' + where if hits else 'in no schema the catalog lists'})")
+    if refused:
+        raise TableSchemaUnknown(
+            f"{len(refused)} table(s) given without a schema, and the catalog does not settle one: "
+            + "; ".join(refused) + ". Name each as schema.table.")
+    return out
 
 
 def _read_tables(
@@ -1722,6 +1802,9 @@ def _build_table(
     reads: "Optional[_ReadBudget | _TableReads]" = None, keys_unread: Optional[set] = None,
     samples: Optional[dict] = None, repeats_unread: Optional[set] = None,
 ) -> Table:
+    if schema is None and dialect.needs_schema:
+        # Discovery resolves bare names; one that still arrives here would reach a catalog read as None.
+        raise TableSchemaUnknown(f"{table} reached a catalog read with no schema; name it as schema.table")
     # columns: catalog first, probe fallback
     probe_sample: list = []
     uncomparable: list[str] = []
@@ -3113,6 +3196,15 @@ def _named_for(column: str, target: Table) -> bool:
     return stem[0] == tn[0] and all(ch in rest for ch in stem)
 
 
+def _names_table(column: str, target: Table) -> bool:
+    """`_named_for`, or the same with the key suffix run on (`orderid` -> `orders`)."""
+    low, tn = column.lower(), target.name.lower()
+    if _named_for(column, target):
+        return True
+    stem = low[:-2] if low.endswith("id") and "_" not in low else ""
+    return len(stem) >= 3 and _singular(tn) == stem
+
+
 def _candidate_pairs(rels: list[Relationship], tables: list[Table], dialect: Optional[str],
                      read: Optional[set[str]] = None) -> Iterator[tuple[int, Table, Column, Table, str]]:
     """Every (priority, table, column, target, key) the wider scan tests: a column no join reads from,
@@ -3151,9 +3243,13 @@ def _candidate_pairs(rels: list[Relationship], tables: list[Table], dialect: Opt
             measure = (c.aggregation in ("additive", "averageable") or c.date_format
                        or _looks_time_named(c.name) or _NOT_A_REFERENCE_RE.search(c.name))
             shared = len(t.grain) != 1 and per_name.get(c.name.lower(), 0) > 1
-            columns.append((t, c, measure, bool(c.choice_field or c.primary_key), _own_key(t, c.name), shared))
+            # So does any whole number: sequential ids overlap by accident (one 52-table schema had
+            # about 3,400 such pairs), so an integer needs its name, or the dictionary (#694), to back it.
+            needs_name = bool(c.choice_field or c.primary_key or c.type == "integer")
+            whole = c.type == "integer" and not (c.choice_field or c.primary_key)
+            columns.append((t, c, measure, needs_name, _own_key(t, c.name), shared, whole))
     for level in (0, 1, 2):
-        for t, c, measure, needs_name, own, shared in columns:
+        for t, c, measure, needs_name, own, shared, whole in columns:
             for u, k, kc in keys:
                 # A table's own key never points at another table's own key: two record ids match
                 # only by chance, and between same-named ids that is every pair of tables. A shared
@@ -3168,7 +3264,10 @@ def _candidate_pairs(rels: list[Relationship], tables: list[Table], dialect: Opt
                     prio = 1 if _name_hint(c.name, u) else 2
                 else:
                     continue
-                if prio == level and not (needs_name and prio == 2):
+                # A whole number's name backs it when it names the target table (`acct_no`,
+                # `orderid`); one named for its role (`manager_id`) needs the dictionary.
+                named = whole and prio == 2 and _names_table(c.name, u)
+                if prio == level and not (needs_name and prio == 2 and not named):
                     yield prio, t, c, u, k
 
 
@@ -3199,6 +3298,7 @@ def _scan_join_candidates(dialect: D.Dialect, runner: Runner, rels: list[Relatio
                           tables: list[Table], report: IntrospectReport,
                           sqlglot_dialect: Optional[str] = None, read: Optional[set[str]] = None,
                           offered_columns: Optional[set[tuple]] = None,
+                          tested: Optional[set[tuple]] = None,
                           pp: Optional[Path] = None) -> None:
     """Test columns no join covers against other tables' keys and report what the data bears out (#512).
 
@@ -3207,39 +3307,58 @@ def _scan_join_candidates(dialect: D.Dialect, runner: Runner, rels: list[Relatio
     whole column on a table under the size guard, a sample above it), at most
     JOIN_CANDIDATE_PROBE_CAP per run, run several to a statement in priority order. On an append, only
     pairs touching a table this run read (`read`) are tested, and a column an earlier run already
-    offered a join for (`offered_columns`) is not tested again."""
+    offered a join for (`offered_columns`), or a pair an unfinished scan already tested (`tested`), is
+    not tested again."""
     # Its own count beside the uniqueness probes' `_ProbeBudget`, so neither cap eats into the other.
     left = JOIN_CANDIDATE_PROBE_CAP
     found: set[tuple] = set(offered_columns or ())   # columns offered: one join per column is enough
     offered: set[tuple] = set()   # (from, to) column pairs, so a pair isn't offered again reversed
     too_big: dict[str, set[str]] = {}   # why a pair wasn't tested -> the columns
     pairs = _candidate_pairs(rels, tables, sqlglot_dialect, read)
+    # A column's further keys wait for the next round, tested before new pairs. Pairs come a column at
+    # a time, so a round otherwise spent every check on one column's keys, most of them past the one
+    # that bore it out: about one column settled per round, and on a 52-table schema an append past
+    # the cap cleared two tables a run (#693).
+    held: deque = deque()
+    skip = tested or set()
     step = PF.CHECKS_PER_STATEMENT * PF.WORKERS
     while True:
         # One round of checks at a time, so a column offered in this round isn't checked again later.
         round_: list[tuple] = []
-        for prio, t, c, u, k in pairs:
+        in_round: set[tuple] = set()
+        later: list[tuple] = []
+        while len(round_) < step:
+            item = held.popleft() if held else next(pairs, None)
+            if item is None:
+                break
+            prio, t, c, u, k = item
             col, key = (t.schema_name, t.name, c.name), (u.schema_name, u.name, k)
-            if col in found or (key, col) in offered:
+            if col in found or (key, col) in offered or (col, key) in skip:
                 continue
             why = PF.checkable(dialect, t, u, [c.name])
             if why:
                 too_big.setdefault(why, set()).add(f"{_qualified(t)}.{c.name}")
+                continue
+            if col in in_round:
+                later.append(item)
                 continue
             if left <= 0:
                 report.join_candidate_cap_hit = True
                 report.notes.append(f"join candidates: stopped after {JOIN_CANDIDATE_PROBE_CAP} probes; "
                                     "columns past the cap were not tested")
                 # The rest of the pairs cost no statement to list: name every table they start from.
-                unchecked = {_qualified(t)} | {_qualified(t2) for _, t2, c2, u2, _ in pairs
+                rest = chain(later, held, pairs)
+                unchecked = {_qualified(t)} | {_qualified(t2) for _, t2, c2, u2, k2 in rest
                                                if (t2.schema_name, t2.name, c2.name) not in found
+                                               and ((t2.schema_name, t2.name, c2.name),
+                                                    (u2.schema_name, u2.name, k2)) not in skip
                                                and not PF.checkable(dialect, t2, u2, [c2.name])}
                 report.join_candidate_unchecked = sorted(unchecked)
                 break
             left -= 1
+            in_round.add(col)
             round_.append((prio, t, c, u, col, key, PF.JoinCheck(t, [c.name], u, [k])))
-            if len(round_) >= step:
-                break
+        held.extendleft(reversed(later))
         if not round_:
             break
         PF.run_checks(dialect, runner, [r[-1] for r in round_], watch=_watch(pp))
@@ -3255,6 +3374,7 @@ def _scan_join_candidates(dialect: D.Dialect, runner: Runner, rels: list[Relatio
             elif prio == 0 or check.values_matched or check.rows_matched:
                 # A type-only pair with no value in common is noise, not a near miss.
                 report.join_candidates_low.append(cand)
+            report.join_candidate_tested.add((col, key))
         if report.join_candidate_cap_hit:
             break
     for why, cols in too_big.items():
@@ -3424,29 +3544,43 @@ def _op_tables(op: dict) -> set[str]:
             for e in ("from", "to")}
 
 
-def _offered_columns(doc: dict, read: Optional[set[str]]) -> set[tuple]:
+def _tested_pairs(doc: dict) -> set[tuple]:
+    """The pairs a stored, unfinished scan tested, as `_scan_join_candidates` keys them. An entry
+    that isn't six names is ignored, so a damaged file costs probes, never a run."""
+    return {((p[0], p[1], p[2]), (p[3], p[4], p[5])) for p in _listed(doc, "tested_pairs")
+            if isinstance(p, list) and len(p) == 6 and all(x is None or isinstance(x, str) for x in p)}
+
+
+def _op_pair(op: dict) -> tuple:
+    """A candidate's (column, key) pair, keyed the way `_scan_join_candidates` keys a tested pair."""
+    return tuple((op.get(f"{e}_schema"), op.get(f"{e}_table"), op.get(f"{e}_column")) for e in ("from", "to"))
+
+
+def _offered_columns(doc: dict, read: Optional[set[str]], tested: "set[tuple] | frozenset" = frozenset()) -> set[tuple]:
     """(schema, table, column) of each column a stored candidate offers a join from, except where
-    the candidate touches a table this run read: its data may have changed, so it is tested again."""
+    the candidate touches a table this run read: its data may have changed, so it is tested again —
+    unless an unfinished scan tested that pair (`tested`), whose result stands until the scan ends."""
     ops = [c.get("op") for c in _listed(doc, "candidates") if isinstance(c, dict)]
     return {(op.get("from_schema"), op.get("from_table"), op.get("from_column")) for op in ops
-            if isinstance(op, dict) and not (read and _op_tables(op) & read)}
+            if isinstance(op, dict) and not (read and _op_tables(op) & read and _op_pair(op) not in tested)}
 
 
 def _merge_candidates(prior: dict, report: IntrospectReport, read: set[str], rels: list[Relationship],
-                      tables: list[Table], sg: Optional[str]) -> None:
+                      tables: list[Table], sg: Optional[str], tested: "set[tuple] | frozenset" = frozenset()) -> None:
     """Fold the candidates earlier runs stored into this run's, so an append never loses one (ACE-180).
 
     One entry per id (its two columns); an offered candidate beats a near miss, and between two of a
     kind this run's evidence, read from the data as it is now, wins. A stored candidate is dropped
     when the model no longer serves an end of it, a join now reads from its column (it was accepted),
-    or an end is a table this run read: that pair was tested again, and this run's result decides.
-    The tables a capped scan left untested stay listed until a run reads them again."""
+    or an end is a table this run read: that pair was tested again, and this run's result decides —
+    unless an unfinished scan had tested it (`tested`), when the stored result stands. The tables a
+    capped scan left untested stay listed until a run reads them again."""
     covered = {(table_key(r.from_table, r.from_schema), fc.lower())
                for r in rels for fc, _tc in _column_pairs(r, sg) or []}
 
     def live(c: dict) -> bool:
         op = c.get("op") if isinstance(c, dict) else None
-        if not isinstance(op, dict) or "id" not in c or _op_tables(op) & read:
+        if not isinstance(op, dict) or "id" not in c or (_op_tables(op) & read and _op_pair(op) not in tested):
             return False
         for side in ("from", "to"):
             t = _endpoint(tables, op.get(f"{side}_table", ""), op.get(f"{side}_schema"))
@@ -3471,6 +3605,9 @@ def _merge_candidates(prior: dict, report: IntrospectReport, read: set[str], rel
     report.join_candidates_low = [c for o, _, c in best.values() if not o]
     kept = {t for t in _listed(prior, "unchecked_tables") if isinstance(t, str) and t not in read}
     report.join_candidate_unchecked = sorted(kept | set(report.join_candidate_unchecked))
+    report.join_candidate_tested |= tested
+    report.join_candidate_dictionary = {k: prior[k] for k in ("dictionary_notes", "dictionary_unresolved")
+                                        if isinstance(prior.get(k), list)}
 
 
 def write_join_candidates(out: Path, report: IntrospectReport) -> Optional[Path]:
@@ -3485,8 +3622,13 @@ def write_join_candidates(out: Path, report: IntrospectReport) -> Optional[Path]
         "probe_cap": JOIN_CANDIDATE_PROBE_CAP,
         "cap_hit": report.join_candidate_cap_hit,
         "unchecked_tables": report.join_candidate_unchecked,
+        "pairs_tested_this_run": report.join_candidate_tested_now,
+        # Only while the scan is unfinished: once nothing is unchecked, the next refresh tests afresh.
+        "tested_pairs": sorted(([*c, *k] for c, k in report.join_candidate_tested),
+                               key=lambda p: [x or "" for x in p]) if report.join_candidate_unchecked else [],
         "candidates": report.join_candidates,
         "low_overlap": report.join_candidates_low,
+        **report.join_candidate_dictionary,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

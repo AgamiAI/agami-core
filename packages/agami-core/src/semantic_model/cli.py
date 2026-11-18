@@ -31,6 +31,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -54,7 +55,19 @@ def _print_json(obj) -> None:
 def _read_json_file(path: str) -> Any:
     """Read a command's JSON input, or stop with a JSON error naming the RESOLVED path. A traceback
     on stdout (a relative path that didn't resolve where the caller thought, a half-written file)
-    read as "nothing to apply" to a skill parsing the output, so it went on as if the call had worked."""
+    read as "nothing to apply" to a skill parsing the output, so it went on as if the call had worked.
+    Under the scratch-only guard (`AGAMI_SCRATCH_ONLY=1`) the file must be one of agami's scratch
+    files (semantic_model/scratch.py)."""
+    from . import scratch
+    if scratch.guarded():
+        try:
+            data = scratch.read_scratch(path, scratch.INPUT_CAP, engine_ok=True)
+            return json.loads(data.decode("utf-8"))
+        except scratch.NotScratch as exc:
+            _print_json({"error": str(exc)})
+        except ValueError as exc:
+            _print_json({"error": f"could not read JSON from {path}: {exc}"})
+        raise SystemExit(2)
     p = Path(path).expanduser()
     try:
         with open(p, encoding="utf-8") as fh:
@@ -64,6 +77,28 @@ def _read_json_file(path: str) -> Any:
     except (OSError, ValueError) as exc:
         _print_json({"error": f"could not read JSON from {p.resolve()}: {exc}"})
     raise SystemExit(2)
+
+
+def _read_text_file(path: str) -> str:
+    """A person's free text from a file the skill wrote with its Write tool, verbatim (UTF-8) minus one
+    trailing newline. Free text never goes on the command line: a quote, `$` or `;` in a company name
+    or a question would be read by the shell, and escaping it changed the person's words.
+
+    Only one of agami's scratch files, always (semantic_model/scratch.py): this text is saved into
+    the org record and datasource.yaml, so a call pointed at any other file would copy it there."""
+    from . import scratch
+    try:
+        text = scratch.read_scratch(path, scratch.TEXT_CAP).decode("utf-8")
+    except scratch.NotScratch as exc:
+        _print_json({"error": str(exc)})
+        raise SystemExit(2)
+    except ValueError as exc:
+        _print_json({"error": f"could not read text from {Path(path).resolve()}: {exc}"})
+        raise SystemExit(2)
+    for end in ("\r\n", "\n"):
+        if text.endswith(end):
+            return text[: -len(end)]
+    return text
 
 
 def _utc_now_iso() -> str:
@@ -158,12 +193,36 @@ def cmd_context(args) -> int:
     return 0
 
 
+def _within_model(handler):
+    """Run `handler` with every file read held inside `args.root`, links resolved (OutsideModel
+    otherwise). For the verbs the plugin's permission hook (scripts/approve_own_calls.py, VERBS)
+    runs with no prompt: the hook checks only the folder a call names, and the model can name more."""
+    def run(args) -> int:
+        with L.contained(args.root):
+            return handler(args)
+    run.within_model = True
+    run.__name__ = handler.__name__
+    run.__doc__ = handler.__doc__
+    return run
+
+
+def _reads_no_file(handler):
+    """Mark `handler` as safe for the hook's approved path the way `_within_model` does, for a verb
+    that takes no model folder and opens no file (`batch-id`): every read it makes is inside the
+    model because it makes none. `sm` runs an approved verb only when its handler carries the mark,
+    so without it the verb would stop with the install step on a library that is current."""
+    handler.within_model = True
+    return handler
+
+
+@_within_model
 def cmd_bundle(args) -> int:
     org = L.load_datasource(args.root)
     _print_json(L.get_subject_area_bundle(org, args.area))
     return 0
 
 
+@_within_model
 def cmd_areas(args) -> int:
     org = L.load_datasource(args.root)
     _print_json(RT.list_subject_areas(org))
@@ -209,9 +268,9 @@ def cmd_set_org(args) -> int:
     # carries more than just its org_id. Only the flags passed are updated; others are left as-is.
     from . import org_record as OR
 
-    record = OR.set_org_fields(
-        args.artifacts_dir, name=args.name, description=args.description
-    )
+    name = _read_text_file(args.name_file) if args.name_file else args.name
+    description = _read_text_file(args.description_file) if args.description_file else args.description
+    record = OR.set_org_fields(args.artifacts_dir, name=name, description=description)
     _print_json(
         {"org_id": record.org_id, "name": record.name, "description": record.description}
     )
@@ -481,6 +540,7 @@ def cmd_filter_values_judge(args) -> int:
     return 0
 
 
+@_within_model
 def cmd_review_queue(args) -> int:
     from . import curate
     org = L.load_datasource(args.root)
@@ -488,9 +548,12 @@ def cmd_review_queue(args) -> int:
     return 0
 
 
+@_within_model
 def cmd_review_items(args) -> int:
     from . import curate
-    org = L.load_datasource(args.root, include_rejected=True)
+    # Only the full curation view shows hidden entries; every sign-off scope is the served model's,
+    # so its count equals `sm review-queue`'s and what hangs off a hidden table is left out.
+    org = L.load_datasource(args.root, include_rejected=args.scope == "all")
     _print_json(curate.all_items(org, scope=args.scope, root=args.root))
     return 0
 
@@ -511,12 +574,13 @@ def cmd_curate_gate(args) -> int:
     from . import curate
     org = L.load_datasource(args.root, include_rejected=True)
     pii = curate.sensitive_columns(org).get("count", 0)
-    preseed = len(curate.all_items(org, scope="preseed"))
+    preseed = len(curate.all_items(L.load_datasource(args.root), scope="preseed"))
     _print_json({"pii_count": pii, "preseed_count": preseed,
                  "should_open_explorer": pii > 0 or preseed > 0})
     return 0
 
 
+@_within_model
 def cmd_model_tree(args) -> int:
     from . import curate
     org = L.load_datasource(args.root, include_rejected=True)
@@ -524,13 +588,220 @@ def cmd_model_tree(args) -> int:
     return 0
 
 
+def _progress_line(raw: str) -> dict:
+    """One progress-log line as a person's line, with an 8-cell bar drawn from its own counts,
+    rounded down so the bar is full only at the end. Never an estimate: no count, no bar."""
+    from . import steps
+    parsed = steps.parse_progress(raw)
+    if not parsed:
+        # Posted as is (`then`: "Post `line`"), so a line the engine didn't phrase is quoted like
+        # other model text (a tampered log's `# …` must not render as a heading), and a failure's
+        # reason (the database's or the model's words) is quoted with the longer failure cap.
+        from .say_text import one_line, quoted
+        waiting = steps.WAITING.match(raw)
+        if waiting:
+            return {"line": f"Waiting on the database for {one_line(waiting.group(1))}: "
+                            f"{quoted(waiting.group(2))}", "done": False, "failed": False}
+        if raw.startswith("failed:"):
+            reason = quoted(steps.strip_paths(raw[len("failed:"):].strip()), steps.FAILURE_CAP)
+            return {"line": f"The build didn't finish: {reason}", "done": False, "failed": True}
+        return {"line": quoted(raw), "done": False, "failed": False}
+    m, phrase, unit = parsed
+    if unit:
+        n, total = int(m.group(1)), int(m.group(2))
+        filled = (8 * n) // total if total else 0
+        bar = "▰" * filled + "▱" * (8 - filled)
+        return {"line": f"{phrase} {bar} {n}/{total} {unit}", "n": n, "total": total,
+                "done": False, "failed": False}
+    return {"line": phrase.format(*m.groups()), "done": raw.startswith("done:"), "failed": False}
+
+
+@_within_model
+def cmd_progress(args) -> int:
+    """The build's latest progress line, ready to post, from <root>/.introspect/progress.log.
+
+    With --wait N it returns as soon as the log moves on, or after N seconds. A skill loops on it
+    while the build runs in the background: each call is a pre-approved `sm` command that keeps the
+    turn open, and a turn that ends mid-onboarding loses the skill's pre-approvals, so every later
+    command would stop for permission."""
+    from . import steps
+    attempt_at = steps.attempt_started_at(Path(args.root))
+
+    def last() -> str:
+        return steps.attempt_progress_line(Path(args.root), attempt_at)
+
+    start = last()
+    deadline = time.monotonic() + max(0.0, args.wait)
+    current = start
+    # A finished or failed log won't move on, so waiting on it would only stall the skill's loop.
+    while args.wait and current == start and not current.startswith(("done:", "failed:")) \
+            and time.monotonic() < deadline:
+        time.sleep(0.5)
+        current = last()
+    # The compact step list rides along only when it moved since `sm steps` or `sm progress` last
+    # printed it, so each poll is one call, and `then` says whether to refresh the task list.
+    root = Path(args.root).expanduser()
+    view = steps.compact(steps.onboarding_steps(root))
+    listed = view["list"]
+    shown = _progress_line(current) if current else {"line": "", "done": False, "failed": False}
+    before = steps.read_printed(root)
+    steps.remember_printed(root, before, {"list": listed, "line": shown["line"]})
+    # Nothing is remembered for a folder that doesn't exist yet, and its list is the fresh one every
+    # time (`sm steps` prints it): reporting it as moved would ask for a refresh on every poll.
+    list_changed = root.is_dir() and before.get("list") != listed
+    # A failure is not posted from here: `sm steps` says it as its problem, and saying it in both
+    # places posted it twice.
+    line_new = bool(shown["line"]) and not shown["failed"] and before.get("line") != shown["line"]
+    out: dict[str, Any] = {**shown, "started": bool(current)}
+    if current:
+        out["changed"] = current != start
+    if list_changed:
+        out["list"] = listed
+    out["list_changed"] = list_changed
+    # A problem on the list (a build killed with no `failed:` line) ends the build too: its log
+    # never moves on again, so "call this again" would loop for ever.
+    ended = shown["done"] or shown["failed"] or bool(view["problem"])
+    out["then"] = steps.progress_next(line_new, list_changed, ended)
+    _print_json(out)
+    return 0
+
+
+@_reads_no_file
+def cmd_batch_id(args) -> int:
+    """Print `{"batch": "<YYYYMMDD-HHMMSS>-<4 hex>"}`: a stamp the skill puts in the names of one
+    page's scratch files (the page, its items, the decisions it saves). Without it a file left by an
+    earlier run (a reintrospect, a sample rebuild, another database with the same area name) reads as
+    this run's, and a Write onto a file Claude hasn't read in this session fails. The random part
+    keeps two pages started in the same second apart."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    _print_json({"batch": f"{stamp}-{os.urandom(2).hex()}"})
+    return 0
+
+
+def cmd_init_local(args) -> int:
+    """Set up `<artifacts_dir>/local/` (0700), its scratch folder and `.gitignore`; `--sample` also
+    writes the sample's credential for promote_credentials.py. See semantic_model/local_setup.py."""
+    from . import local_setup as LS
+    try:
+        _print_json(LS.init_local(args.artifacts_dir, sample=args.sample))
+    except LS.SetupRefused as exc:
+        _print_json({"error": str(exc)})
+        return 2
+    return 0
+
+
+def cmd_set_config(args) -> int:
+    """Merge checked fields into `<artifacts_dir>/local/.config` (0600). See local_setup.py."""
+    from . import local_setup as LS
+    try:
+        _print_json(LS.set_config(args.artifacts_dir, tier=args.tier,
+                                  active_profile=args.active_profile, python3=args.python3,
+                                  tools=args.tool, identity_file=args.identity_file))
+    except LS.SetupRefused as exc:
+        _print_json({"error": str(exc)})
+        return 2
+    return 0
+
+
+@_within_model
+def cmd_steps(args) -> int:
+    """The onboarding step list read from disk, after applying any --mark: by default the compact
+    list the skill copies as is, `--full` the whole dict (ids, labels, counts, timeline path).
+    Every mark is checked before any is written, so a bad one leaves the timeline as it was."""
+    from . import steps
+    if not str(args.root).strip():
+        # An unset "$ROOT" arrives as "": it would put a timeline in the working directory.
+        print("sm steps: the database folder is empty; pass <artifacts_dir>/<profile>",
+              file=sys.stderr)
+        return 2
+    try:
+        marks = [steps.parse_mark(spec) for spec in args.mark]
+    except ValueError as exc:
+        print(f"sm steps: {exc}", file=sys.stderr)
+        return 2
+    try:
+        for step_id, status in marks:
+            steps.mark(Path(args.root), step_id, status)
+    except ValueError as exc:
+        print(f"sm steps: {exc}", file=sys.stderr)
+        return 2
+    root = Path(args.root).expanduser()
+    result = steps.onboarding_steps(root)
+    listed = steps.compact(result)["list"]
+    before = steps.read_printed(root)
+    changed = before.get("list") != listed
+    said = steps.steps_next(changed, result["problem"], before.get("problem"),
+                            model_written=result["model_written"] and not marks)
+    # The problem is remembered as said: it is said once, not on every call while it lasts.
+    steps.remember_printed(root, before, {"list": listed, "problem": result["problem"]})
+    # `--full` carries `list` too, so every `then` ("update the task list from `list`") reads right.
+    view = {**result, "list": listed} if args.full else steps.compact(result)
+    _print_json({**view, "changed": changed, **said})
+    return 0
+
+
+def _steps_refresh(root: Path) -> dict:
+    """`{"list": …}` when this model is being onboarded (it has a step timeline) and the step list
+    now reads differently from the one last printed, else {}. A command that changes a count the
+    list shows carries it, so the task list is refreshed where the count changed: a live run's list
+    read "2% described" while the chat said 82%, and "11 examples" after one was dropped."""
+    from . import steps
+    root = Path(root).expanduser()
+    if not (root / ".introspect" / "timeline.jsonl").is_file():
+        return {}
+    try:
+        listed = steps.compact(steps.onboarding_steps(root))["list"]
+    except Exception:  # noqa: BLE001 — the list is a view: a command never fails over it
+        return {}
+    before = steps.read_printed(root)
+    if before.get("list") == listed:
+        return {}
+    steps.remember_printed(root, before, {"list": listed})
+    return {"list": listed}
+
+
+def _with_refresh(out: dict, root: Path) -> dict:
+    """`out` with the step list when it changed, and the instruction to show it added to `then`."""
+    from . import steps
+    fresh = _steps_refresh(root)
+    if not fresh:
+        return out
+    then = out.get("then")
+    return {**out, **fresh, "then": (then + steps.THEN_AND_UPDATE) if then else steps.THEN_UPDATE}
+
+
+@_within_model
+def cmd_summary(args) -> int:
+    """The onboarding's closing summary as markdown, ready to post as printed; `--json` wraps it
+    with the overview's totals."""
+    from . import summary
+    result = summary.onboarding_summary(Path(args.root))
+    if args.json:
+        _print_json(result)
+    else:
+        sys.stdout.write(result["markdown"])
+    return 0
+
+
+@_within_model
+def cmd_overview(args) -> int:
+    """The numbers an overview card shows: per subject area its tables, columns described, metrics
+    and joins (and how many await sign-off) and examples, plus totals. One call, so a card never
+    adds up model-tree, coverage and review-items itself."""
+    from . import curate
+    org = L.load_datasource(args.root)   # the served model, so the counts match the queue's
+    _print_json(curate.overview(org, args.root))
+    return 0
+
+
+@_within_model
 def cmd_coverage(args) -> int:
     """Per-table column-description coverage + the enrichment-completeness verdict.
     The skill runs this at the end of Phase 2 (and reports it in the Phase 7 summary):
     `ok: false` with untouched columns means enrichment skipped the column pass."""
     from . import curate
     org = L.load_datasource(args.root, include_rejected=True)
-    _print_json(curate.column_coverage(org))
+    _print_json(_with_refresh(curate.column_coverage(org), Path(args.root)))
     return 0
 
 
@@ -603,7 +874,12 @@ def cmd_sensitive(args) -> int:
 def cmd_set_personal_data(args) -> int:
     """Record who keeps people from seeing personal data (#675). Build-only: it lives in the local
     config, so nothing deployed carries it and an older core never meets the key."""
-    BS.set_personal_data(args.artifacts_dir, args.setting)
+    from .scratch import LinkedTarget
+    try:
+        BS.set_personal_data(args.artifacts_dir, args.setting)
+    except LinkedTarget as exc:
+        _print_json({"error": str(exc)})
+        return 2
     _print_json({"personal_data": args.setting, "config": str(BS.config_path(args.artifacts_dir))})
     return 0
 
@@ -637,7 +913,8 @@ def cmd_set_description(args) -> int:
     question by (#327). Onboarding calls this with the user's line or one generated from the enriched
     model. Validated + committed."""
     from . import curate
-    res = curate.set_datasource_description(args.root, args.description)
+    description = _read_text_file(args.description_file) if args.description_file else args.description
+    res = curate.set_datasource_description(args.root, description)
     _print_json({"applied": res.applied, "validated": res.validated,
                  "committed": res.committed, **_commit_note(res), "errors": res.errors})
     return 0 if res.validated else 1
@@ -886,7 +1163,7 @@ def cmd_add_example(args) -> int:
     if isinstance(items, dict):
         items = items.get("examples", items.get("items", []))
     res = curate.add_examples(args.root, args.area, items, signer=args.signer, role=args.role)
-    _print_json(res.as_dict())
+    _print_json(_with_refresh(res.as_dict(), Path(args.root)))
     return 0 if (res.applied or not res.skipped) else 1
 
 
@@ -1385,6 +1662,41 @@ def cmd_describe_file(args) -> int:
     return 0 if res.validated else 1
 
 
+def cmd_dictionary_joins(args) -> int:
+    """Turn the references the applied data dictionary states (`FK -> parent.pkey`) into join
+    candidates, each checked once on the data (#694). With `--unjoined`, only list the columns the
+    dictionary calls references that no join reads from yet: no database read."""
+    from . import dialects as D
+    from . import dictionary_joins as DJ
+    from .loader import load_datasource
+
+    root = Path(args.root).expanduser()
+    if not (root / "datasource.yaml").is_file() or not (root / "subject_areas").is_dir():
+        _print_json({"error": f"no semantic model at {root.resolve()} (needs datasource.yaml and subject_areas/)"})
+        return 2
+    org = load_datasource(root)
+    dialect = D.get_dialect(args.db_type) if args.db_type else None
+    sg = INTRO._sqlglot_name(dialect) if dialect else None
+    if args.unjoined:
+        cols = DJ.unjoined(org, sg)
+        _print_json({"unjoined": cols, "unjoined_count": len(cols)})
+        return 0
+    if not (args.profile and dialect):
+        _print_json({"error": "checking the stated joins reads the database: pass --profile and --db-type "
+                              "(or --unjoined to only list them)"})
+        return 2
+    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
+    from . import profile as PF
+    PF.WORKERS = 1 if _may_prompt_to_sign_in(args.profile) else PF.WORKERS
+    found = DJ.find(org, runner, dialect, sg)
+    path = DJ.store(root, found)
+    _print_json({"candidates": found.candidates, "candidate_count": len(found.candidates),
+                 "not_proven": found.notes, "unresolved": found.unresolved,
+                 "already_joined": found.already_joined, "probes": found.probes,
+                 "join_candidates_file": str(path) if path else None})
+    return 0
+
+
 def cmd_format_table(args) -> int:
     """Format a result CSV into a deterministic markdown table — exact numbers, full
     grouping + currency symbols, never abbreviated. The skill (and later the MCP) emits
@@ -1492,7 +1804,7 @@ def cmd_seed_examples(args) -> int:
     # Gate 2 — preseed review (Phase 4): no seeding on unreviewed metrics/entities. Bypassable
     # only via the Phase-4c --after-review path, after the user has been in the explorer.
     if not getattr(args, "after_review", False):
-        block = _preseed_gate(org)
+        block = _preseed_gate(L.load_datasource(args.root))   # the served model's own list
         if block is not None:
             _print_json(block)
             return 2
@@ -1731,6 +2043,10 @@ def _model_area_names(root: str) -> list[str]:
 
 
 def cmd_remove_example_areas(args) -> int:
+    if args.question_file:
+        # one question per line, each verbatim: the questions are the person's own words
+        lines = _read_text_file(args.question_file).splitlines()
+        args = argparse.Namespace(**{**vars(args), "question": [q for q in lines if q.strip()]})
     areas = _resolve_areas(args)
     if areas is None:
         return 1
@@ -1833,22 +2149,20 @@ def cmd_introspect(args) -> int:
     from . import introspect as INTRO
     from . import validator as V
 
-    tables = _normalize_table_list(args.tables)
-    if getattr(args, "tables_file", None):
-        # a newline-separated allowlist file — the shell-quoting-proof way to pass a big kept set
-        # (no word-splitting to get wrong). `#` comments and blank lines ignored.
-        text = Path(args.tables_file).expanduser().read_text(encoding="utf-8")
-        from_file = [ln.strip() for ln in text.splitlines()
-                     if ln.strip() and not ln.lstrip().startswith("#")]
-        tables = (tables or []) + _normalize_table_list(from_file)
-
-    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True,
-                                           artifacts_dir=args.artifacts)
-    # Each statement is its own connection: several at once would open as many sign-in prompts.
-    from . import profile as PF
-    PF.WORKERS = 1 if _may_prompt_to_sign_in(args.profile) else PF.WORKERS
     progress = args.progress or str(
         Path(args.artifacts).expanduser() / args.profile / ".introspect" / "progress.log")
+    # Everything before the engine starts can fail too (a missing --tables-file, a bad --batch, a
+    # refused file): the log must say so, or `sm progress` waits out its silence rule for nothing.
+    # The engine's own failures are logged by its decorator.
+    try:
+        rc, prepared = _introspect_inputs(args)
+    except BaseException as exc:
+        INTRO.log_failure(progress, exc)
+        raise
+    if rc:
+        INTRO.log_failure(progress, RuntimeError(prepared))
+        return rc
+    tables, runner, batch = prepared
     try:
         org, report = INTRO.introspect(
             args.profile,
@@ -1862,9 +2176,9 @@ def cmd_introspect(args) -> int:
             bigquery_region=args.bigquery_region,
             progress_path=progress,
             append=getattr(args, "append", False),
-            batch=_batch_arg(getattr(args, "batch", None)),
+            batch=batch,
         )
-    except INTRO.ConnectionUnusable as exc:
+    except (INTRO.ConnectionUnusable, INTRO.TableSchemaUnknown) as exc:
         # the database's own reason, not a traceback: it is a setup problem the person fixes
         sys.stderr.write(f"agami: {exc}\n")
         return 2
@@ -1872,6 +2186,39 @@ def cmd_introspect(args) -> int:
     print(report.render())
     print(V.format_result(res))
     return 0 if res.ok else 1
+
+
+def _introspect_inputs(args) -> tuple[int, Any]:
+    """(0, (tables, runner, batch)) for `introspect`, or (exit code, the reason) when an input is
+    refused. Anything else that goes wrong raises."""
+    from . import introspect as INTRO
+
+    tables = _normalize_table_list(args.tables)
+    if getattr(args, "tables_file", None):
+        # a newline-separated allowlist file — the shell-quoting-proof way to pass a big kept set
+        # (no word-splitting to get wrong). `#` comments and blank lines ignored.
+        from . import scratch
+        if scratch.guarded():
+            try:
+                text = scratch.read_scratch(args.tables_file, scratch.TEXT_CAP).decode("utf-8")
+            except (scratch.NotScratch, ValueError) as exc:
+                _print_json({"error": str(exc)})
+                return 2, str(exc)
+        else:
+            text = Path(args.tables_file).expanduser().read_text(encoding="utf-8")
+        # One name per line, kept whole: a table name may hold a space, and splitting
+        # `public.Order Lines` left a bare `Lines` that reached a catalog read with no schema (#693).
+        from_file = [ln.strip() for ln in text.splitlines()
+                     if ln.strip() and not ln.lstrip().startswith("#")]
+        tables = (tables or []) + from_file or None
+    batch = _batch_arg(getattr(args, "batch", None))
+
+    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True,
+                                           artifacts_dir=args.artifacts)
+    # Each statement is its own connection: several at once would open as many sign-in prompts.
+    from . import profile as PF
+    PF.WORKERS = 1 if _may_prompt_to_sign_in(args.profile) else PF.WORKERS
+    return 0, (tables, runner, batch)
 
 
 def _batch_arg(text: Optional[str]) -> Optional[tuple[int, int]]:
@@ -2260,6 +2607,67 @@ def cmd_discover(args) -> int:
     return 0
 
 
+def _add_out(sp: argparse.ArgumentParser) -> None:
+    """`--out <path>` on a verb whose output a skill keeps in a file: a shell redirect after the
+    launcher made the call a compound command no permission rule matches, so it stopped for
+    permission every time."""
+    sp.add_argument("--out", dest="out_file", default=None, metavar="PATH",
+                    help='write the output to PATH (atomically) instead of stdout, and print '
+                         '{"out": PATH, "bytes": N}')
+
+
+def write_atomically(path: Path, data: bytes) -> None:
+    """`data` at `path` through a temp file in the same folder and a rename, so a page or a later
+    command reading the file never sees it half written."""
+    import tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        # mkstemp makes the file 0600; a redirect would have made it 0666 less the umask.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp, 0o666 & ~umask)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _run_to_out(args) -> int:
+    """Run the verb with its stdout captured, then write those bytes to `--out`, whatever the exit
+    code, as the redirect it replaces did; the exit code passes through. A verb that raises writes
+    nothing, so no half answer is left for the next command to read. `--out` is only ever a scratch file or a
+    model's own datasource.md (semantic_model/scratch.py), checked before the verb runs."""
+    from . import scratch
+    try:
+        out = scratch.check_out(args.out_file)
+    except scratch.NotScratch as exc:
+        _print_json({"error": str(exc)})
+        return 2
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = args.func(args)
+    data = buf.getvalue().encode("utf-8")
+    write_atomically(out, data)
+    # one line: the skill reads it at a glance
+    print(json.dumps({"out": str(out), "bytes": len(data)}, ensure_ascii=False))
+    return rc
+
+
+def _no_abbreviations(parser: argparse.ArgumentParser) -> None:
+    """`allow_abbrev=False` on `parser` and every subparser under it. With abbreviations on, `--o`
+    meant `--out`, so a check that looked for `--out` (a permission hook, a reviewer) could be
+    walked past by writing less of it; an option is now only ever its full name."""
+    parser.allow_abbrev = False
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for child in action.choices.values():
+                _no_abbreviations(child)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="semantic_model", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -2290,6 +2698,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("bundle", help="one-shot subject-area bundle")
     sp.add_argument("root")
+    _add_out(sp)
     sp.add_argument("--area", required=True)
     sp.set_defaults(func=cmd_bundle)
 
@@ -2299,6 +2708,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("org-draft", help="print a human-narrative STARTER for datasource.md (prompt only, no facts)")
     sp.add_argument("root")
+    _add_out(sp)
     sp.set_defaults(func=cmd_org_draft)
 
     sp = sub.add_parser("org-context", help="print the full domain context (human narrative + model-derived summary + glossary) for the LLM")
@@ -2307,8 +2717,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("set-org", help="write the company name / description into the deployment organization record")
     sp.add_argument("artifacts_dir")
-    sp.add_argument("--name", default=None)
-    sp.add_argument("--description", default=None)
+    name = sp.add_mutually_exclusive_group()
+    name.add_argument("--name", default=None)
+    name.add_argument("--name-file", default=None,
+                      help="a UTF-8 file holding the name, used as written (one trailing newline dropped)")
+    desc = sp.add_mutually_exclusive_group()
+    desc.add_argument("--description", default=None)
+    desc.add_argument("--description-file", default=None,
+                      help="a UTF-8 file holding the description, used as written (one trailing newline "
+                           "dropped)")
     sp.set_defaults(func=cmd_set_org)
 
     sp = sub.add_parser("set-personal-data", help="build-only: who keeps people from seeing personal data, "
@@ -2406,7 +2823,54 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("model-tree", help="browsable area→table→column tree (incl. rejected)")
     sp.add_argument("root")
+    _add_out(sp)
     sp.set_defaults(func=cmd_model_tree)
+
+    sp = sub.add_parser("batch-id", help="print a fresh stamp for the names of one page's scratch files")
+    sp.set_defaults(func=cmd_batch_id)
+
+    sp = sub.add_parser("init-local", help="create <artifacts_dir>/local/ (0700) and its scratch folder, and make .gitignore ignore local/; --sample also writes the sample database's credential")
+    sp.add_argument("artifacts_dir", help="agami's artifacts folder, written out in full")
+    sp.add_argument("--sample", action="store_true",
+                    help="write local/credentials.example for the sample database (never over an existing one)")
+    sp.set_defaults(func=cmd_init_local)
+
+    sp = sub.add_parser("set-config", help="write checked fields into <artifacts_dir>/local/.config (0600), keeping every other key")
+    sp.add_argument("artifacts_dir", help="agami's artifacts folder, written out in full")
+    sp.add_argument("--tier", default=None, help="cli | duckdb | python")
+    sp.add_argument("--active-profile", default=None, dest="active_profile")
+    sp.add_argument("--python3", default=None, help="the interpreter agami runs, an absolute path")
+    sp.add_argument("--tool", action="append", default=[], metavar="NAME=PATH",
+                    help="a native query tool's absolute path: psql, mysql, snowsql, sqlite3 or duckdb (repeatable)")
+    sp.add_argument("--identity-file", default=None, dest="identity_file",
+                    help='a scratch file holding {"email": ..., "role": ...}, the reviewer as typed')
+    sp.set_defaults(func=cmd_set_config)
+
+    sp = sub.add_parser("progress", help="the build's latest progress line, ready to post, with a bar from its own counts; --wait N returns when the log moves on")
+    sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
+    sp.add_argument("--wait", type=float, default=0.0,
+                    help="wait up to this many seconds for the next line (default 0: answer now); "
+                         "adds `list`, the step list `sm steps` prints")
+    sp.set_defaults(func=cmd_progress)
+
+    sp = sub.add_parser("steps", help="the onboarding step list, status and counts read from disk, as a short list to copy; --mark <id>=<status> records a step first")
+    sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile> (need not exist yet)")
+    sp.add_argument("--full", action="store_true",
+                    help="print every step's id, label, status and count and the timeline path, not the short list")
+    sp.add_argument("--mark", action="append", default=[], metavar="ID=STATUS",
+                    help="mark a step in_progress, done or skipped (repeatable, applied in order)")
+    sp.set_defaults(func=cmd_steps)
+
+    sp = sub.add_parser("summary", help="the onboarding's closing summary as markdown, ready to post: totals, the per-area table, what waits for sign-off, and the 'Set up in …' line")
+    sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
+    sp.add_argument("--json", action="store_true",
+                    help='print {"markdown": <the same text>, "totals": {...}} instead')
+    sp.set_defaults(func=cmd_summary)
+
+    sp = sub.add_parser("overview", help="per-area numbers for an overview card: tables, %% described, metrics/joins (and how many await sign-off), examples")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_overview)
+
 
     sp = sub.add_parser("coverage", help="per-table column-description coverage + enrichment-completeness verdict (ok:false ⇒ columns were skipped)")
     sp.add_argument("root")
@@ -2434,7 +2898,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("set-description", help="write the datasource's one-line description onto datasource.yaml (what list_datasources routes on)")
     sp.add_argument("root")
-    sp.add_argument("--description", required=True, help="one line: what this datasource holds and when to query it")
+    desc = sp.add_mutually_exclusive_group(required=True)
+    desc.add_argument("--description", help="one line: what this datasource holds and when to query it")
+    desc.add_argument("--description-file",
+                      help="a UTF-8 file holding that line, used as written (one trailing newline dropped)")
     sp.set_defaults(func=cmd_set_description)
 
     sp = sub.add_parser("set-fiscal-year", help="record the month the fiscal year starts in, as the person answered it")
@@ -2521,9 +2988,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--area", action="append", default=None,
                     help="subject area (repeatable); omit for every area in the model. "
                          "Several or none print one combined result: per-area entries plus totals")
-    sp.add_argument("--question", required=True, action="append",
-                    help="exact question text of an example to reject (repeatable for several); "
-                         "across several areas name it <area>/<question> unless only one area has it")
+    questions = sp.add_mutually_exclusive_group(required=True)
+    questions.add_argument("--question", action="append",
+                           help="exact question text of an example to reject (repeatable for several); "
+                                "across several areas name it <area>/<question> unless only one area has it")
+    questions.add_argument("--question-file",
+                           help="a UTF-8 file with one such question per line, each used as written")
     sp.add_argument("--signer", default=None, help="who rejected it (recorded in the curation log)")
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_remove_example_areas)
@@ -2574,6 +3044,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--all", action="store_true",
                     help="the review page's list: every item, uncapped and without cards, the build's own "
                          "guesses to confirm, and a few sample values of each unclear column")
+    _add_out(sp)
     sp.set_defaults(func=cmd_open_questions)
 
     sp = sub.add_parser("suggest-units", help="list numeric money columns (for currency-unit stamping) via the tested name matcher")
@@ -2606,6 +3077,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "Several or none print one combined result: per-area entries plus totals")
     sp.add_argument("--profile", required=True, help="credentials profile (for live-DB execution)")
     sp.add_argument("--preview", type=int, default=10, help="max result rows per seed in the dashboard preview (default 10)")
+    _add_out(sp)
     sp.set_defaults(func=cmd_seed_validate_areas)
 
     sp = sub.add_parser("introspect", help="introspect a live DB into the semantic model")
@@ -2637,6 +3109,17 @@ def build_parser() -> argparse.ArgumentParser:
                     help="this call's place in a batched build, as n/total (e.g. 3/5): written as the "
                          "progress log's first line, for the progress page")
     sp.set_defaults(func=cmd_introspect)
+
+    sp = sub.add_parser("dictionary-joins",
+                        help="offer the joins the applied data dictionary states (FK -> table.column) as "
+                             "join candidates, each checked once on the data; --unjoined lists those "
+                             "with no join yet, without reading the database")
+    sp.add_argument("root")
+    sp.add_argument("--profile", default=None)
+    sp.add_argument("--db-type", default=None, dest="db_type")
+    sp.add_argument("--unjoined", action="store_true",
+                    help="only list the columns the dictionary calls references that no join reads from")
+    sp.set_defaults(func=cmd_dictionary_joins)
 
     sp = sub.add_parser("enrich-metadata",
                         help="enrich columns from the DB's own metadata/lookup tables "
@@ -2671,6 +3154,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "database keeps one (never a count) — for the table picker page")
     sp.set_defaults(func=cmd_discover)
 
+    _no_abbreviations(p)
     return p
 
 
@@ -2728,12 +3212,49 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
     return args
 
 
+# Every option that names a file a verb reads, and every one that names a file or folder it writes
+# besides the model it is given. Under the scratch-only guard each must be a scratch file (or, out,
+# a model's datasource.md): the readers check again as they open, these catch the rest up front.
+_NAMED_INPUTS = ("ops", "ops_file", "file", "tables_file", "sql_file", "plan", "csv_file",
+                 "name_file", "description_file", "question_file", "spec", "items", "identity_file")
+_NAMED_OUTPUTS = ("out", "out_file", "inventory_out", "progress")
+
+
+def _scratch_only_refusal(args) -> Optional[str]:
+    """Under `AGAMI_SCRATCH_ONLY=1`, why the call names a file it may not, else None."""
+    from . import scratch
+    if not scratch.guarded():
+        return None
+    try:
+        for attr in _NAMED_INPUTS + _NAMED_OUTPUTS:
+            value = getattr(args, attr, None)
+            for v in value if isinstance(value, list) else [value]:
+                if isinstance(v, str) and v:
+                    if attr in _NAMED_OUTPUTS:
+                        scratch.check_out(v)
+                    else:
+                        scratch.check_input(v)
+    except scratch.NotScratch as exc:
+        return str(exc)
+    return None
+
+
 def main(argv=None) -> int:
     _utf8_stdio()
     _enter_caller_cwd()
     args = _parse_args(argv)
+    refused = _scratch_only_refusal(args)
+    if refused:
+        _print_json({"error": refused})
+        return 2
     try:
+        if getattr(args, "out_file", None):
+            return _run_to_out(args)
         return args.func(args)
+    except L.OutsideModel as e:
+        # The path as the model wrote it, never what is in the file.
+        _print_json({"error": "outside_model", "detail": str(e)})
+        return 1
     except FileNotFoundError as e:
         # No model at this root yet. This is an expected, clean signal (not a crash):
         # callers fold the "does a model exist?" check into their first real command

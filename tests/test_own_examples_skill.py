@@ -58,7 +58,7 @@ def test_every_input_goes_through_the_packaged_readers_and_checks():
         "reconcile.py intake",
         "reconcile.py own-examples",
         "parse_reconcile_report.py",
-        'sm" add-example "$ROOT" --area <area> --file "<examples_files[area]>"',
+        'sm" add-example "<root>" --area <area> --file "<examples_files[area]>"',
         '--signer "<reviewer_email>" --role "<reviewer_role>"',
         "Phase 1n",
         "Phase 2",

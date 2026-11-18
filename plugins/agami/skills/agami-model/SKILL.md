@@ -52,11 +52,13 @@ Trust-spine semantics — three actions on the same `review_state` field:
 - header `Email`, *"Which email should sign-offs be recorded under? Type it in Other below."*: options **Don't sign anything yet** (nothing is approved; the items stay as they are and you return to the overview card) and **Go back** (ask again the card that led here, with nothing approved). The email is typed in "Other", e.g. `you@example.com`; it is asked for in the question, never offered as an option, because an option like "Type it in Other" gets clicked with nothing typed ([question-cards rule 5](../../shared/question-cards.md#5-free-text-goes-in-other)).
 - header `Role`, *"What is your role?"*: options **Data Lead**, **Engineer**, **Analyst**; "Other" takes any other role (≤ 40 characters).
 
-The identity is typed by the person: **never infer it** from git config, the environment, the credentials, or the Claude login / session email (the host exposes it, but using it produces a silently-wrong audit trail), and don't pre-fill a domain. An email that doesn't match `\S+@\S+\.\S+` is said back and the same card asked again. Merge the two keys into `<artifacts_dir>/local/.config` (keep every other key), then `chmod 600 <artifacts_dir>/local/.config`, so neither this session nor `/agami-connect` asks again. Hide/edit-only sessions never need it.
+The identity is typed by the person: **never infer it** from git config, the environment, the credentials, or the Claude login / session email (the host exposes it, but using it produces a silently-wrong audit trail), and don't pre-fill a domain. An email that doesn't match `\S+@\S+\.\S+` is said back and the same card asked again. Save them so neither this session nor `/agami-connect` asks again: write `{"email": "<email>", "role": "<role>"}`, as typed, to `<artifacts_dir>/local/tmp/agami-identity.json` with the Write tool, then `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-config "<artifacts_dir>" --identity-file "<artifacts_dir>/local/tmp/agami-identity.json"`, which keeps every other key and writes the file 0600. Hide/edit-only sessions never need it.
 
 ---
 
 ## Phase 1: Overview and the card
+
+**If an `sm` call exits 12, agami's library is older than the plugin:** run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install` (the person approves it), then repeat the call. It is not "no model" (exit 3): never send the person to agami-connect for it.
 
 Read the model from the engine; never walk the YAML yourself:
 
@@ -70,7 +72,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"
 - `model-tree` is `{datasource, subject_areas:[{area, description, tables:[{table, review_state, columns:[…]}]}]}`. Per subject area, count its tables, and the hidden ones (`review_state: rejected`) apart.
 - `sensitive` gives `count` (personal-data columns still queryable) and `suspected_count`.
 
-Post the overview, in this order:
+Where the host can draw a visual in the chat, draw the overview card first ([`shared/overview-card.md`](../../shared/overview-card.md): one tile per area from `sm overview`, a click carries on here). Then post the overview, in this order:
 
 1. One sentence on sign-off, from the counts: *"4 metrics, 2 entities and 3 guessed joins need sign-off; 1 of them changed since it was approved."* or *"Nothing needs sign-off."*
 2. A table of the subject areas, `Subject area | Tables | Hidden`, largest first, at most 15 rows, then *"Showing 15 of <A> subject areas; <A−15> more."* when there are more.
@@ -251,7 +253,7 @@ It prints `{data, anomalies, needs_judgment}`:
 - An example the person wants dropped rather than edited → a `{"op": "reject", "kind": "example", "area": "<area>", "question": "<question>"}` op in the same `sm curate` batch (Phase 6), or `sm remove-example "$ROOT" --question "<area>/<question>"` (repeat `--question`; with no `--area` one call covers every area, and a bare question found in more than one area is refused, not rejected everywhere).
 - `data.key_terminology` — the complete glossary object → `sm set-terminology "$ROOT" --file <json> --replace`.
 - `data.datasource_md` — the full datasource.md text (already decoded) → **Write** it to `<artifacts_dir>/<profile>/datasource.md` (overwrite; human narrative only).
-- `data.signer` / `data.role` — on the page path they are always null (the parser drops them) and the signer is the saved `reviewer_email` / `reviewer_role` from `.config`, the identity the page showed. For a block pasted from an older page, it is the curator identity for `--signer`/`--role` (recorded on every op; required on an approve): **persist** it into `<artifacts_dir>/local/.config` (`reviewer_email`/`reviewer_role`; preserve other keys, `chmod 600`) so future sessions don't re-ask; if absent on an approve-bearing batch, fall back to `.config`, then the identity card (Phase 0).
+- `data.signer` / `data.role` — on the page path they are always null (the parser drops them) and the signer is the saved `reviewer_email` / `reviewer_role` from `.config`, the identity the page showed. For a block pasted from an older page, it is the curator identity for `--signer`/`--role` (recorded on every op; required on an approve): **persist** it with `sm set-config "<artifacts_dir>" --identity-file …` as Phase 0 does (`reviewer_email`/`reviewer_role`, other keys kept, 0600) so future sessions don't re-ask; if absent on an approve-bearing batch, fall back to `.config`, then the identity card (Phase 0).
 
 **If `needs_judgment` is set, stop and ask** — `malformed_targets` (a table without its `<area>.` prefix → *"Tables need a subject-area prefix — `sales.STG_LEADS`, not `STG_LEADS`. Did you mean that?"*) or `unparseable_json` (that part of the page's save didn't read; nothing is applied, and **Review on a page** opens a fresh page). Don't apply a partial block.
 
