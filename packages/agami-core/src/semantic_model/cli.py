@@ -2604,6 +2604,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("org-draft", help="print a human-narrative STARTER for datasource.md (prompt only, no facts)")
     sp.add_argument("root")
+    _add_out(sp)
     sp.set_defaults(func=cmd_org_draft)
 
     sp = sub.add_parser("org-context", help="print the full domain context (human narrative + model-derived summary + glossary) for the LLM")
@@ -2932,6 +2933,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--all", action="store_true",
                     help="the review page's list: every item, uncapped and without cards, the build's own "
                          "guesses to confirm, and a few sample values of each unclear column")
+    _add_out(sp)
     sp.set_defaults(func=cmd_open_questions)
 
     sp = sub.add_parser("suggest-units", help="list numeric money columns (for currency-unit stamping) via the tested name matcher")
@@ -2964,6 +2966,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "Several or none print one combined result: per-area entries plus totals")
     sp.add_argument("--profile", required=True, help="credentials profile (for live-DB execution)")
     sp.add_argument("--preview", type=int, default=10, help="max result rows per seed in the dashboard preview (default 10)")
+    _add_out(sp)
     sp.set_defaults(func=cmd_seed_validate_areas)
 
     sp = sub.add_parser("introspect", help="introspect a live DB into the semantic model")

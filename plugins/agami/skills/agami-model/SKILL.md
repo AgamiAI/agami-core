@@ -70,7 +70,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"
 - `model-tree` is `{datasource, subject_areas:[{area, description, tables:[{table, review_state, columns:[…]}]}]}`. Per subject area, count its tables, and the hidden ones (`review_state: rejected`) apart.
 - `sensitive` gives `count` (personal-data columns still queryable) and `suspected_count`.
 
-Post the overview, in this order:
+Where the host can draw a visual in the chat, draw the overview card first ([`shared/overview-card.md`](../../shared/overview-card.md): one tile per area from `sm overview`, a click carries on here). Then post the overview, in this order:
 
 1. One sentence on sign-off, from the counts: *"4 metrics, 2 entities and 3 guessed joins need sign-off; 1 of them changed since it was approved."* or *"Nothing needs sign-off."*
 2. A table of the subject areas, `Subject area | Tables | Hidden`, largest first, at most 15 rows, then *"Showing 15 of <A> subject areas; <A−15> more."* when there are more.

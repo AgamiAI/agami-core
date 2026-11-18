@@ -57,7 +57,9 @@ def test_connect_profiles_with_the_build_profile_not_no_safety():
 
 
 def test_connect_profiles_under_the_resolved_interpreter():
-    # A bare `python` can be a different interpreter from Phase 0a.5's `$PY`, one without the package or driver.
+    # A bare `python` can be a different interpreter from Phase 0a.5's, one without the package or
+    # driver; agami's own `py` launcher runs the resolved one, and its call is pre-approved.
     connect = (REPO / "plugins" / "agami" / "skills" / "agami-connect" / "SKILL.md").read_text(encoding="utf-8")
     commands = [c for c in re.findall(r"`([^`\n]*-m execute_sql[^`\n]*)`", connect) if "--build-profile" in c]
-    assert commands and all(c.startswith('"$PY" -m execute_sql') for c in commands), commands
+    launcher = 'bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -m execute_sql'
+    assert commands and all(c.startswith(launcher) for c in commands), commands

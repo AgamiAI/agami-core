@@ -181,7 +181,9 @@ def test_a_backslash_cannot_undo_an_escaped_pipe(raw, want):
 # --- --out -----------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("argv", [["model-tree"], ["bundle", "--area", "agami-example"]])
+@pytest.mark.parametrize(
+    "argv", [["model-tree"], ["bundle", "--area", "agami-example"], ["org-draft"]]
+)
 def test_out_writes_the_same_bytes_as_stdout(model, tmp_path, capsys, argv):
     verb, *rest = argv
     assert cli.main([verb, str(model), *rest]) == 0
@@ -232,9 +234,9 @@ def test_write_atomically_cleans_up_on_failure(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_the_verbs_the_hook_approves_with_out_take_it():
+def test_the_verbs_whose_output_a_skill_keeps_take_out():
     sub = cli.build_parser()._subparsers._group_actions[0].choices
-    for verb in ("bundle", "model-tree"):
+    for verb in ("bundle", "model-tree", "org-draft", "open-questions"):
         assert "--out" in sub[verb].format_help(), verb
 
 
@@ -297,7 +299,7 @@ def test_no_parser_accepts_an_abbreviated_option():
 
 
 @pytest.mark.parametrize("abbrev", ["--o", "--ou", "--o=x.json", "--ou=x.json"])
-@pytest.mark.parametrize("verb", ["model-tree", "bundle"])
+@pytest.mark.parametrize("verb", ["model-tree", "bundle", "org-draft"])
 def test_the_cli_refuses_an_abbreviated_out(model, tmp_path, capsys, abbrev, verb):
     target = tmp_path / "x.json"
     extra = ["--area", "agami-example"] if verb == "bundle" else []

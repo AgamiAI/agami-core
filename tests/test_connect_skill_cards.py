@@ -246,7 +246,8 @@ def test_password_page_wait_is_bounded_and_checks_for_exit():
 
 def test_password_page_names_how_to_stop_the_helper():
     s = _password_page()
-    assert "TaskStop" in s and "PID" in s
+    # the helper's own pid comes on its first line, for `kill` where TaskStop isn't available
+    assert "TaskStop" in s and "`kill <pid>` with the `pid` from the helper's first line" in s
 
 
 def test_returning_card_reloads_the_schema_instead_of_review():
@@ -340,8 +341,8 @@ def test_4a_default_path_opens_no_explorer_and_waits_for_no_paste():
 
 def test_4a_reads_the_queue_and_the_personal_data_columns_from_the_engine():
     s = _phase_4()
-    assert 'sm" review-items "$ROOT" --scope preseed' in s
-    assert 'sm" sensitive "$ROOT"' in s
+    assert 'sm" review-items "<root>" --scope preseed' in s
+    assert 'sm" sensitive "<root>"' in s
     assert "extra_lines" in s
 
 
@@ -384,7 +385,8 @@ def test_4a_personal_data_card_hides_columns_with_exclude_ops():
 def test_4a_identity_card_asks_once_and_saves_to_config():
     s = _phase_4()
     assert "reviewer_email" in s and "reviewer_role" in s
-    assert "chmod 600" in s
+    # `local/` is created private (0a.1), so the merge needs no chmod of its own
+    assert "`local/` is already private" in s
     assert "first approval" in s.lower()
     assert "never infer" in s.lower()
     assert "you@example.com" in s
@@ -468,7 +470,7 @@ def test_an_other_that_asks_to_stop_goes_to_the_continue_or_pause_card():
 
 def test_review_summary_mentions_guessed_joins_without_a_card():
     s = _phase_4()
-    assert 'review-items "$ROOT" --scope rule2' in s
+    assert 'review-items "<root>" --scope rule2' in s
     assert "joins were guessed from names and data" in s
     assert "Review them any time in agami-model" in s
     assert "not put on a card" in s
@@ -777,7 +779,7 @@ def _section_2g() -> str:
 
 def test_2g_asks_only_checked_questions_from_the_engine():
     s = _section_2g()
-    assert 'sm" open-questions "$ROOT" --profile <profile>' in s
+    assert 'sm" open-questions "<root>" --profile <profile>' in s
     assert "checked on the data" in s and "`dropped`" in s
     # the engine words every question; the skill never writes its own SQL or ops
     assert "never write one by hand" in s
@@ -857,13 +859,13 @@ def test_2g_offers_review_on_a_page_beside_the_cards_recommended_past_8():
 
 def test_2g_page_uses_the_saving_helper_and_its_parser_never_the_file_by_hand():
     page = _2g_page()
-    for step in ('open-questions "$ROOT" --profile <profile> --all', "render_open_questions_page.py",
+    for step in ('open-questions "<root>" --profile <profile> --all', "render_open_questions_page.py",
                  "--save-to-helper --artifacts-dir", "serve_page.py", "--decisions", "run_in_background",
                  "question-cards.md#6a-a-page-that-saves-its-decisions",
                  "**I've saved it** / **Back to the cards**",
                  "parse_open_questions_decisions.py --decisions-file", "--expect-profile <profile>",
-                 '--ops-out', 'curate "$ROOT" --ops-file', '{"status": "expired"}', "Never read it by hand",
-                 "the page and `agami-open-questions-<ts>.json` (it holds sample values)"):
+                 '--ops-out', 'curate "<root>" --ops-file', '{"status": "expired"}', "Never read it by hand",
+                 "the page and `agami-open-questions-<batch>.json` (it holds sample values)"):
         assert step in page, step
 
 
@@ -1040,7 +1042,7 @@ def test_0a_0_asks_the_organisation_and_the_source_system_as_their_own_first_que
     # nothing is written before the folder and the interpreter exist; the fiscal year goes through
     # ACE-182's set-fiscal-year after 1.7 and the currency stays a hint for the units step
     assert "**Hold the answers; write nothing yet.**" in s and "right after 0a.8" in s
-    assert 'sm" set-fiscal-year "$ROOT" --month <n>' in s and "skip 1.4 D's card" in s
+    assert 'sm" set-fiscal-year "<root>" --month <month>' in s and "skip 1.4 D's card" in s
     assert "set-org" not in s.split("**Hold the answers")[1].split("Items 3 to 5")[0].replace("1.4 A", "")
     assert "`$CURRENCY_HINT`, a hint only" in s
     held = _between("### 0a.8 ", "### 0a.9 ")
@@ -1133,7 +1135,7 @@ def test_0a_0_sets_the_personal_data_setting_from_the_source_answer():
 
 
 def test_1_4_d_is_skipped_when_0a_0_gave_the_fiscal_month():
-    d = _between("**D. Fiscal-year card", "`chmod 644`")
+    d = _between("**D. Fiscal-year card", "These are **non-secret model files**")
     assert "`$FISCAL_START_MONTH`" in d
 
 
