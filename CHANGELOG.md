@@ -18,7 +18,8 @@ below corresponds to one such version.
   calls: six read-only model commands (`areas`, `coverage`, `review-queue`, `review-items`,
   `model-tree`, `bundle`) written with plain paths, and agami's own `agami-*` scratch files under
   `<artifacts_dir>/local/tmp/`, plus reads of the plugin's own files. Anything else asks as before, and those six commands no longer
-  install the library themselves: they say to run `sm install` instead.
+  install the library themselves: they stop with an exit code of their own, which the skills turn
+  into the `sm install` step, so a stale library is never mistaken for a missing model.
 - **A live task list for onboarding.** `sm steps <root>` prints the ten onboarding steps as a short
   list to copy into the session's task list, each marked done, in progress or not started, with its
   numbers read from disk (*"Read the tables and joins — 21 tables, 19 joins"*), never typed by hand.

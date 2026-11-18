@@ -91,6 +91,8 @@ The model is the semantic-model tree at `<artifacts_dir>/<profile>/` (`datasourc
 
 **Don't run a separate existence probe either** (no `ls datasource.yaml`, and never probe for the plugin's own scripts — `sm`, `execute_sql.py`, `semantic_model/` always ship with the plugin). That same first `sm areas` call doubles as the check: model present → you get the map; absent → the CLI returns `{"error":"no_model"}` with **exit code 3** → invoke `agami-connect` and stop, unless `AGAMI_PROFILE` names a database with no model ([`shared/file-layout.md`](../../shared/file-layout.md#when-agami_profile-names-a-database-with-no-model)): then say so in one line and stop.
 
+**If an `sm` call exits 12, agami's library is older than the plugin:** run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install` (the person approves it), then repeat the call. It is not "no model" (exit 3): never send the person to agami-connect for it.
+
 Drive everything through the CLI — the `sm` wrapper resolves the interpreter + deps. (These granular steps are CLI operations; on the MCP surface they're folded into the smart `get_datasource_schema`, which advertises the 4 product tools — so don't invoke the steps below as MCP tools.)
 
 ```bash
