@@ -1645,6 +1645,41 @@ def cmd_describe_file(args) -> int:
     return 0 if res.validated else 1
 
 
+def cmd_dictionary_joins(args) -> int:
+    """Turn the references the applied data dictionary states (`FK -> funds.ticker`) into join
+    candidates, each checked once on the data (#694). With `--unjoined`, only list the columns the
+    dictionary calls references that no join reads from yet: no database read."""
+    from . import dialects as D
+    from . import dictionary_joins as DJ
+    from .loader import load_datasource
+
+    root = Path(args.root).expanduser()
+    if not (root / "datasource.yaml").is_file() or not (root / "subject_areas").is_dir():
+        _print_json({"error": f"no semantic model at {root.resolve()} (needs datasource.yaml and subject_areas/)"})
+        return 2
+    org = load_datasource(root)
+    dialect = D.get_dialect(args.db_type) if args.db_type else None
+    sg = INTRO._sqlglot_name(dialect) if dialect else None
+    if args.unjoined:
+        cols = DJ.unjoined(org, sg)
+        _print_json({"unjoined": cols, "unjoined_count": len(cols)})
+        return 0
+    if not (args.profile and dialect):
+        _print_json({"error": "checking the stated joins reads the database: pass --profile and --db-type "
+                              "(or --unjoined to only list them)"})
+        return 2
+    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
+    from . import profile as PF
+    PF.WORKERS = 1 if _may_prompt_to_sign_in(args.profile) else PF.WORKERS
+    found = DJ.find(org, runner, dialect, sg)
+    path = DJ.store(root, found)
+    _print_json({"candidates": found.candidates, "candidate_count": len(found.candidates),
+                 "not_proven": found.notes, "unresolved": found.unresolved,
+                 "already_joined": found.already_joined, "probes": found.probes,
+                 "join_candidates_file": str(path) if path else None})
+    return 0
+
+
 def cmd_format_table(args) -> int:
     """Format a result CSV into a deterministic markdown table — exact numbers, full
     grouping + currency symbols, never abbreviated. The skill (and later the MCP) emits
@@ -3057,6 +3092,17 @@ def build_parser() -> argparse.ArgumentParser:
                     help="this call's place in a batched build, as n/total (e.g. 3/5): written as the "
                          "progress log's first line, for the progress page")
     sp.set_defaults(func=cmd_introspect)
+
+    sp = sub.add_parser("dictionary-joins",
+                        help="offer the joins the applied data dictionary states (FK -> table.column) as "
+                             "join candidates, each checked once on the data; --unjoined lists those "
+                             "with no join yet, without reading the database")
+    sp.add_argument("root")
+    sp.add_argument("--profile", default=None)
+    sp.add_argument("--db-type", default=None, dest="db_type")
+    sp.add_argument("--unjoined", action="store_true",
+                    help="only list the columns the dictionary calls references that no join reads from")
+    sp.set_defaults(func=cmd_dictionary_joins)
 
     sp = sub.add_parser("enrich-metadata",
                         help="enrich columns from the DB's own metadata/lookup tables "

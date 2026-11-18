@@ -14,6 +14,19 @@ below corresponds to one such version.
 
 ### Added
 
+- **Joins the data dictionary states are offered, even past the probe cap** (#694). A dictionary
+  applied to the model that says where a column points (`FK -> funds.ticker`, `FK to
+  funds(ticker)`, "Foreign key referencing funds.ticker", "Foreign key reference to funds" (its
+  one-column key), "references funds.ticker", or "Reference to the fund" when exactly one table
+  holds that entity) now becomes a join candidate: `sm dictionary-joins` checks each stated
+  pair once on the data, outside the join-candidate scan's 300-probe cap, and offers it in
+  `join_candidates.json` with `found_by: dictionary` and the dictionary line as evidence when at
+  least 95% of the column's filled rows find their key and that key never repeats. One that doesn't
+  hold is listed with its numbers, never offered; a name the model doesn't have is never checked. A
+  column offered several matching keys keeps one: the table the dictionary names, else the fullest
+  match. `--unjoined` lists the stated references that still have no join, and the closing summary
+  says how many. Nothing is written to the model.
+
 - **Fewer permission prompts.** A plugin hook approves, with no prompt, only agami's own harmless
   calls: the read-only model commands `areas`, `coverage`, `review-queue`, `review-items`,
   `model-tree`, `bundle`, `steps`, `progress`, `summary`, `overview` and `batch-id`, written with
@@ -69,6 +82,11 @@ below corresponds to one such version.
 
 ### Changed
 
+- **A whole-number column is no longer offered as a join on its values alone** (#694). Sequential
+  ids overlap by accident (one 52-table schema had about 3,400 such pairs), so the join-candidate
+  scan now tests an integer column only when its name points at the other table or key; one the
+  data dictionary calls a reference is checked by `sm dictionary-joins`. Text and UUID columns are
+  tested by type as before.
 - **Every agami-connect command is one literal call, pre-approved one rule per command.** The skill
   and the shared files it links write each command as the launcher and its arguments, every path in
   full: no `$ROOT` or `$PY`, no pipe, `;`, `&&` or redirect (the DuckDB heredocs in

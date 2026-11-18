@@ -102,11 +102,12 @@ TABLES = 6
 
 def _schema() -> str:
     """Per table: `ref` holds ids every table has (borne out against any key), and `miss` holds
-    values no key has, so it is tested against every key and found to be noise."""
+    values no key has, so it is tested against every key and found to be noise. Text, not whole
+    numbers: a whole number is never tested on its type alone (#694)."""
     out = []
     for k in range(1, TABLES + 1):
-        out += [f"CREATE TABLE t{k}(id INTEGER PRIMARY KEY, ref INTEGER, miss INTEGER);",
-                f"INSERT INTO t{k} VALUES (1, 1, 901), (2, 2, 902), (3, 3, 903), (4, 2, 904);"]
+        out += [f"CREATE TABLE t{k}(id TEXT PRIMARY KEY, ref TEXT, miss TEXT);",
+                f"INSERT INTO t{k} VALUES ('1', '1', '901'), ('2', '2', '902'), ('3', '3', '903'), ('4', '2', '904');"]
     return "".join(out)
 
 

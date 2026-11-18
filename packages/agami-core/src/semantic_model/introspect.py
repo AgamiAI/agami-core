@@ -3226,7 +3226,10 @@ def _candidate_pairs(rels: list[Relationship], tables: list[Table], dialect: Opt
             measure = (c.aggregation in ("additive", "averageable") or c.date_format
                        or _looks_time_named(c.name) or _NOT_A_REFERENCE_RE.search(c.name))
             shared = len(t.grain) != 1 and per_name.get(c.name.lower(), 0) > 1
-            columns.append((t, c, measure, bool(c.choice_field or c.primary_key), _own_key(t, c.name), shared))
+            # So does any whole number: sequential ids overlap by accident (one 52-table schema had
+            # about 3,400 such pairs), so an integer needs its name, or the dictionary (#694), to back it.
+            needs_name = bool(c.choice_field or c.primary_key or c.type == "integer")
+            columns.append((t, c, measure, needs_name, _own_key(t, c.name), shared))
     for level in (0, 1, 2):
         for t, c, measure, needs_name, own, shared in columns:
             for u, k, kc in keys:

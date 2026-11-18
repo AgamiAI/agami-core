@@ -33,15 +33,17 @@ BATCHES = 6
 def _schema(declared: bool = False) -> str:
     """Per batch k: `a{k}` (a parent), and `b{k}` whose `a{k}_id` names its parent (a probed join, or
     a declared foreign key), whose `ref` holds ids every table has (a type-only join candidate), and
-    whose `alt_ref` matches nothing (a pair tested and found to be noise, which nothing stores)."""
+    whose `alt_ref` matches nothing (a pair tested and found to be noise, which nothing stores). Text,
+    not whole numbers: a whole number is never tested on its type alone (#694)."""
     out = []
     for k in range(1, BATCHES + 1):
         fk = f" REFERENCES a{k}(id)" if declared else ""
         out += [
-            f"CREATE TABLE a{k}(id INTEGER PRIMARY KEY, label TEXT);",
-            f"CREATE TABLE b{k}(id INTEGER PRIMARY KEY, a{k}_id INTEGER{fk}, ref INTEGER, alt_ref INTEGER);",
-            f"INSERT INTO a{k} VALUES (1, 'x'), (2, 'y'), (3, 'z');",
-            f"INSERT INTO b{k} VALUES (1, 1, 1, 901), (2, 2, 2, 902), (3, 3, 3, 903), (4, 1, 2, 904);",
+            f"CREATE TABLE a{k}(id TEXT PRIMARY KEY, weight REAL);",
+            f"CREATE TABLE b{k}(id TEXT PRIMARY KEY, a{k}_id TEXT{fk}, ref TEXT, alt_ref TEXT);",
+            f"INSERT INTO a{k} VALUES ('1', 0.5), ('2', 1.5), ('3', 2.5);",
+            f"INSERT INTO b{k} VALUES ('1', '1', '1', '901'), ('2', '2', '2', '902'), ('3', '3', '3', '903'),"
+            " ('4', '1', '2', '904');",
         ]
     return "".join(out)
 
@@ -393,14 +395,14 @@ def test_a_shared_record_id_is_not_paired_between_unrelated_tables():
 def test_an_earlier_column_is_tested_against_a_key_that_arrives_later(tmp_path):
     db = _db(
         tmp_path,
-        "CREATE TABLE p(id INTEGER PRIMARY KEY, label TEXT);"
-        "CREATE TABLE q(id INTEGER PRIMARY KEY, far_ref INTEGER);"
-        "CREATE TABLE s(id INTEGER PRIMARY KEY, label TEXT);"
-        "CREATE TABLE r(id INTEGER PRIMARY KEY, label TEXT);"
-        "INSERT INTO p VALUES (1, 'x'), (2, 'y');"
-        "INSERT INTO q VALUES (1, 701), (2, 702), (3, 703);"
-        "INSERT INTO s VALUES (1, 'x');"
-        "INSERT INTO r VALUES (701, 'a'), (702, 'b'), (703, 'c');",
+        "CREATE TABLE p(id TEXT PRIMARY KEY, label TEXT);"
+        "CREATE TABLE q(id TEXT PRIMARY KEY, far_ref TEXT);"
+        "CREATE TABLE s(id TEXT PRIMARY KEY, label TEXT);"
+        "CREATE TABLE r(id TEXT PRIMARY KEY, label TEXT);"
+        "INSERT INTO p VALUES ('1', 'x'), ('2', 'y');"
+        "INSERT INTO q VALUES ('1', '701'), ('2', '702'), ('3', '703');"
+        "INSERT INTO s VALUES ('1', 'x');"
+        "INSERT INTO r VALUES ('701', 'a'), ('702', 'b'), ('703', 'c');",
     )
     out = tmp_path / "demo"
     for k, batch in enumerate((["main.p", "main.q"], ["main.s"], ["main.r"])):

@@ -332,7 +332,7 @@ def test_candidate_pairs_come_lazily_in_a_fixed_priority_order():
     import inspect
     import itertools
     tables = [_t(f"t{i}", [_ID, {"name": f"t{(i + 1) % 6}_id", "type": "integer"},
-                           {"name": "ref", "type": "integer"}, {"name": "tag", "type": "string"}],
+                           {"name": "ref", "type": "string"}, {"name": "tag", "type": "string"}],
                  grain=["id"], unique_keys=[["tag"]]) for i in range(6)]
     gen = I._candidate_pairs([], tables, None)
     assert inspect.isgenerator(gen)

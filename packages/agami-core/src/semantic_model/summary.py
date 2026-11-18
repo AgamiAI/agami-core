@@ -48,6 +48,21 @@ def _signoff_line(counts: dict[str, int]) -> Optional[str]:
     return f"{head} waiting for sign-off: {', '.join(parts)}."
 
 
+def _unjoined_line(org) -> Optional[str]:
+    """The columns the customer's data dictionary says point at another table that no join reads
+    from yet (#694): a join the model is missing by the customer's own account."""
+    from .dictionary_joins import unjoined
+
+    cols = unjoined(org)
+    if not cols:
+        return None
+    names = ", ".join(plain(f"{display_name(c['table'])} {c['column']}") for c in cols[:3])
+    more = f" and {len(cols) - 3} more" if len(cols) > 3 else ""
+    head = ("1 column the data dictionary calls a reference has" if len(cols) == 1
+            else f"{len(cols)} columns the data dictionary calls references have")
+    return f"{head} no join yet ({names}{more}). Add them in /agami-model."
+
+
 def onboarding_summary(root: Path) -> dict[str, Any]:
     """`{"markdown": <the summary>, "totals": <sm overview's totals>}` for the model at `root`."""
     root = Path(root).expanduser()
@@ -66,6 +81,9 @@ def onboarding_summary(root: Path) -> dict[str, Any]:
         table.append(_row("**Total**", totals))
     blocks.append("\n".join(table))
     line = _signoff_line(curate.model_signoff_counts(root))
+    if line:
+        blocks.append(line)
+    line = _unjoined_line(org)
     if line:
         blocks.append(line)
     took = timing.onboarding_timing(root)["text"]

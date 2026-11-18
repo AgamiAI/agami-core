@@ -39,10 +39,11 @@ CAP = 6
 
 def _ddl() -> str:
     # `ref` holds ids every table has; `miss` holds values no key has, so it is tested against every key.
+    # Text, not whole numbers: a whole number is never tested on its type alone (#694).
     out = [f"CREATE SCHEMA {SCHEMA};"]
     for t in TABLES:
-        out += [f'CREATE TABLE {SCHEMA}."{t}" ("{t}Id" int PRIMARY KEY, ref int, miss int);',
-                f'INSERT INTO {SCHEMA}."{t}" SELECT g, g, 900 + g FROM generate_series(1, 4) g;']
+        out += [f'CREATE TABLE {SCHEMA}."{t}" ("{t}Id" text PRIMARY KEY, ref text, miss text);',
+                f'INSERT INTO {SCHEMA}."{t}" SELECT g::text, g::text, (900 + g)::text FROM generate_series(1, 4) g;']
     return "".join(out)
 
 
