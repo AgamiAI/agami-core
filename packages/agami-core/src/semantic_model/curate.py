@@ -481,10 +481,13 @@ def signoff_counts(org: Datasource, since: Optional[float] = None) -> dict[str, 
                 out[kinds[kind]] += 1
                 out["waiting"] += 1
             elif tab == "manual":
+                # Only an approval is a sign-off: `not_applicable` is a person's answer, not a signature.
+                if getattr(obj, "review_state", None) != "approved":
+                    continue
                 at = _signed_at(obj)
-                # An approval with no time (an approve op the caller did not stamp) is not dated before
-                # the run, so it stays the person's.
-                out["signed" if since is None or at is None or at >= since else "earlier"] += 1
+                # Given the run's start, an approval counts as this run's only when it is dated at or
+                # after it: one with no time can't be shown to be, so it is not claimed as signed.
+                out["signed" if since is None or (at is not None and at >= since) else "earlier"] += 1
             elif tab == "auto" and getattr(obj, "review_state", None) == "approved":
                 out["by_agami"] += 1
     rels = [r for sa in org.subject_areas for r in sa.relationships]

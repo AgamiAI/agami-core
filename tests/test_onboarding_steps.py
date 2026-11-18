@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -151,7 +152,8 @@ def test_only_a_sign_off_the_person_made_in_this_run_counts_as_signed(model):
     steps.mark(model, "signoff", "in_progress")
     res = curate.apply(
         model,
-        [{"op": "approve", "kind": "metric", "area": "agami-example", "name": doc["name"]}],
+        [{"op": "approve", "kind": "metric", "area": "agami-example", "name": doc["name"],
+          "at": datetime.now(timezone.utc).isoformat()}],
         signer="you@example.com",
         role="data_lead",
     )
