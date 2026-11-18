@@ -145,13 +145,16 @@ def test_profile_resolution_order(tmp_path, monkeypatch):
     assert data2["profile_source"] == "active_profile"
 
 
-def _fake_candidates(monkeypatch, paths, *, deps_for, driver_for, no_pip=(), lib=None, plugin="0.9.18"):
+def _fake_candidates(monkeypatch, paths, *, deps_for, driver_for, no_pip=(), lib=None, plugin="0.9.18",
+                     no_core=()):
     """Wire _resolve_interpreter's probe seams to fake interpreters, so the
     scoring/tie-break runs on controlled inputs (the real host Python set can't
     exercise the fix — every interpreter there happens to be fully equipped).
     `no_pip` lists interpreters without pip; `lib` maps one to its agami-core version
     (the rest carry the plugin's own version)."""
     monkeypatch.setattr(CR, "_candidate_interpreters", lambda: list(paths))
+    # the scoring itself, not the launchers' selection (tests/test_plugin_version_check.py runs that)
+    monkeypatch.setattr(CR, "_launcher_python", lambda: None)
     monkeypatch.setattr(CR, "plugin_version", lambda: plugin)
     lib = lib or {}
     monkeypatch.setattr(CR, "_probe_install", lambda py: {
@@ -161,6 +164,8 @@ def _fake_candidates(monkeypatch, paths, *, deps_for, driver_for, no_pip=(), lib
         mods = [m for m in mods if m]
         if not mods:
             return True
+        if mods == list(CR._CORE_MODULES):  # the agami-core import probe; `no_core` lack it
+            return py not in no_core
         # the model-deps probe asks for _MODEL_DEPS; anything else is the driver probe
         is_deps_probe = set(mods) == set(CR._MODEL_DEPS)
         return (py in deps_for) if is_deps_probe else (py in driver_for)
@@ -203,6 +208,7 @@ def test_duckdb_driver_requires_pytz(monkeypatch):
     have = {no_pytz: {"pydantic", "sqlglot", "yaml", "duckdb"},
             full: {"pydantic", "sqlglot", "yaml", "duckdb", "pytz"}}
     monkeypatch.setattr(CR, "_candidate_interpreters", lambda: [no_pytz, full])
+    monkeypatch.setattr(CR, "_launcher_python", lambda: None)
     # content-aware probe: an interpreter passes only if it has EVERY requested module
     monkeypatch.setattr(CR, "_probe",
                         lambda py, mods: all(m in have.get(py, set()) for m in mods if m))
@@ -373,3 +379,150 @@ def test_no_model_anomaly_only_for_an_env_profile_without_a_model(tmp_path, monk
             CR.main(["--profile", "main"])
         anomalies = json.loads(buf.getvalue())["anomalies"]
     assert _no_model_anomalies(anomalies) == []
+
+
+def test_artifacts_dir_source_names_where_the_folder_came_from(tmp_path, monkeypatch):
+    # 0a.6 asks for a folder only on `default`, so the skill never reads the pointer file itself.
+    data, _ = _run(monkeypatch, tmp_path)
+    assert data["artifacts_dir_source"] == "env"
+    pointer = tmp_path / "home" / ".config" / "agami" / "path"
+    monkeypatch.delenv("AGAMI_ARTIFACTS_DIR")
+    monkeypatch.setattr(CR.agami_paths, "POINTER_PATH", pointer)
+    assert CR.artifacts_dir_source() == "default"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text("  \n", encoding="utf-8")
+    assert CR.artifacts_dir_source() == "default"  # an empty pointer is no pointer
+    pointer.write_text(str(tmp_path / "art") + "\n", encoding="utf-8")
+    assert CR.artifacts_dir_source() == "pointer"
+
+
+@pytest.mark.parametrize("content, state", [(None, "missing"), ("local/\n", "has_local"),
+                                            ("*.tmp\n/local\n", "has_local"), ("*.tmp\n", "lacks_local"),
+                                            ("localish/\n", "lacks_local")])
+def test_gitignore_state_says_what_to_do_without_a_read_of_a_missing_file(tmp_path, monkeypatch, content, state):
+    # A live run's Read of `<artifacts_dir>/.gitignore` before it existed showed as a failed step; the
+    # resolver now says whether it is there and already ignores `local/`.
+    if content is not None:
+        (tmp_path / ".gitignore").write_text(content)
+    data, _ = _run(monkeypatch, tmp_path)
+    assert data["gitignore"] == state
+
+
+# #692: $AGAMI_PYTHON is the person's own choice. The resolver used to pass over it for the first
+# fully equipped candidate, which carried an older agami-core, and said only that the chosen one was
+# out of date. `sm` never passes over it, so the two disagreed about which Python was in use.
+
+
+def test_agami_python_lacking_the_model_extra_is_used_and_named_never_passed_over(monkeypatch):
+    pinned, older = "/fake/build-venv/bin/python", "/fake/usr/python3"
+    monkeypatch.setenv("AGAMI_PYTHON", pinned)
+    _fake_candidates(monkeypatch, [pinned, older], deps_for={older}, driver_for={older},
+                     no_pip={pinned}, lib={older: "0.9.11"})
+    res = CR._resolve_interpreter("sqlite", configured=older)
+    assert res["python3"] == pinned and res["has_model_deps"] is False
+    assert [c["python3"] for c in res["candidates_scored"]] == [pinned]
+    assert "$AGAMI_PYTHON" in res["chosen_because"]
+    (lacks,) = [w for w in res["warnings"] if w["kind"] == "agami_python_lacks"]
+    assert lacks["where"] == pinned
+    assert "agami-core 0.9.18 without its [model] extra (pydantic, sqlglot, pyyaml)" in lacks["detail"]
+    assert "no pip" in lacks["detail"] and "ensurepip" in lacks["detail"]
+    assert f'"{pinned}" -m pip install "agami-core[model]==0.9.18"' in lacks["detail"]
+    assert all(w["kind"] != "library_older_than_plugin" for w in res["warnings"])
+
+
+def test_agami_python_lacking_the_driver_names_the_driver_and_its_install_line(monkeypatch):
+    pinned, other = "/fake/pinned/python3", "/fake/usr/python3"
+    monkeypatch.setenv("AGAMI_PYTHON", pinned)
+    _fake_candidates(monkeypatch, [pinned, other], deps_for={pinned, other}, driver_for={other})
+    res = CR._resolve_interpreter("postgres", configured=None)
+    assert res["python3"] == pinned and res["has_driver"] is False
+    (lacks,) = [w for w in res["warnings"] if w["kind"] == "agami_python_lacks"]
+    assert "postgres driver (psycopg2)" in lacks["detail"] and "[model]" not in lacks["detail"]
+    assert f'"{pinned}" -m pip install psycopg2-binary' in lacks["detail"]
+    assert "no pip" not in lacks["detail"]
+
+
+def test_agami_python_with_the_deps_but_no_agami_core_is_named_with_the_install_line(monkeypatch):
+    # #698: the deps import, so has_model_deps is true, yet `sm` has nothing to run. Read from an
+    # import of semantic_model.cli, not from distribution metadata (which can say nothing either way).
+    pinned = "/fake/deps-only/bin/python"
+    monkeypatch.setenv("AGAMI_PYTHON", pinned)
+    _fake_candidates(monkeypatch, [pinned], deps_for={pinned}, driver_for=set(), no_core={pinned},
+                     lib={pinned: None})
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["has_model_deps"] is True
+    (lacks,) = [w for w in res["warnings"] if w["kind"] == "agami_python_lacks"]
+    assert lacks["where"] == pinned and "no agami-core" in lacks["detail"]
+    assert f'"{pinned}" -m pip install "agami-core[model]==0.9.18"' in lacks["detail"]
+
+
+def test_agami_python_with_everything_carries_no_lacks_anomaly(monkeypatch):
+    pinned, other = "/fake/pinned/python3", "/fake/usr/python3"
+    monkeypatch.setenv("AGAMI_PYTHON", pinned)
+    _fake_candidates(monkeypatch, [pinned, other], deps_for={pinned, other}, driver_for=set())
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["python3"] == pinned and res["warnings"] == []
+
+
+def test_agami_python_lacks_reaches_the_anomalies(tmp_path, monkeypatch, capsys):
+    pinned = "/fake/build-venv/bin/python"
+    _fake_candidates(monkeypatch, [pinned], deps_for=set(), driver_for=set(), lib={pinned: None})
+    data, anomalies = _run(monkeypatch, tmp_path, AGAMI_PYTHON=pinned)
+    assert data["interpreter"]["python3"] == pinned
+    (lacks,) = [a for a in anomalies if a["kind"] == "agami_python_lacks"]
+    assert "no agami-core" in lacks["detail"]
+    assert f"agami: $AGAMI_PYTHON is {pinned}" in capsys.readouterr().err
+
+
+# #698 review: on a fresh UNPINNED install whose first Python has pydantic/sqlglot/yaml but no agami-core,
+# has_model_deps was true and nothing else was said, so onboarding skipped the install question and the
+# no-install setup verbs (choose-folder, init-local, set-config) exited 12. Readiness is reported for the
+# selected Python whether or not it is pinned: the deps, `semantic_model.cli`, and a current version.
+
+
+def _not_dev_layout(monkeypatch):
+    monkeypatch.setattr(CR, "_dev_layout", lambda: False)
+
+
+def test_unpinned_python_with_the_deps_but_no_agami_core_is_not_ready(monkeypatch):
+    py = "/fake/deps-only/bin/python3"
+    _not_dev_layout(monkeypatch)
+    _fake_candidates(monkeypatch, [py], deps_for={py}, driver_for=set(), no_core={py}, lib={py: None})
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["python3"] == py and res["has_model_deps"] is True
+    assert res["has_core"] is False and res["core_ready"] is False
+
+
+def test_unpinned_python_with_a_current_agami_core_is_ready(monkeypatch):
+    py = "/fake/full/bin/python3"
+    _not_dev_layout(monkeypatch)
+    _fake_candidates(monkeypatch, [py], deps_for={py}, driver_for=set())
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["has_core"] is True and res["core_ready"] is True
+
+
+def test_unpinned_python_with_an_older_agami_core_is_not_ready(monkeypatch):
+    py = "/fake/older/bin/python3"
+    _not_dev_layout(monkeypatch)
+    _fake_candidates(monkeypatch, [py], deps_for={py}, driver_for=set(), lib={py: "0.9.11"})
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["has_core"] is True and res["core_ready"] is False
+
+
+def test_in_a_dev_checkout_only_this_checkouts_library_is_ready(monkeypatch):
+    # `sm` reinstalls from the checkout when the importable library is any other build, so a released
+    # agami-core of the same version is not ready there either.
+    py = "/fake/released/bin/python3"
+    monkeypatch.setattr(CR, "_dev_layout", lambda: True)
+    _fake_candidates(monkeypatch, [py], deps_for={py}, driver_for=set())
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["has_core"] is True and res["core_ready"] is False
+
+
+def test_pinned_python_reports_readiness_too(monkeypatch):
+    pinned = "/fake/pinned/bin/python3"
+    monkeypatch.setenv("AGAMI_PYTHON", pinned)
+    _not_dev_layout(monkeypatch)
+    _fake_candidates(monkeypatch, [pinned], deps_for=set(), driver_for=set(), lib={pinned: None})
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["has_core"] is False and res["core_ready"] is False

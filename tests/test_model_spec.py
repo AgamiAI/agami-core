@@ -1251,3 +1251,50 @@ def test_a_join_to_a_key_from_a_non_key_stays_many_to_one(tmp_path):
 
 def test_a_stated_cardinality_is_kept(tmp_path):
     assert _date_join_cardinality(tmp_path, from_grain=True, stated="many_to_one") == "many_to_one"
+
+
+# #698 review: the workbook wrote its allowlist under local/model-spec/<profile>/, and the guarded
+# `sm introspect --tables-file` reads only an `agami-*` file directly in local/tmp, so the documented
+# flow was refused before introspection began. The skill's own command line is what is checked here.
+
+
+def _documented_tables_out(art: Path, profile: str) -> str:
+    skill = REPO_ROOT / "plugins" / "agami" / "skills" / "agami-connect" / "SKILL.md"
+    (line,) = [
+        ln
+        for ln in skill.read_text(encoding="utf-8").splitlines()
+        if "model_spec_workbook.py parse" in ln
+    ]
+    path = line.split('--tables-out "', 1)[1].split('"', 1)[0]
+    return path.replace("<artifacts_dir>", str(art)).replace("<profile>", profile)
+
+
+def test_the_workbooks_allowlist_is_one_guarded_introspect_accepts(tmp_path, monkeypatch):
+    from semantic_model import scratch
+
+    mw = _workbook_module()
+    art = tmp_path / "art"
+    (art / "local" / "tmp").mkdir(parents=True)
+    (art / "local" / "model-spec" / "acme").mkdir(parents=True)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    monkeypatch.setenv("AGAMI_SCRATCH_ONLY", "1")
+    tables = _documented_tables_out(art, "acme")
+    out = str(art / "local" / "model-spec" / "acme" / "spec.json")
+    args = ["parse", "--file", _filled_template(tmp_path), "--out", out, "--tables-out", tables]
+    assert mw.main(args) == 0
+    text = scratch.read_scratch(tables, scratch.TEXT_CAP).decode("utf-8")
+    assert text.splitlines()[0] == "sales_data.sales_f"
+
+
+def test_the_workbook_refuses_an_allowlist_introspect_would_refuse(tmp_path, monkeypatch):
+    mw = _workbook_module()
+    art = tmp_path / "art"
+    (art / "local" / "tmp").mkdir(parents=True)
+    (art / "local" / "model-spec" / "acme").mkdir(parents=True)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    monkeypatch.setenv("AGAMI_SCRATCH_ONLY", "1")
+    old = str(art / "local" / "model-spec" / "acme" / "spec-tables.txt")
+    out = str(art / "local" / "model-spec" / "acme" / "spec.json")
+    args = ["parse", "--file", _filled_template(tmp_path), "--out", out, "--tables-out", old]
+    assert mw.main(args) != 0
+    assert not Path(old).exists() and not Path(out).exists()

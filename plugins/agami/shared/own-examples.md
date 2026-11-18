@@ -1,6 +1,8 @@
 # Adding your own examples
 
 > `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md).
+>
+> `<root>` is the database's model folder, `<artifacts_dir>/<profile>`, written out in full.
 
 One procedure, reached three ways: **Add my own** on `agami-connect`'s examples card (Phase 6), "add an
 example" / "add my own examples" in `/agami-model`, and the same words in `/agami-reconcile`. Each
@@ -57,7 +59,7 @@ Before the intake card, besides reconcile's table of rows:
 ## 4. Sort what came back
 
 ```bash
-bash "<plugin_root>/scripts/py" reconcile.py own-examples --run-dir "<artifacts_dir>/local/reconcile/<ts>" --root "$ROOT"
+bash "<plugin_root>/scripts/py" reconcile.py own-examples --run-dir "<artifacts_dir>/local/reconcile/<ts>" --root "<root>"
 ```
 
 It reads the run's report items and puts every row in one list, and writes the plan beside the run as `own-examples.json`. Nothing here is re-judged: the lists follow from each row's status and fix.
@@ -117,7 +119,7 @@ A candidate holds two readings, the person's first and one other: the semantic m
    ```bash
    bash "<plugin_root>/scripts/py" parse_reconcile_report.py --block-file "<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.txt" \
      --run-dir "<artifacts_dir>/local/reconcile/<ts>" > "<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.json"
-   bash "<plugin_root>/scripts/py" reconcile.py own-examples --run-dir "<artifacts_dir>/local/reconcile/<ts>" --root "$ROOT" \
+   bash "<plugin_root>/scripts/py" reconcile.py own-examples --run-dir "<artifacts_dir>/local/reconcile/<ts>" --root "<root>" \
      --decisions "<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.json" \
      [--area <row>=<area> ...] [--replace <row> ...]
    ```
@@ -125,7 +127,7 @@ A candidate holds two readings, the person's first and one other: the semantic m
    A parser answer that is not `ok` is refused by `own-examples` (exit `2`): say what its `needs_judgment` names in one line and ask that card again.
 3. **Write the examples, signed.** The sign-off identity comes from `reviewer_email` and `reviewer_role` in `<artifacts_dir>/local/.config`; when either is missing, the identity card from `agami-connect` Phase 4 first. Then, for each subject area in `examples_files`:
    ```bash
-   bash "<plugin_root>/scripts/sm" add-example "$ROOT" --area <area> --file "<examples_files[area]>" \
+   bash "<plugin_root>/scripts/sm" add-example "<root>" --area <area> --file "<examples_files[area]>" \
      --signer "<reviewer_email>" --role "<reviewer_role>"
    ```
    The file is written by `own-examples`, never by hand, so the SQL saved is the SQL that was checked, and only for rows with an area and no unanswered clash. **Don't sign anything yet** on the identity card writes nothing.

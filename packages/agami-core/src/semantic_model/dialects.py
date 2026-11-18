@@ -98,6 +98,10 @@ _RESERVED_WORDS = frozenset({
 _PLAIN_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+class MissingName(ValueError):
+    """A catalog read was handed no name where a schema or table belongs (#693)."""
+
+
 def _esc(s: str) -> str:
     """Escape a string literal for embedding in SQL (single-quote doubling)."""
     return s.replace("'", "''")
@@ -126,6 +130,9 @@ class Dialect:
     # True where the day difference counts calendar-day boundaries, so an end a few hours before
     # its start on the same day still gives 0 and the guard must compare the values themselves.
     duration_rounds: bool = False
+    # False where the catalog reads take a table alone (SQLite); everywhere else a table read with no
+    # schema would put None into the statement, so a bare table name is resolved to its schema first.
+    needs_schema: bool = True
 
     # --- identifier / literal helpers ---
 
@@ -150,6 +157,11 @@ class Dialect:
         return name.lower() in _RESERVED_WORDS or name.lower() in self.reserved_extra
 
     def quote_lit(self, s: str) -> str:
+        if s is None:
+            # Reached only through a catalog read whose table has no schema: say so, not
+            # "'NoneType' object has no attribute 'replace'" from three frames down (#693).
+            raise MissingName("a catalog read was given no name where a schema or table belongs "
+                              "(a table with no schema?); name each table as schema.table")
         if self.backslash_escapes:
             s = s.replace("\\", "\\\\")
         return "'" + _esc(s) + "'"
@@ -1234,6 +1246,7 @@ class BigQuery(Dialect):
 
 class SQLite(Dialect):
     name = "SQLite"
+    needs_schema = False
     reserved_extra = frozenset({
         "abort", "action", "add", "after", "alter", "always", "analyze", "attach", "autoincrement",
         "before", "begin", "cascade", "collate", "commit", "conflict", "current", "database",

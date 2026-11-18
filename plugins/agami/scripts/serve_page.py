@@ -46,6 +46,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import _scratch_out  # noqa: E402
+
 HOST = "127.0.0.1"
 # The page itself is always served; beside it, only the kinds of file a report page loads.
 _ALLOWED_SUFFIXES = {".html", ".css", ".js", ".svg", ".png", ".jpg", ".json"}
@@ -343,6 +347,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Take one post of decisions from the page and write it to this file, then exit.",
     )
     args = p.parse_args(argv)
+    if _scratch_out.guarded():
+        # Pre-approved: serve only one of agami's scratch pages (and so only the scratch folder
+        # beside it), and write the decisions only to a scratch file.
+        try:
+            _scratch_out.scratch_file(args.page, _scratch_out.PAGE)
+            if args.decisions:
+                _scratch_out.scratch_file(args.decisions, ("json",))
+        except _scratch_out.Refused as e:
+            return _scratch_out.refuse("serve_page.py", e)
     page = Path(args.page).expanduser().resolve()
     if not page.is_file():
         sys.stderr.write(f"serve_page: no such file: {page}\n")

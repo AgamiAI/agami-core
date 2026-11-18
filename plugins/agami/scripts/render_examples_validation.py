@@ -28,6 +28,7 @@ import re
 import sys
 from pathlib import Path
 
+import _scratch_out
 from _read_only_view import make_read_only, make_saving, saved_signoff
 
 SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
@@ -117,11 +118,14 @@ def render(
     return out
 
 
-def _read_items(path: str) -> tuple[object, list]:
+def _read_items(path: str, read=None) -> tuple[object, list]:
     """A file's parsed JSON and its items: a bare array (one area's `sm seed-validate`) or the
     combined `{areas, items, totals}` object it prints for several areas."""
-    with open(os.path.expanduser(path), encoding="utf-8") as f:
-        doc = json.load(f)
+    if read is not None:  # the scratch-only guard's link-safe reader
+        doc = json.loads(read(path))
+    else:
+        with open(os.path.expanduser(path), encoding="utf-8") as f:
+            doc = json.load(f)
     items = doc.get("items") if isinstance(doc, dict) else doc
     if not isinstance(items, list):
         raise ValueError(f"{path}: must hold a JSON array of items or an object with an "
@@ -138,7 +142,7 @@ def _split_label(arg: str) -> tuple[str | None, str]:
     return None, arg
 
 
-def _read_files(args: list[str]) -> list[tuple[str, object, list]]:
+def _read_files(args: list[str], read=None) -> list[tuple[str, object, list]]:
     """Each `--items-file` as (path, parsed JSON, items), with a file's label copied into its
     items. Refuses a file given twice, and, with several files, an item no area is known for."""
     files, seen = [], {}
@@ -149,7 +153,7 @@ def _read_files(args: list[str]) -> list[tuple[str, object, list]]:
             # Its examples would get two numbers, and write-back keeps only the last.
             raise ValueError(f"{path}: given twice (also as {seen[real]})")
         seen[real] = path
-        doc, items = _read_items(path)
+        doc, items = _read_items(path, read)
         if area:
             for it in items:
                 if isinstance(it, dict):
@@ -186,6 +190,15 @@ def main() -> int:
     args = p.parse_args()
     if args.save_to_helper and not args.artifacts_dir:
         p.error("--save-to-helper needs --artifacts-dir")
+    out_path = Path(os.path.expanduser(args.out))
+    if _scratch_out.guarded():
+        # The page, and each items file (rewritten below with its normalized numbering).
+        try:
+            out_path = _scratch_out.scratch_file(args.out, _scratch_out.PAGE)
+            for spec in args.items_file:
+                _scratch_out.scratch_file(_split_label(spec)[1], ("json",))
+        except _scratch_out.Refused as e:
+            return _scratch_out.refuse("render_examples_validation.py", e)
 
     try:
         files = _read_files(args.items_file)
@@ -194,8 +207,6 @@ def main() -> int:
         return 1
     items = [it for _, _, file_items in files for it in file_items]
 
-    out_path = Path(os.path.expanduser(args.out))
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     html = render(
         title=args.title,
         profile=args.profile,
@@ -206,7 +217,7 @@ def main() -> int:
     elif args.save_to_helper:
         signoff = saved_signoff(Path(os.path.expanduser(args.artifacts_dir)))
         html = make_saving(html, signoff, back_label=EXAMPLES_BACK_LABEL)
-    out_path.write_text(html, encoding="utf-8")
+    _scratch_out.save(out_path, html)
     # render() normalized `n` to a stable global 1..N (in place). Persist it back so a later
     # apply pass ("edit N" -> the N-th example) resolves against the SAME numbering the dashboard
     # showed — regardless of the per-area numbers the caller wrote. Atomic (temp + os.replace) so a
@@ -216,10 +227,8 @@ def main() -> int:
     for path, doc, _ in files:
         items_path = os.path.expanduser(path)
         try:
-            tmp_path = items_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(doc, f)
-            os.replace(tmp_path, items_path)
+            # A fresh temp name, never a fixed `<file>.tmp` a planted link could redirect.
+            _scratch_out.save(Path(items_path), json.dumps(doc))
         except OSError as e:
             sys.stderr.write(f"warning: could not normalize {items_path}: {e}\n")
     print(f"Wrote {out_path} ({len(items)} example{'s' if len(items) != 1 else ''})")

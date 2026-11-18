@@ -23,6 +23,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import _scratch_out  # noqa: E402
 import _xlsx  # noqa: E402
 
 # sheet -> {field: accepted headers}. Headers match case- and punctuation-insensitively; any column
@@ -180,6 +181,15 @@ def summary(spec: dict) -> dict:
     }
 
 
+def _spec_out(path: str, name: str) -> Path:
+    """Under the scratch-only guard: a scratch file, or this script's own
+    `<artifacts_dir>/local/model-spec/<profile>/<name>`."""
+    try:
+        return _scratch_out.scratch_file(path)
+    except _scratch_out.Refused:
+        return _scratch_out.model_file(path, "local", "model-spec", "<profile>", name, profile_at=2)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -188,6 +198,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--out", required=True, help="where to write the spec JSON")
     p.add_argument("--tables-out", default=None, help="where to write the schema.table allowlist")
     a = ap.parse_args(argv)
+    if _scratch_out.guarded():
+        try:
+            _spec_out(a.out, "spec.json")
+            if a.tables_out:
+                # A scratch file only: the guarded `sm introspect --tables-file` that reads it accepts
+                # nothing else, so a path under local/model-spec would pass here and be refused there.
+                _scratch_out.scratch_file(a.tables_out)
+        except _scratch_out.Refused as e:
+            return _scratch_out.refuse("model_spec_workbook.py", e)
     try:
         spec, allow, errors = parse(a.file)
     except (OSError, ValueError) as exc:
@@ -196,9 +215,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     if errors:
         print(json.dumps({"errors": errors}, indent=2))
         return 1
-    Path(a.out).write_text(json.dumps(spec, indent=2), encoding="utf-8")
+    _scratch_out.save(Path(a.out), json.dumps(spec, indent=2))
     if a.tables_out:
-        Path(a.tables_out).write_text("\n".join(allow) + "\n", encoding="utf-8")
+        _scratch_out.save(Path(a.tables_out), "\n".join(allow) + "\n")
     print(json.dumps({"spec": a.out, "tables_file": a.tables_out, **summary(spec)}, indent=2))
     return 0
 
