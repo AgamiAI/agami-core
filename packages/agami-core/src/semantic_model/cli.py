@@ -158,12 +158,27 @@ def cmd_context(args) -> int:
     return 0
 
 
+def _within_model(handler):
+    """Run `handler` with every file read held inside `args.root`, links resolved (OutsideModel
+    otherwise). For the verbs the plugin's permission hook (scripts/approve_own_calls.py, VERBS)
+    runs with no prompt: the hook checks only the folder a call names, and the model can name more."""
+    def run(args) -> int:
+        with L.contained(args.root):
+            return handler(args)
+    run.within_model = True
+    run.__name__ = handler.__name__
+    run.__doc__ = handler.__doc__
+    return run
+
+
+@_within_model
 def cmd_bundle(args) -> int:
     org = L.load_datasource(args.root)
     _print_json(L.get_subject_area_bundle(org, args.area))
     return 0
 
 
+@_within_model
 def cmd_areas(args) -> int:
     org = L.load_datasource(args.root)
     _print_json(RT.list_subject_areas(org))
@@ -481,6 +496,7 @@ def cmd_filter_values_judge(args) -> int:
     return 0
 
 
+@_within_model
 def cmd_review_queue(args) -> int:
     from . import curate
     org = L.load_datasource(args.root)
@@ -488,6 +504,7 @@ def cmd_review_queue(args) -> int:
     return 0
 
 
+@_within_model
 def cmd_review_items(args) -> int:
     from . import curate
     org = L.load_datasource(args.root, include_rejected=True)
@@ -517,6 +534,7 @@ def cmd_curate_gate(args) -> int:
     return 0
 
 
+@_within_model
 def cmd_model_tree(args) -> int:
     from . import curate
     org = L.load_datasource(args.root, include_rejected=True)
@@ -524,6 +542,7 @@ def cmd_model_tree(args) -> int:
     return 0
 
 
+@_within_model
 def cmd_coverage(args) -> int:
     """Per-table column-description coverage + the enrichment-completeness verdict.
     The skill runs this at the end of Phase 2 (and reports it in the Phase 7 summary):
@@ -2734,6 +2753,10 @@ def main(argv=None) -> int:
     args = _parse_args(argv)
     try:
         return args.func(args)
+    except L.OutsideModel as e:
+        # The path as the model wrote it, never what is in the file.
+        _print_json({"error": "outside_model", "detail": str(e)})
+        return 1
     except FileNotFoundError as e:
         # No model at this root yet. This is an expected, clean signal (not a crash):
         # callers fold the "does a model exist?" check into their first real command

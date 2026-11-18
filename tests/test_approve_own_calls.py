@@ -193,6 +193,131 @@ def test_an_approved_call_changes_no_file(art, args):
     assert snapshot() == before
 
 
+# --- what an approved verb reads: only files inside the model folder --------------------------------
+# The hook checks the folder a call names, but the model inside it names more files: a storage `ref`,
+# a subject area's path, a link. Before this, a ref to a credentials file outside the model reached
+# Claude through the load's own error (the schema error quotes each unexpected value), and a subject
+# area pointed outside printed that folder's text. Every approved verb now refuses any read outside
+# the folder, before the read.
+
+_AREA = "name: sales\ndescription: d\n"
+_TABLE = "name: orders\ndescription: o\ncolumns:\n  - name: id\n    type: integer\n"
+
+
+def _small_model(root: Path, datasource: str) -> None:
+    tables = root / "subject_areas" / "sales" / "tables"
+    tables.mkdir(parents=True)
+    (tables.parent / "subject_area.yaml").write_text(_AREA)
+    (tables / "orders.yaml").write_text(_TABLE)
+    (root / "datasource.yaml").write_text(datasource)
+
+
+def _outside_area(tmp_path: Path) -> Path:
+    area = tmp_path / "outside" / "area"
+    (area / "tables").mkdir(parents=True)
+    (area / "subject_area.yaml").write_text("name: sales\ndescription: SECRET-AREA\n")
+    (area / "tables" / "t.yaml").write_text(
+        _TABLE.replace("description: o", "description: SECRET-T")
+    )
+    return area
+
+
+def _secret_ref(root: Path, tmp_path: Path) -> None:
+    secret = tmp_path / "outside" / "creds.json"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_text('{"name": "x", "storage_type": "PostgreSQL", "password": "SECRET-PW"}')
+    _small_model(
+        root,
+        "datasource: acme\nstorage_connections:\n  - ref: ../../outside/creds.json\n"
+        "subject_areas:\n  - subject_areas/sales\n",
+    )
+
+
+def _absolute_area(root: Path, tmp_path: Path) -> None:
+    _small_model(root, f"datasource: acme\nsubject_areas:\n  - {_outside_area(tmp_path)}\n")
+
+
+def _relative_area(root: Path, tmp_path: Path) -> None:
+    _outside_area(tmp_path)
+    _small_model(root, "datasource: acme\nsubject_areas:\n  - ../../outside/area\n")
+
+
+def _linked_area(root: Path, tmp_path: Path) -> None:
+    _small_model(root, "datasource: acme\nsubject_areas:\n  - subject_areas/linked\n")
+    (root / "subject_areas" / "linked").symlink_to(_outside_area(tmp_path))
+
+
+def _linked_table(root: Path, tmp_path: Path) -> None:
+    _small_model(root, "datasource: acme\nsubject_areas:\n  - subject_areas/sales\n")
+    outside = tmp_path / "outside" / "t.yaml"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("name: other\ndescription: SECRET-LINK\ncolumns: []\n")
+    (root / "subject_areas" / "sales" / "tables" / "z.yaml").symlink_to(outside)
+
+
+@SYMLINKS
+@pytest.mark.parametrize(
+    "build", [_secret_ref, _absolute_area, _relative_area, _linked_area, _linked_table]
+)
+@pytest.mark.parametrize("args", APPROVED)
+def test_an_approved_verb_reads_nothing_outside_the_model(art, tmp_path, capsys, build, args):
+    pytest.importorskip("pydantic")
+    from semantic_model import cli
+
+    shutil.rmtree(art / "acme")
+    build(art / "acme", tmp_path)
+    filled = args.format(R=str(art / "acme")).split()
+    assert cli.main(filled) == 1
+    out, err = capsys.readouterr()
+    assert "SECRET" not in out + err
+    assert json.loads(out)["error"] == "outside_model"
+
+
+def test_every_approved_verb_runs_contained():
+    """Structural: the CLI handler of each verb the hook approves is the contained one, so a verb
+    added to the table without it fails here rather than in someone's session."""
+    from semantic_model import cli
+
+    for verb in HOOK_MOD.VERBS:
+        extra = ["--area", "x"] if verb == "bundle" else []
+        handler = cli._parse_args([verb, "/r", *extra]).func
+        assert getattr(handler, "within_model", False) is True, verb
+
+
+def test_a_verb_the_hook_does_not_approve_still_reads_a_ref_outside(tmp_path):
+    """The containment is only for the approved verbs: a model with a shared storage file outside
+    its folder still loads everywhere else."""
+    pytest.importorskip("pydantic")
+    from semantic_model import loader
+
+    shared = tmp_path / "shared" / "storage.yaml"
+    shared.parent.mkdir()
+    shared.write_text("name: wh\nstorage_type: PostgreSQL\n")
+    root = tmp_path / "acme"
+    _small_model(
+        root,
+        "datasource: acme\nstorage_connections:\n  - ref: ../shared/storage.yaml\n"
+        "subject_areas:\n  - subject_areas/sales\n",
+    )
+    assert loader.load_datasource(root).storage_connections[0].name == "wh"
+    with loader.contained(root), pytest.raises(loader.OutsideModel):
+        loader.load_datasource(root)
+
+
+@SYMLINKS
+def test_a_curation_log_linked_out_is_refused_when_contained(tmp_path):
+    from semantic_model import curate, loader
+
+    root = tmp_path / "acme"
+    root.mkdir()
+    outside = tmp_path / "log.jsonl"
+    outside.write_text('{"op": "SECRET"}\n')
+    (root / curate.CURATION_LOG).symlink_to(outside)
+    assert curate._read_log_lines(root)  # uncontained: read as before
+    with loader.contained(root), pytest.raises(loader.OutsideModel):
+        curate._read_log_lines(root)
+
+
 def test_the_description_field_is_fine(art):
     assert _decision(_bash(_sm(art, "areas {R}"), description="Show the steps"), art) == "allow"
 

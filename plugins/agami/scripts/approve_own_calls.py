@@ -6,7 +6,9 @@ hook fires in every session, every turn and every subagent, so it approves only 
 harm whoever chose the arguments: no database connection, no credentials, no package install (`sm`
 refuses to install for these verbs, see NO_INSTALL_VERBS there), no write anywhere except a file
 in agami's scratch folder, no read of a file the call names outside that folder and this plugin,
-and no change to a model's content or trust state. Everything else gets no output, so the normal permission flow applies (a skill's `allowed-tools` still cover
+no read by an approved `sm` verb of anything outside the model folder it names (the CLI holds those
+verbs inside it, links and the model's own file references included), and no change to a model's
+content or trust state. Everything else gets no output, so the normal permission flow applies (a skill's `allowed-tools` still cover
 its own turn). It never denies.
 
   A. Bash: one call of this plugin's `scripts/sm` (an optional leading `bash`, nothing else before
@@ -210,6 +212,10 @@ ROOT = (model_root,)
 # also read the curation log under <root>); none writes a file, connects to a database or reads
 # credentials. Read from each handler in semantic_model/cli.py, and pinned by
 # test_an_approved_call_changes_no_file. Only the options cli.py gives each verb are listed.
+# The model names files of its own (a storage `ref`, a subject area's path) and may hold links, so
+# cli.py runs each of these verbs contained (`_within_model`): a read that would leave <root>, links
+# resolved, stops with `outside_model` before it happens, and the error names the path, never its
+# content. Pinned by test_an_approved_verb_reads_nothing_outside_the_model.
 #
 # NOT approved, by design; do not add one without reading its handler. Many connect to a database,
 # use credentials, install a package, read a file the call names, write, or change the model or its
