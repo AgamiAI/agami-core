@@ -153,6 +153,8 @@ def _fake_candidates(monkeypatch, paths, *, deps_for, driver_for, no_pip=(), lib
     `no_pip` lists interpreters without pip; `lib` maps one to its agami-core version
     (the rest carry the plugin's own version)."""
     monkeypatch.setattr(CR, "_candidate_interpreters", lambda: list(paths))
+    # the scoring itself, not the launchers' selection (tests/test_plugin_version_check.py runs that)
+    monkeypatch.setattr(CR, "_launcher_python", lambda: None)
     monkeypatch.setattr(CR, "plugin_version", lambda: plugin)
     lib = lib or {}
     monkeypatch.setattr(CR, "_probe_install", lambda py: {
@@ -206,6 +208,7 @@ def test_duckdb_driver_requires_pytz(monkeypatch):
     have = {no_pytz: {"pydantic", "sqlglot", "yaml", "duckdb"},
             full: {"pydantic", "sqlglot", "yaml", "duckdb", "pytz"}}
     monkeypatch.setattr(CR, "_candidate_interpreters", lambda: [no_pytz, full])
+    monkeypatch.setattr(CR, "_launcher_python", lambda: None)
     # content-aware probe: an interpreter passes only if it has EVERY requested module
     monkeypatch.setattr(CR, "_probe",
                         lambda py, mods: all(m in have.get(py, set()) for m in mods if m))
@@ -469,3 +472,57 @@ def test_agami_python_lacks_reaches_the_anomalies(tmp_path, monkeypatch, capsys)
     (lacks,) = [a for a in anomalies if a["kind"] == "agami_python_lacks"]
     assert "no agami-core" in lacks["detail"]
     assert f"agami: $AGAMI_PYTHON is {pinned}" in capsys.readouterr().err
+
+
+# #698 review: on a fresh UNPINNED install whose first Python has pydantic/sqlglot/yaml but no agami-core,
+# has_model_deps was true and nothing else was said, so onboarding skipped the install question and the
+# no-install setup verbs (choose-folder, init-local, set-config) exited 12. Readiness is reported for the
+# selected Python whether or not it is pinned: the deps, `semantic_model.cli`, and a current version.
+
+
+def _not_dev_layout(monkeypatch):
+    monkeypatch.setattr(CR, "_dev_layout", lambda: False)
+
+
+def test_unpinned_python_with_the_deps_but_no_agami_core_is_not_ready(monkeypatch):
+    py = "/fake/deps-only/bin/python3"
+    _not_dev_layout(monkeypatch)
+    _fake_candidates(monkeypatch, [py], deps_for={py}, driver_for=set(), no_core={py}, lib={py: None})
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["python3"] == py and res["has_model_deps"] is True
+    assert res["has_core"] is False and res["core_ready"] is False
+
+
+def test_unpinned_python_with_a_current_agami_core_is_ready(monkeypatch):
+    py = "/fake/full/bin/python3"
+    _not_dev_layout(monkeypatch)
+    _fake_candidates(monkeypatch, [py], deps_for={py}, driver_for=set())
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["has_core"] is True and res["core_ready"] is True
+
+
+def test_unpinned_python_with_an_older_agami_core_is_not_ready(monkeypatch):
+    py = "/fake/older/bin/python3"
+    _not_dev_layout(monkeypatch)
+    _fake_candidates(monkeypatch, [py], deps_for={py}, driver_for=set(), lib={py: "0.9.11"})
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["has_core"] is True and res["core_ready"] is False
+
+
+def test_in_a_dev_checkout_only_this_checkouts_library_is_ready(monkeypatch):
+    # `sm` reinstalls from the checkout when the importable library is any other build, so a released
+    # agami-core of the same version is not ready there either.
+    py = "/fake/released/bin/python3"
+    monkeypatch.setattr(CR, "_dev_layout", lambda: True)
+    _fake_candidates(monkeypatch, [py], deps_for={py}, driver_for=set())
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["has_core"] is True and res["core_ready"] is False
+
+
+def test_pinned_python_reports_readiness_too(monkeypatch):
+    pinned = "/fake/pinned/bin/python3"
+    monkeypatch.setenv("AGAMI_PYTHON", pinned)
+    _not_dev_layout(monkeypatch)
+    _fake_candidates(monkeypatch, [pinned], deps_for=set(), driver_for=set(), lib={pinned: None})
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["has_core"] is False and res["core_ready"] is False

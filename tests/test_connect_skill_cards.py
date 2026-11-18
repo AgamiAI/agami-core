@@ -1158,3 +1158,14 @@ def test_a_presets_dictionary_tables_are_never_kept_as_model_tables():
     assert "keeps the product's dictionary tables in the kept set" not in text
     assert "only when they are in the model" not in text
     assert "never add the preset's source tables" in text
+
+
+def test_the_install_question_is_decided_by_core_readiness_not_the_deps_alone():
+    # #698 review: the deps can import with no agami-core, and then every setup verb exits 12 before
+    # the install question was ever asked. Both onboarding paths decide on `core_ready`.
+    s = _between("### 0a.5b ", "### 0a.6 ")
+    assert "data.interpreter.core_ready" in s
+    assert "has_model_deps` in its output" not in s
+    sample = _between("1. **Resolve the environment first**", "**Then set up `local/`**")
+    assert "core_ready" in sample
+    assert "When `has_model_deps` is false" not in sample

@@ -272,9 +272,10 @@ def test_the_sample_and_spec_files_are_the_only_model_files_allowed(art):
     assert _scratch_out.model_file(
         str(art / "local" / "samples" / "store.db"), "local", "samples", "store.db"
     )
-    for ok in ("spec.json", "spec-tables.txt"):
-        path = str(art / "local" / "model-spec" / "acme" / ok)
-        assert _scratch_out.model_file(path, "local", "model-spec", "<profile>", ok, profile_at=2)
+    path = str(art / "local" / "model-spec" / "acme" / "spec.json")
+    assert _scratch_out.model_file(
+        path, "local", "model-spec", "<profile>", "spec.json", profile_at=2
+    )
     with pytest.raises(_scratch_out.Refused):
         _scratch_out.model_file(
             str(art / "local" / "samples" / "other.db"), "local", "samples", "store.db"

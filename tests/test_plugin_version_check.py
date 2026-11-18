@@ -274,17 +274,29 @@ def _equipped_older(root: Path) -> Path:
     return shim
 
 
-def _resolve_both(tmp_path: Path, path_dirs: list[Path], pinned: Path | None) -> tuple[str, dict]:
+def _launcher_env(tmp_path: Path, path_dirs: list[Path], pinned: Path | None) -> dict:
     env = {k: v for k, v in os.environ.items() if k not in ("AGAMI_PYTHON", "VIRTUAL_ENV", "AGAMI_PROFILE")}
     env.update(PATH=os.pathsep.join([*map(str, path_dirs), str(_tools_without_python(tmp_path))]),
                AGAMI_ARTIFACTS_DIR=str(tmp_path / "art"), HOME=str(tmp_path))
     if pinned:
         env["AGAMI_PYTHON"] = str(pinned)
+    return env
+
+
+def _resolve_both(tmp_path: Path, path_dirs: list[Path], pinned: Path | None) -> tuple[str, dict]:
+    env = _launcher_env(tmp_path, path_dirs, pinned)
     shell = subprocess.run(["bash", "-c", f'. "{SCRIPTS / "_python.sh"}"; resolve_python'], env=env,
                            capture_output=True, text=True, check=True).stdout.strip()
     out = subprocess.run([sys.executable, str(SCRIPTS / "connect_resolve.py")], env=env,
                          capture_output=True, text=True, check=True).stdout
     return shell, json.loads(out)
+
+
+def _py_launcher_python(tmp_path: Path, path_dirs: list[Path], pinned: Path | None) -> str:
+    """The interpreter `py` runs: the deploy path's `py -m deploy_preflight` uses exactly this one."""
+    env = _launcher_env(tmp_path, path_dirs, pinned)
+    return subprocess.run(["bash", str(SCRIPTS / "py"), "-c", "import sys; print(sys.executable)"], env=env,
+                          capture_output=True, text=True, check=True).stdout.strip()
 
 
 @POSIX
@@ -318,3 +330,45 @@ def test_sm_names_the_missing_model_extra_and_the_missing_pip(tmp_path):
     assert "no pip" in r.stderr and "ensurepip" in r.stderr
     assert f'"{py}" -m pip install "agami-core[model]=={PLUGIN_VERSION}"' in r.stderr
     assert "agami-core can't be installed into it" not in r.stderr
+
+
+# #698 review: without $AGAMI_PYTHON, preflight scored its own candidates and could pick a later Python
+# with the deps while `sm`/`py` kept the first installable one, so setup checked one Python and the
+# install went into another (exit 12); the deploy launcher's `py -m deploy_preflight` likewise missed
+# the library. There is one selection now, `_python.sh`'s, and preflight reports it.
+
+
+@POSIX
+def test_preflight_sm_and_py_agree_when_the_first_python_is_installable_but_bare(tmp_path):
+    bare = _with_fake_pip(_pipless_venv(tmp_path / "bare", None))
+    older = _equipped_older(tmp_path / "usr")
+    shell, got = _resolve_both(tmp_path, [bare.parent, older.parent], None)
+    assert shell == str(bare.parent / "python3")
+    assert got["data"]["interpreter"]["python3"] == shell
+    assert got["data"]["interpreter"]["core_ready"] is False
+    assert _py_launcher_python(tmp_path, [bare.parent, older.parent], None) == shell
+
+
+@POSIX
+def test_preflight_sm_and_py_agree_on_a_configured_python(tmp_path):
+    configured = _with_fake_pip(_pipless_venv(tmp_path / "configured", None))
+    older = _equipped_older(tmp_path / "usr")
+    _configure(tmp_path, configured)
+    shell, got = _resolve_both(tmp_path, [older.parent], None)
+    assert shell == str(configured)
+    assert got["data"]["interpreter"]["python3"] == shell
+    assert _py_launcher_python(tmp_path, [older.parent], None) == shell
+
+
+@POSIX
+def test_the_deploy_launcher_uses_the_pinned_python_too(tmp_path):
+    pinned = _pipless_venv(tmp_path / "build", PLUGIN_VERSION)
+    older = _equipped_older(tmp_path / "usr")
+    shell, got = _resolve_both(tmp_path, [older.parent], pinned)
+    assert _py_launcher_python(tmp_path, [older.parent], pinned) == shell == got["data"]["interpreter"]["python3"]
+
+
+def test_the_deploy_skill_runs_deploy_preflight_through_the_shared_launcher():
+    text = (PLUGIN / "skills" / "agami-deploy" / "SKILL.md").read_text(encoding="utf-8")
+    assert 'scripts/py" -m deploy_preflight' in text
+    assert "$PY -m deploy_preflight" not in text

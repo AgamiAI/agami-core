@@ -693,10 +693,12 @@ def cmd_choose_folder(args) -> int:
 def cmd_init_local(args) -> int:
     """Set up `<artifacts_dir>/local/` (0700), its scratch folder and `.gitignore`; `--sample` also
     writes the sample's credential for promote_credentials.py. See semantic_model/local_setup.py."""
+    from agami_paths import NotPrivate
+
     from . import local_setup as LS
     try:
         _print_json(LS.init_local(args.artifacts_dir, sample=args.sample))
-    except LS.SetupRefused as exc:
+    except (LS.SetupRefused, NotPrivate) as exc:
         _print_json({"error": str(exc)})
         return 2
     return 0
@@ -704,12 +706,14 @@ def cmd_init_local(args) -> int:
 
 def cmd_set_config(args) -> int:
     """Merge checked fields into `<artifacts_dir>/local/.config` (0600). See local_setup.py."""
+    from agami_paths import NotPrivate
+
     from . import local_setup as LS
     try:
         _print_json(LS.set_config(args.artifacts_dir, tier=args.tier,
                                   active_profile=args.active_profile, python3=args.python3,
                                   tools=args.tool, identity_file=args.identity_file))
-    except LS.SetupRefused as exc:
+    except (LS.SetupRefused, NotPrivate) as exc:
         _print_json({"error": str(exc)})
         return 2
     return 0
@@ -886,10 +890,12 @@ def cmd_sensitive(args) -> int:
 def cmd_set_personal_data(args) -> int:
     """Record who keeps people from seeing personal data (#675). Build-only: it lives in the local
     config, so nothing deployed carries it and an older core never meets the key."""
+    from agami_paths import NotPrivate
+
     from .scratch import LinkedTarget
     try:
         BS.set_personal_data(args.artifacts_dir, args.setting)
-    except LinkedTarget as exc:
+    except (LinkedTarget, NotPrivate) as exc:
         _print_json({"error": str(exc)})
         return 2
     _print_json({"personal_data": args.setting, "config": str(BS.config_path(args.artifacts_dir))})

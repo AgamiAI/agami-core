@@ -64,13 +64,21 @@ def local_dir(art: Path | None = None) -> Path:
     return (art or artifacts_dir()) / LOCAL_SUBDIR
 
 
+class NotPrivate(PermissionError):
+    """`<artifacts_dir>/local/` can't be kept private: another user owns it, or chmod can't make it 0700."""
+
+
 def ensure_local_dir(art: Path | None = None) -> Path:
     """`<artifacts_dir>/local/` made, or tightened, to 0700, and returned.
 
     Whatever creates `local/` first decides its mode for good: a plain mkdir under the usual umask
     left it 0755, so the credentials' and `.config`'s names, and every scratch file, were listable
     by anyone on the machine. Every writer into `local/` calls this instead, and an existing folder
-    is tightened. A `local` that is a link is left alone: chmod would change whatever it points at."""
+    is tightened. A `local` that is a link is left alone: chmod would change whatever it points at.
+
+    On POSIX a `local/` another user owns, or one chmod can't tighten, raises NotPrivate rather than
+    being used: that user could change it back, and the credentials and `.config` go in next. On
+    Windows NTFS ignores the mode, so there is nothing to check."""
     local = local_dir(art)
     local.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -78,11 +86,30 @@ def ensure_local_dir(art: Path | None = None) -> Path:
     except FileExistsError:
         pass
     if not local.is_symlink() and local.is_dir():
+        _make_private(local)
+    return local
+
+
+def _make_private(local: Path) -> None:
+    if os.name != "posix":
         try:
             os.chmod(local, 0o700)
         except OSError:
             pass
-    return local
+        return
+    owner = os.stat(local).st_uid
+    if owner != os.getuid():
+        raise NotPrivate(
+            f"{local} belongs to another user (uid {owner}), so agami won't keep credentials "
+            f"or settings in it. Choose another artifacts folder, or have that folder's owner remove it."
+        )
+    try:
+        os.chmod(local, 0o700)
+    except OSError as exc:
+        raise NotPrivate(
+            f"{local} could not be made private (0700): {exc.strerror}. agami won't keep "
+            f"credentials or settings in it until it can be."
+        ) from None
 
 
 # --- specific paths (everything that used to live under ~/.agami) -----------
@@ -212,5 +239,8 @@ def bootstrap() -> Path:
     migrate_legacy_home()
     art = artifacts_dir()
     if local_dir(art).is_dir():
-        ensure_local_dir(art)
+        try:
+            ensure_local_dir(art)
+        except NotPrivate:
+            pass  # nothing is written here; each writer into `local/` refuses for itself
     return art
