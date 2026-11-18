@@ -908,7 +908,6 @@ def test_a_link_inside_the_plugin_pointing_out_says_nothing(art, tmp_path):
         link.unlink()
 
 
-
 # --- UNC and device references inside the model -----------------------------------------------------------
 # The hook refuses a network path the call names, but the model names more: a storage `ref`, a subject
 # area's path, a link's target. A contained load refuses each from its text, before `realpath`,
@@ -920,7 +919,13 @@ def _no_model_filesystem_call_on_unc(monkeypatch) -> list:
     import io as _io
 
     touched = _no_filesystem_call_on_unc(monkeypatch)
-    for mod, name in ((os, "open"), (os, "listdir"), (os, "scandir"), (os, "readlink"), (_io, "open")):
+    for mod, name in (
+        (os, "open"),
+        (os, "listdir"),
+        (os, "scandir"),
+        (os, "readlink"),
+        (_io, "open"),
+    ):
         real = getattr(mod, name)
 
         def spy(p, *a, _real=real, **k):
@@ -1377,6 +1382,92 @@ def _stale_library_exit() -> int:
     return int(code)
 
 
+_OLD_CLI = """
+import argparse
+
+
+def _parse_args(argv):
+    return argparse.Namespace(func=lambda args: 0)
+
+
+def main(argv=None):
+    print("RAN")
+    return 0
+"""
+_CONTAINED_CLI = """
+import argparse
+import contextlib
+
+
+class L:
+    contained = staticmethod(contextlib.nullcontext)
+
+
+def handler(args):
+    return 0
+
+
+handler.within_model = True
+
+
+def _parse_args(argv):
+    return argparse.Namespace(func=handler)
+
+
+def main(argv=None):
+    print("RAN")
+    return 0
+"""
+
+
+@pytest.mark.parametrize(
+    "cli_source, runs",
+    [
+        (_OLD_CLI, False),  # a handler with no containment
+        ("def main(argv=None):\n    print('RAN')\n    return 0\n", False),  # older still
+        (_CONTAINED_CLI, True),  # the stub itself is what runs, once it holds the verb
+    ],
+)
+@pytest.mark.parametrize("verb", sorted(_no_install_verbs()))
+def test_an_approved_verb_runs_only_on_a_library_that_contains_it(
+    art, tmp_path, cli_source, runs, verb
+):
+    """A `semantic_model` with no install metadata on PYTHONPATH passes the import and version checks
+    (an unknown version is not a stale one), so the launcher must ask the code itself whether it
+    holds the verb inside the model folder, and exit 12 having run nothing when it does not."""
+    pytest.importorskip("pydantic")
+    cache = tmp_path / "cache" / "agami-core" / "0.0.1" / "scripts"  # a marketplace layout
+    cache.mkdir(parents=True)
+    for name in ("sm", "_python.sh", "_plugin_version.py"):
+        shutil.copy2(PLUGIN / "scripts" / name, cache / name)
+    stub = tmp_path / "stub" / "semantic_model"
+    stub.mkdir(parents=True)
+    (stub / "__init__.py").write_text("")
+    main_block = '\nif __name__ == "__main__":\n    raise SystemExit(main())\n'
+    (stub / "cli.py").write_text(cli_source + main_block)
+    env = {
+        **os.environ,
+        "AGAMI_ARTIFACTS_DIR": str(art),
+        "HOME": str(tmp_path),
+        "AGAMI_PYTHON": sys.executable,
+        "PYTHONPATH": str(stub.parent),
+    }
+    extra = ["--area", "sales"] if verb == "bundle" else []
+    proc = subprocess.run(
+        ["bash", str(cache / "sm"), verb, str(art / "acme"), *extra],
+        capture_output=True,
+        env=env,
+        timeout=120,
+    )
+    out, err = proc.stdout.decode(), proc.stderr.decode(errors="replace")
+    if runs:
+        assert (proc.returncode, out.strip()) == (0, "RAN"), err
+    else:
+        assert proc.returncode == _stale_library_exit(), err
+        assert "RAN" not in out
+        assert 'sm" install' in err
+
+
 def test_the_stale_library_refusal_is_not_the_no_model_code(tmp_path):
     """A skill reads exit 3 from its first `sm areas` as "no model here, set the database up". A
     library left stale by a plugin update must not read the same, or the person is sent to connect
@@ -1517,4 +1608,7 @@ def test_an_approved_verb_never_reaches_the_installer_after_its_guard(art, tmp_p
     )
     assert not pip.exists(), pip.read_text()
     assert r.returncode == 0, r.stderr
-    assert "semantic_model.cli " + verb in ran.read_text()
+    # the run is the one that checks the verb is contained, then calls the CLI (no second probe)
+    runs = ran.read_text()
+    assert "from semantic_model import cli" in runs
+    assert f" {verb} {art / 'acme'}" in runs

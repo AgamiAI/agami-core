@@ -227,9 +227,10 @@ fi
 STALE_LIBRARY_EXIT=12
 # These verbs never reach ensure_pkg, not even after the check passes: it probes again and installs
 # on a failure, so a library update landing in between would turn an approved call into an install.
+INSTALL_HINT="agami's library needs installing or updating: run  bash \"$(cd "$SCRIPT_DIR/.." && pwd)/scripts/sm\" install"
 if [ -n "$APPROVED_VERB" ]; then
   if ! { _imports_ok && _version_ok; }; then
-    echo "agami's library needs installing or updating: run  bash \"$(cd "$SCRIPT_DIR/.." && pwd)/scripts/sm\" install" >&2
+    echo "$INSTALL_HINT" >&2
     exit "$STALE_LIBRARY_EXIT"
   fi
 else
@@ -245,4 +246,29 @@ export PYTHONSAFEPATH=1
 AGAMI_CALLER_CWD="$(cygpath -m "$PWD" 2>/dev/null || printf '%s' "$PWD")"
 export AGAMI_CALLER_CWD
 cd /
-exec "$PY" -X utf8 -m semantic_model.cli "$@"
+if [ -z "$APPROVED_VERB" ]; then
+  exec "$PY" -X utf8 -m semantic_model.cli "$@"
+fi
+# An approved verb runs only on a library that holds it inside the model folder (cli.py's
+# `_within_model`). The checks above cannot say so: a `semantic_model` with no install metadata (a
+# PYTHONPATH or source layout) passes the version gate as "unknown", and an old one imports fine. So
+# the process that runs the verb asks first: the handler the CLI's own parser picks for these
+# arguments must be the contained one, or it exits 12 with the install step and runs nothing. One
+# process, so no library can change between the check and the run.
+exec "$PY" -X utf8 -c '
+import sys
+code, hint, argv = int(sys.argv[1]), sys.argv[2], sys.argv[3:]
+sys.argv = ["sm", *argv]
+try:
+    from semantic_model import cli
+    ok = callable(getattr(cli.L, "contained", None)) and getattr(
+        cli._parse_args(argv).func, "within_model", False) is True
+except SystemExit:
+    raise  # a usage error or --help: the CLI'"'"'s own answer
+except Exception:
+    ok = False
+if not ok:
+    sys.stderr.write(hint + "\n")
+    sys.exit(code)
+sys.exit(cli.main(argv))
+' "$STALE_LIBRARY_EXIT" "$INSTALL_HINT" "$@"
