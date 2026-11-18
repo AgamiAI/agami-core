@@ -942,8 +942,11 @@ def test_hooks_json_runs_python3_from_path_never_the_plugin_launcher():
     assert entry["matcher"] == "Bash|Write|Read|Edit"
     (hook,) = entry["hooks"]
     assert hook["type"] == "command"
+    # Each interpreter is accepted only once it has printed the probe's word: the Windows Store
+    # `python3` alias can exit 0 without running anything, and the loop must then try `python`.
     assert hook["command"] == (
         "in=$(cat); for p in python3 python; do "
+        '[ "$("$p" -I -c \'print(end="agami-ok")\' </dev/null 2>/dev/null)" = agami-ok ] && '
         'out=$(printf \'%s\' "$in" | "$p" -I "${CLAUDE_PLUGIN_ROOT}/scripts/approve_own_calls.py" '
         "2>/dev/null) && { printf '%s' \"$out\"; break; }; done; true"
     )
@@ -1019,6 +1022,58 @@ def test_a_failing_python3_stub_prints_nothing_and_python_answers(art, tmp_path,
         timeout=60,
     )
     assert refused.returncode == 0 and refused.stdout == b""
+    (bin_dir / "python").unlink()
+    (bin_dir / "python").write_text(stub.read_text())
+    (bin_dir / "python").chmod(0o755)
+    neither = subprocess.run(
+        ["sh", "-c", command],
+        input=json.dumps(_bash(_sm(art, "areas {R}"))).encode(),
+        capture_output=True,
+        env=env,
+        timeout=60,
+    )
+    assert neither.returncode == 0 and neither.stdout == b""
+
+
+@pytest.mark.skipif(shutil.which("sh") is None or sys.platform == "win32", reason="needs sh")
+@pytest.mark.parametrize("stub_out", ["", "agami-ok-not", '{"hookSpecificOutput": "garbage"}'])
+def test_a_python3_that_exits_0_without_running_python_is_skipped(art, tmp_path, stub_out):
+    """The Windows Store `python3` alias can exit 0 having run nothing. The loop must not stop on
+    it: `python` still answers, and nothing the stub printed reaches the hook's output."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "python3"
+    stub.write_text(f"#!/bin/sh\ncat >/dev/null\nprintf '%s' '{stub_out}'\nexit 0\n")
+    stub.chmod(0o755)
+    (bin_dir / "python").symlink_to(sys.executable)
+    doc = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    command = doc["hooks"]["PreToolUse"][0]["hooks"][0]["command"].replace(
+        "${CLAUDE_PLUGIN_ROOT}", str(PLUGIN)
+    )
+    env = {
+        **os.environ,
+        "AGAMI_ARTIFACTS_DIR": str(art),
+        "HOME": str(art.parent),
+        "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+    }
+    allowed = subprocess.run(
+        ["sh", "-c", command],
+        input=json.dumps(_bash(_sm(art, "areas {R}"))).encode(),
+        capture_output=True,
+        env=env,
+        timeout=60,
+    )
+    assert allowed.returncode == 0
+    assert json.loads(allowed.stdout)["hookSpecificOutput"]["permissionDecision"] == "allow"
+    refused = subprocess.run(
+        ["sh", "-c", command],
+        input=json.dumps(_bash("rm -rf /")).encode(),
+        capture_output=True,
+        env=env,
+        timeout=60,
+    )
+    assert refused.returncode == 0 and refused.stdout == b""
+    # with no working interpreter at all, no output: no decision
     (bin_dir / "python").unlink()
     (bin_dir / "python").write_text(stub.read_text())
     (bin_dir / "python").chmod(0o755)

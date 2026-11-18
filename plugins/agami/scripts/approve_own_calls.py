@@ -23,6 +23,8 @@ The plugin root is where this file is, never anything the call names. Every chec
 any doubt (an input it can't parse, a path it can't resolve, an exception) prints nothing. It
 imports nothing from the plugin or the agami package, and hooks.json starts it with `python3` from
 PATH, not through `scripts/py`, which reads its interpreter from `<artifacts_dir>/local/.config`.
+It takes `python3`, else `python`, only once that one has printed a probe word: the Windows Store
+alias can exit 0 without running anything.
 
 Contract (https://code.claude.com/docs/en/hooks, "PreToolUse decision control"): stdin is JSON with
 `hook_event_name`, `tool_name` and `tool_input`; printing `hookSpecificOutput.permissionDecision`
