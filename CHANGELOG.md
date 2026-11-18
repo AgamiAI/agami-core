@@ -125,6 +125,15 @@ below corresponds to one such version.
   so. Now it keeps the pinned one and reports `agami_python_lacks`: the path, what it lacks (e.g.
   agami-core without its `[model]` extra, or the driver) and the exact install line, and the skill
   stops there. `sm` names the missing `[model]` extra instead of saying agami-core can't be installed.
+- **`introspect --append` finishes a join-candidate scan the 300-probe cap stopped** (#693). On
+  Postgres and every engine but SQLite, a table with no schema reached a catalog read as None and
+  crashed (`'NoneType' object has no attribute 'replace'`): a bare name in `--tables`, or a
+  `--tables-file` line split at a space inside a table name. A bare name now takes the one schema the
+  catalog lists it in, or is refused by name; a file line is one name. Once it ran, each append tested
+  the same first pairs, so `unchecked_tables` never emptied: a round now tests a column against one
+  key at a time, and while tables stay unchecked `join_candidates.json` keeps the pairs already tested
+  (`tested_pairs`), so the next append starts where the last stopped. agami-connect repeats the append
+  while the list shrinks, and says how many tables weren't checked for joins when it can't finish.
 
 ## [0.9.24] — 2026-11-17
 

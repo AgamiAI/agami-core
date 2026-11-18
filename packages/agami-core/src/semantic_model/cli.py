@@ -2126,7 +2126,7 @@ def cmd_introspect(args) -> int:
             append=getattr(args, "append", False),
             batch=batch,
         )
-    except INTRO.ConnectionUnusable as exc:
+    except (INTRO.ConnectionUnusable, INTRO.TableSchemaUnknown) as exc:
         # the database's own reason, not a traceback: it is a setup problem the person fixes
         sys.stderr.write(f"agami: {exc}\n")
         return 2
@@ -2154,9 +2154,11 @@ def _introspect_inputs(args) -> tuple[int, Any]:
                 return 2, str(exc)
         else:
             text = Path(args.tables_file).expanduser().read_text(encoding="utf-8")
+        # One name per line, kept whole: a table name may hold a space, and splitting
+        # `public.Order Lines` left a bare `Lines` that reached a catalog read with no schema (#693).
         from_file = [ln.strip() for ln in text.splitlines()
                      if ln.strip() and not ln.lstrip().startswith("#")]
-        tables = (tables or []) + _normalize_table_list(from_file)
+        tables = (tables or []) + from_file or None
     batch = _batch_arg(getattr(args, "batch", None))
 
     runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True,
