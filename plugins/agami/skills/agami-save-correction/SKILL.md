@@ -81,6 +81,8 @@ When the SQL was pasted rather than regenerated, EXPLAIN says only that it plans
 
 Examples live per subject area at `<artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml`. Pick `<area>` = the subject area whose `tables_defined` includes the table(s) the corrected SQL references (run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" areas "$ROOT"` and match, or `get_table_context` to confirm membership; if the SQL spans areas, use the area of the primary/driving table).
 
+**If an `sm` call exits 12, agami's library is older than the plugin:** run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install` (the person approves it), then repeat the call. It is not "no model" (exit 3): never send the person to agami-connect for it.
+
 **Use the packaged writer — don't Read/Edit the YAML by hand or grep the source for its schema.** It creates the file if absent, appends, and **dedups by `question`** (a same-question correction replaces the earlier answer). One entry in a JSON array:
 
 ```bash

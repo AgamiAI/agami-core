@@ -934,6 +934,54 @@ def _no_install_verbs() -> set[str]:
     return set(line.split())
 
 
+def _stale_library_exit() -> int:
+    text = Path(SM).read_text(encoding="utf-8")
+    (code,) = re.findall(r"^STALE_LIBRARY_EXIT=(\d+)$", text, re.MULTILINE)
+    return int(code)
+
+
+def test_the_stale_library_refusal_is_not_the_no_model_code(tmp_path):
+    """A skill reads exit 3 from its first `sm areas` as "no model here, set the database up". A
+    library left stale by a plugin update must not read the same, or the person is sent to connect
+    a database that is already connected. The no-model code is taken from the CLI itself."""
+    from semantic_model.cli import main
+
+    empty = tmp_path / "no-model"
+    empty.mkdir()
+    no_model = main(["areas", str(empty)])
+    assert no_model == 3
+    assert _stale_library_exit() != no_model
+    # …nor any code sm passes through from the CLI or uses itself (0-3)
+    assert _stale_library_exit() not in {0, 1, 2, 3}
+
+
+def _skills_calling_an_approved_verb() -> dict[str, str]:
+    verbs = "|".join(re.escape(v) for v in HOOK_MOD.VERBS)
+    call = re.compile(rf'scripts/sm"?\s+({verbs})\b|\bsm\s+({verbs})\b')
+    found = {}
+    for skill in sorted((PLUGIN / "skills").glob("*/SKILL.md")):
+        text = skill.read_text(encoding="utf-8")
+        if call.search(text):
+            found[skill.parent.name] = text
+    return found
+
+
+def test_every_skill_that_calls_an_approved_verb_says_what_its_refusal_means():
+    """Claude only knows what the code means if the skill it is running says so, and the fix is a
+    step the person approves, so the skill turns the code into that step and then the call again."""
+    found = _skills_calling_an_approved_verb()
+    assert {"agami-connect", "agami-query", "agami-model", "agami-save-correction"} <= set(found)
+    code = _stale_library_exit()
+    for name, text in found.items():
+        lines = [ln for ln in text.splitlines() if f"exits {code}" in ln]
+        assert lines, name
+        (line,) = lines
+        assert "older than the plugin" in line, name
+        assert 'bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install' in line, name
+        assert "the person approves it" in line, name
+        assert "repeat the call" in line, name
+
+
 def test_the_launchers_no_install_list_is_the_hooks_table():
     # An approved call runs with no prompt, so it must never reach `sm`'s pip install.
     assert _no_install_verbs() == set(HOOK_MOD.VERBS)
@@ -972,7 +1020,7 @@ def test_an_approved_verb_never_installs(art, tmp_path, verb):
         text=True,
         timeout=60,
     )
-    assert r.returncode == 3, r.stderr
+    assert r.returncode == _stale_library_exit(), r.stderr
     assert not mark.exists(), mark.read_text()
     assert 'sm" install' in r.stderr
     # the same Python on a verb the hook doesn't approve does reach pip, so the shim is honest
