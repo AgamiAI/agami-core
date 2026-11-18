@@ -202,7 +202,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         try:
             _spec_out(a.out, "spec.json")
             if a.tables_out:
-                _spec_out(a.tables_out, "spec-tables.txt")
+                # A scratch file only: the guarded `sm introspect --tables-file` that reads it accepts
+                # nothing else, so a path under local/model-spec would pass here and be refused there.
+                _scratch_out.scratch_file(a.tables_out)
         except _scratch_out.Refused as e:
             return _scratch_out.refuse("model_spec_workbook.py", e)
     try:

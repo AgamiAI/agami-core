@@ -872,10 +872,10 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" steps "<root>" --mark tables=skipped
 When a model spec workbook was attached in 1.5, convert it FIRST and skip the 1.6 table card — the spec already names every table to model. Its outputs go under `local/`, outside the profile, so moving a partial model aside (1.8) never takes them with it (`mkdir -p "<artifacts_dir>/local/model-spec/<profile>"` first, as its own call):
 
 ```bash
-AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" model_spec_workbook.py parse --file "<workbook.xlsx>" --out "<artifacts_dir>/local/model-spec/<profile>/spec.json" --tables-out "<artifacts_dir>/local/model-spec/<profile>/spec-tables.txt"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" model_spec_workbook.py parse --file "<workbook.xlsx>" --out "<artifacts_dir>/local/model-spec/<profile>/spec.json" --tables-out "<artifacts_dir>/local/tmp/agami-spec-tables-<profile>.txt"
 ```
 
-It prints the counts it read (`subject_areas`, `tables`, `joins`, `joins_approved`, `joins_with_condition`, `metrics`, `sensitive_columns`, `rules`). **Quote those numbers verbatim — never count a sheet by reading it.** Exit 1 prints `errors` naming the missing sheet or column: show them and stop, the person fixes the workbook. Then run 1.7 with `--tables-file` set to `spec-tables.txt` as **ONE call — the single background build with its `sm progress` wait (1.7), never `--append` batches**, however many tables the spec names. The spec is applied once, over the whole set, so read the whole set in one go.
+It prints the counts it read (`subject_areas`, `tables`, `joins`, `joins_approved`, `joins_with_condition`, `metrics`, `sensitive_columns`, `rules`). **Quote those numbers verbatim — never count a sheet by reading it.** Exit 1 prints `errors` naming the missing sheet or column: show them and stop, the person fixes the workbook. Then run 1.7 with `--tables-file` set to that `agami-spec-tables-<profile>.txt` (the scratch folder is the only place the build reads a table list from) as **ONE call — the single background build with its `sm progress` wait (1.7), never `--append` batches**, however many tables the spec names. The spec is applied once, over the whole set, so read the whole set in one go.
 
 ### 1.6p — Pick from a list: the table picker page
 
