@@ -175,7 +175,7 @@ For every row that carries a `statement`. Skip this phase for a row that does no
 **The person's statement runs through the guard agami's own SQL runs through, and never on a command-line tier.** [`shared/statement-check.md`](../../shared/statement-check.md) is the procedure, step by step, and [`shared/part-ledger.md`](../../shared/part-ledger.md) is what each file means. Write `statement.sql` in `rows/<n>/` first, verbatim, then check the row with one call:
 
 ```bash
-"$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/check_statement.py" --profile <profile> --area <area> \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" check_statement.py --profile <profile> --area <area> \
   --row-dir "<artifacts_dir>/local/reconcile/<ts>/rows/<n>"
 ```
 
@@ -756,7 +756,7 @@ When the person asked to add their own examples, the run starts in [`shared/own-
 | The person's statement is refused by the scope gate (`table_scope`, `column_scope`) | Not a crash. `check_statement.py` has written `run.json` with `status: "refused"` and the rule; the ledger grades `scope: model_gap`. Tell the person the semantic model does not expose that table or column. Never rewrite or retry the statement. |
 | The person's statement fails the zero-row check (`table_not_found`, `column_not_found`, `syntax`) | The person's defect. `runs: query_defect`; nothing else is probed for that row. Show the one-line classifier remediation. |
 | `check_statement.py` exits `3` | The database cannot be queried as configured: a failure (`auth`, `dsn`, `network`, `permission`, `driver_missing`), or an `engine_mismatch` refusal, where the semantic model declares an engine its credentials do not connect to. Stop the run and tell the person the `remediation` in that row's `run.json`. Never fall back to running the statement on a command-line tier. |
-| `check_statement.py` exits `2` | It could not start: no `statement.sql` in the row directory, or `$PY` lacks agami-core (`bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install`). Fix that and check the row again. |
+| `check_statement.py` exits `2` | It could not start: no `statement.sql` in the row directory, or the interpreter lacks agami-core (`bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install`). Fix that and check the row again. |
 | `check_statement.py` exits anything else | The script crashed. Stop the run and tell the person. Never run the statement or a probe yourself instead. |
 | `sm filter-values plan` marks a value `sensitive` or unquotable | No probe is emitted for it, by design. The value is checked against the semantic model's list only; the grade is `unresolved` if the list cannot answer. Say why in the "Your statements" table. |
 | A probe's CSV is empty | The guard refused it or the database failed it; its `.run.json` says which. Leave the file; the ledger grades that part `unresolved` and says the probe likely failed. Do not delete it and do not re-run with weaker guards. |

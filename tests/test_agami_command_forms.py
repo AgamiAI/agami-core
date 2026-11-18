@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from skill_docs import PLUGIN, SKILLS_DIR
+from skill_docs import PLUGIN, SKILLS_DIR, skill_docs
 
 CONNECT = SKILLS_DIR / "agami-connect"
 REFS = CONNECT / "references"
@@ -373,6 +373,22 @@ def test_no_root_or_interpreter_variable_anywhere():
         text = doc.read_text(encoding="utf-8")
         for var in ("$ROOT", '"$PY"', "$PY ", "$PY`", "--full"):
             assert var not in text, f"{doc.relative_to(PLUGIN)}: {var}"
+
+
+INTERPRETER_VAR = re.compile(r"\$\{?PY\b")
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [*skill_docs(), *sorted(SHARED.glob("*.md"))],
+    ids=lambda d: str(d.relative_to(PLUGIN)),
+)
+def test_no_skill_or_shared_file_names_the_interpreter_variable(doc):
+    """`connection-reference.md` no longer defines `$PY`, and nothing carries a shell variable from
+    one call to the next, so a `"$PY" …` line runs an empty command. Every skill and every shared
+    file, not only the ones agami-connect links, names the launcher instead."""
+    hits = [line for line in doc.read_text(encoding="utf-8").splitlines() if INTERPRETER_VAR.search(line)]
+    assert hits == [], f"{doc.relative_to(PLUGIN)}: {hits}"
 
 
 def test_no_scratch_file_outside_the_scratch_folder():
