@@ -119,6 +119,24 @@ def last_progress_line(log: Path) -> str:
     return _STAMP.sub("", lines[-1], count=1) if lines else ""
 
 
+def attempt_started_at(root: Path) -> Optional[float]:
+    """When the standing `build=in_progress` mark was written, or None when no build is marked
+    under way."""
+    replay = _replay_marks(Path(root).expanduser())
+    return replay.build_started_at if replay.marks.get("build") == "in_progress" else None
+
+
+def attempt_progress_line(root: Path, attempt_at: Optional[float]) -> str:
+    """The build log's latest line when the log belongs to this attempt, else "". A log an earlier
+    attempt left (ending `done: …` or `failed: …`) is not this build's until the build writes to it:
+    read as this build's, `sm progress` reported a build that had not started as finished at once.
+    Same second-stamp rule as `_log_state`; with no standing build mark the log is taken as it is."""
+    log = Path(root).expanduser() / ".introspect" / "progress.log"
+    if attempt_at is not None and not _own_log(log, attempt_at):
+        return ""
+    return last_progress_line(log)
+
+
 def _timeline(root: Path) -> Path:
     return root / ".introspect" / "timeline.jsonl"
 
@@ -439,6 +457,24 @@ def _written_since(model: Path, attempt_at: float) -> bool:
         return False
 
 
+_BATCH = re.compile(r"^batch (\d+) of (\d+)")
+
+
+def _batches_left(log: Path) -> bool:
+    """Whether the log is a batched build's that has batches still to run: each batch starts a fresh
+    log whose first line is `batch n of N`, and every batch writes the model, so after batch 1 of 3
+    the model has landed and the log ends `done:` while two batches are still to come."""
+    if not L.inside_model(Path(log).parent.parent, log):
+        return False
+    try:
+        with open(log, encoding="utf-8", errors="replace") as fh:
+            first = next((ln for ln in fh if ln.strip()), "")
+    except OSError:
+        return False
+    m = _BATCH.match(_STAMP.sub("", first.strip(), count=1))
+    return bool(m) and int(m.group(1)) < int(m.group(2))
+
+
 def _build_count(log: Path) -> Optional[str]:
     parsed = parse_progress(last_progress_line(log))
     if parsed and parsed[2] == "tables":
@@ -447,9 +483,9 @@ def _build_count(log: Path) -> Optional[str]:
 
 
 def _signoff_count(signoff: dict[str, int], hidden: int) -> Optional[str]:
-    """What the sign-off step did, and only that. The card's own total (metrics, entities and
-    joins), so a run that signs nothing still reads "0 of 23 signed", and the step never counts
-    metrics alone while the card says 23. A definition the person did not sign is never counted as
+    """What the sign-off step did, and only that. The card's own total (metrics and entities, as
+    `review-items --scope preseed` lists them; joins have no card), so a run that signs nothing
+    still reads "0 of 23 signed", and the step never counts metrics alone while the card says 23. A definition the person did not sign is never counted as
     signed: one signed before this run "already signed off", one approved by a system sign-off
     "approved by agami" (a live sample run read "9 of 9 signed" after a person signed nothing)."""
     parts = []
@@ -547,6 +583,7 @@ def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, An
         and totals is not None
         and _written_since(model, attempt_at)
         and _own_log(log, attempt_at)
+        and not _batches_left(log)
     )
     if (
         state == "none"

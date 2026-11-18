@@ -34,11 +34,11 @@ def _row(name: str, numbers: dict[str, Any]) -> str:
 def _signoff_line(counts: dict[str, int]) -> Optional[str]:
     """The sign-off card's own count, split by kind ("23 definitions are waiting for sign-off: 11
     metrics, 12 entities."): a live run's summary counted metrics alone and said 11 where the card
-    said 23. A kind with nothing waiting is left out, and None when nothing waits."""
+    said 23. Joins are not on the card, so not here either. A kind with nothing waiting is left out,
+    and None when nothing waits."""
     kinds = (
         ("metrics", "metric", "metrics"),
         ("entities", "entity", "entities"),
-        ("joins", "join", "joins"),
     )
     parts = [count(counts[key], one, many) for key, one, many in kinds if counts[key]]
     total = sum(counts[key] for key, _, _ in kinds)

@@ -160,3 +160,33 @@ def test_a_later_write_by_another_command_is_not_a_finished_build(tmp_path, caps
     out = _run(["steps", str(root)], capsys)
     assert not out["then"].startswith(WRITTEN)
     assert out["problem"] == "The rebuild stopped before it finished."
+
+
+def _batch_log(root: Path, at: datetime, n: int, total: int) -> None:
+    log = root / ".introspect" / "progress.log"
+    log.write_text(
+        f"2026-11-18T10:00:00Z batch {n} of {total}\n"
+        "2026-11-18T10:00:01Z discovered 4 tables\n"
+        "2026-11-18T10:00:09Z done: 4 tables, 3 relationships\n"
+    )
+    os.utime(log, (at.timestamp(), at.timestamp()))
+
+
+def test_a_batched_build_with_batches_left_has_not_landed(tmp_path, capsys):
+    # Batch 1 of 3 writes the model and ends its log `done:`; a resume then must build batches 2
+    # and 3, not go to the join cards.
+    root = tmp_path / "acme"
+    _model_written(root, NOW - timedelta(minutes=2))
+    _batch_log(root, NOW - timedelta(minutes=2), 1, 3)
+    _started(root, NOW - timedelta(minutes=5))
+    out = _run(["steps", str(root)], capsys)
+    assert not out["then"].startswith(WRITTEN)
+    assert _build(out) == "▶ Read the tables and joins"
+
+
+def test_the_last_batch_lands_the_build(tmp_path, capsys):
+    root = tmp_path / "acme"
+    _model_written(root, NOW - timedelta(minutes=2))
+    _batch_log(root, NOW - timedelta(minutes=2), 3, 3)
+    _started(root, NOW - timedelta(minutes=5))
+    assert _run(["steps", str(root)], capsys)["then"].startswith(WRITTEN)

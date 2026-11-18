@@ -176,8 +176,8 @@ def test_a_system_sign_off_is_never_called_signed(model, capsys):
 
 def test_the_sample_reads_the_same_total_mid_run_and_after_the_system_sign_off(model, capsys):
     # A live sample run read "0 of 23 signed" while the step ran and "20 approved by agami" at the
-    # end: the silent build's system sign-off approved 3 guessed joins that were in the first count
-    # and not in the second. A join introspection approved itself is still never counted.
+    # end: 3 guessed joins were in the first count and not in the second. Joins have no card, so
+    # they are in neither count now (`review-items --scope preseed` is the card's total).
     metrics, entities = _unsign_all(model, "metrics"), _unsign_all(model, "entities")
     rel = model / "subject_areas" / "agami-example" / "relationships.yaml"
     doc = yaml.safe_load(rel.read_text())
@@ -186,7 +186,7 @@ def test_the_sample_reads_the_same_total_mid_run_and_after_the_system_sign_off(m
             review_state="unreviewed", signed_off_by=None, signed_off_at=None, signed_off_role=None
         )
     rel.write_text(yaml.safe_dump(doc))
-    total = metrics + entities + 3
+    total = metrics + entities
     steps.mark(model, "signoff", "in_progress")
     assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == f"0 of {total} signed"
     assert cli.main(["approve-queue", str(model), "--signer", "system", "--role", "system"]) == 0
@@ -224,9 +224,10 @@ def _unsign_all(root: Path, folder: str) -> int:
     return len(files)
 
 
-def test_signoff_counts_entities_and_joins_like_the_card(model):
-    # The card counts metrics, entities and joins awaiting review; a run that signs nothing still
-    # shows a count while the step runs and once it is done.
+def test_signoff_counts_metrics_and_entities_like_the_card(model):
+    # The card counts metrics and entities awaiting review (`review-items --scope preseed`); an
+    # unreviewed join is one line and no card, so it is not in the count. A run that signs nothing
+    # still shows a count while the step runs and once it is done.
     metrics, entities = _unsign_all(model, "metrics"), _unsign_all(model, "entities")
     rel = model / "subject_areas" / "agami-example" / "relationships.yaml"
     doc = yaml.safe_load(rel.read_text())
@@ -234,12 +235,13 @@ def test_signoff_counts_entities_and_joins_like_the_card(model):
         review_state="unreviewed", signed_off_by=None, signed_off_at=None, signed_off_role=None
     )
     rel.write_text(yaml.safe_dump(doc))
-    total = metrics + entities + 1
+    total = metrics + entities
     steps.mark(model, "signoff", "in_progress")
     assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == f"0 of {total} signed"
-    assert total == 17
+    assert total == 16
     steps.mark(model, "signoff", "done")
-    assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == "0 of 17 signed"
+    assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == "0 of 16 signed"
+    assert _by_id(steps.onboarding_steps(model))["build"]["count"].endswith(", 1 to confirm")
 
 
 def _hide_invoices_with_everything_unsigned(model: Path) -> None:

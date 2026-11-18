@@ -136,13 +136,15 @@ def test_the_overview_card_takes_every_number_from_sm_overview():
 def test_the_skill_pre_approves_its_own_scripts(skill):
     head = (SKILLS_DIR / skill / "SKILL.md").read_text(encoding="utf-8").split("\n---\n", 1)[0]
     rules = yaml.safe_load(head.removeprefix("---\n"))["allowed-tools"]
-    assert 'Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)' in rules
-    # an allow rule doesn't match past an env assignment Claude Code doesn't know is safe
-    assert 'Bash(AGAMI_SQL_MAX_ROWS=* bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)' in rules
-    # a live run dropped the quotes, ran the script without `bash`, and read phase files: each form
-    # that missed a rule stopped for permission
-    assert "Bash(bash ${CLAUDE_PLUGIN_ROOT}/scripts/sm *)" in rules
-    assert 'Bash("${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)' in rules
+    # one rule per command, never a free `sm *` (tests/test_connect_allowed_tools.py says why)
+    assert 'Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" steps *)' in rules
+    assert 'Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)' not in rules
+    # an allow rule doesn't match past an env assignment Claude Code doesn't know is safe, so the
+    # build's prefix is in the rule, written out: `=*` would let any other assignment through too
+    assert (
+        'Bash(AGAMI_SQL_MAX_ROWS=200000 AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm"'
+        " introspect *)" in rules
+    )
     assert "Read(/${CLAUDE_PLUGIN_ROOT}/**)" in rules
     assert all("${CLAUDE_PLUGIN_ROOT}/" in r for r in rules)  # nothing outside the plugin
 

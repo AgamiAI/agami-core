@@ -23,6 +23,7 @@ local-only execution path the rest of agami uses; no new egress.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import functools
 import io
@@ -556,11 +557,19 @@ def _logs_failure(fn: Callable) -> Callable:
             return fn(*args, **kwargs)
         # BaseException, not Exception: a Ctrl-C must also end the log with `failed:`; it is re-raised.
         except BaseException as exc:
-            path = kwargs.get("progress_path")
-            reason = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
-            _progress(Path(path) if path else None, f"failed: {reason}")
+            log_failure(kwargs.get("progress_path"), exc)
             raise
     return run
+
+
+def log_failure(path: Optional[str | Path], exc: BaseException) -> None:
+    """End the progress log at `path` with `failed: <the exception's first line>`."""
+    reason = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+    if path:
+        # a run that fails before the engine made the folder (a missing --tables-file) still logs
+        with contextlib.suppress(OSError):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+    _progress(Path(path) if path else None, f"failed: {reason}")
 
 
 @_logs_failure

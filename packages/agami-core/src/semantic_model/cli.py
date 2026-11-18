@@ -596,10 +596,10 @@ def cmd_progress(args) -> int:
     turn open, and a turn that ends mid-onboarding loses the skill's pre-approvals, so every later
     command would stop for permission."""
     from . import steps
-    log = Path(args.root).expanduser() / ".introspect" / "progress.log"
+    attempt_at = steps.attempt_started_at(Path(args.root))
 
     def last() -> str:
-        return steps.last_progress_line(log)
+        return steps.attempt_progress_line(Path(args.root), attempt_at)
 
     start = last()
     deadline = time.monotonic() + max(0.0, args.wait)
@@ -2097,30 +2097,20 @@ def cmd_introspect(args) -> int:
     from . import introspect as INTRO
     from . import validator as V
 
-    tables = _normalize_table_list(args.tables)
-    if getattr(args, "tables_file", None):
-        # a newline-separated allowlist file — the shell-quoting-proof way to pass a big kept set
-        # (no word-splitting to get wrong). `#` comments and blank lines ignored.
-        from . import scratch
-        if scratch.guarded():
-            try:
-                text = scratch.read_scratch(args.tables_file, scratch.TEXT_CAP).decode("utf-8")
-            except (scratch.NotScratch, ValueError) as exc:
-                _print_json({"error": str(exc)})
-                return 2
-        else:
-            text = Path(args.tables_file).expanduser().read_text(encoding="utf-8")
-        from_file = [ln.strip() for ln in text.splitlines()
-                     if ln.strip() and not ln.lstrip().startswith("#")]
-        tables = (tables or []) + _normalize_table_list(from_file)
-
-    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True,
-                                           artifacts_dir=args.artifacts)
-    # Each statement is its own connection: several at once would open as many sign-in prompts.
-    from . import profile as PF
-    PF.WORKERS = 1 if _may_prompt_to_sign_in(args.profile) else PF.WORKERS
     progress = args.progress or str(
         Path(args.artifacts).expanduser() / args.profile / ".introspect" / "progress.log")
+    # Everything before the engine starts can fail too (a missing --tables-file, a bad --batch, a
+    # refused file): the log must say so, or `sm progress` waits out its silence rule for nothing.
+    # The engine's own failures are logged by its decorator.
+    try:
+        rc, prepared = _introspect_inputs(args)
+    except BaseException as exc:
+        INTRO.log_failure(progress, exc)
+        raise
+    if rc:
+        INTRO.log_failure(progress, RuntimeError(prepared))
+        return rc
+    tables, runner, batch = prepared
     try:
         org, report = INTRO.introspect(
             args.profile,
@@ -2134,7 +2124,7 @@ def cmd_introspect(args) -> int:
             bigquery_region=args.bigquery_region,
             progress_path=progress,
             append=getattr(args, "append", False),
-            batch=_batch_arg(getattr(args, "batch", None)),
+            batch=batch,
         )
     except INTRO.ConnectionUnusable as exc:
         # the database's own reason, not a traceback: it is a setup problem the person fixes
@@ -2144,6 +2134,37 @@ def cmd_introspect(args) -> int:
     print(report.render())
     print(V.format_result(res))
     return 0 if res.ok else 1
+
+
+def _introspect_inputs(args) -> tuple[int, Any]:
+    """(0, (tables, runner, batch)) for `introspect`, or (exit code, the reason) when an input is
+    refused. Anything else that goes wrong raises."""
+    from . import introspect as INTRO
+
+    tables = _normalize_table_list(args.tables)
+    if getattr(args, "tables_file", None):
+        # a newline-separated allowlist file — the shell-quoting-proof way to pass a big kept set
+        # (no word-splitting to get wrong). `#` comments and blank lines ignored.
+        from . import scratch
+        if scratch.guarded():
+            try:
+                text = scratch.read_scratch(args.tables_file, scratch.TEXT_CAP).decode("utf-8")
+            except (scratch.NotScratch, ValueError) as exc:
+                _print_json({"error": str(exc)})
+                return 2, str(exc)
+        else:
+            text = Path(args.tables_file).expanduser().read_text(encoding="utf-8")
+        from_file = [ln.strip() for ln in text.splitlines()
+                     if ln.strip() and not ln.lstrip().startswith("#")]
+        tables = (tables or []) + _normalize_table_list(from_file)
+    batch = _batch_arg(getattr(args, "batch", None))
+
+    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True,
+                                           artifacts_dir=args.artifacts)
+    # Each statement is its own connection: several at once would open as many sign-in prompts.
+    from . import profile as PF
+    PF.WORKERS = 1 if _may_prompt_to_sign_in(args.profile) else PF.WORKERS
+    return 0, (tables, runner, batch)
 
 
 def _batch_arg(text: Optional[str]) -> Optional[tuple[int, int]]:

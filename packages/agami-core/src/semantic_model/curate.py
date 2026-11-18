@@ -457,26 +457,23 @@ def _signed_at(obj) -> Optional[float]:
 
 
 def signoff_counts(org: Datasource, since: Optional[float] = None) -> dict[str, int]:
-    """What the sign-off card counts: metrics, entities and joins awaiting review (`metrics`,
-    `entities`, `joins`, summed in `waiting`: the review queue's Rule 1 and Rule 2 items), and those
-    a person approved (`signed`). The step list and the closing summary both read this, so neither
-    can show a different number from the card.
+    """What the sign-off card counts: metrics (named filters included) and entities awaiting review
+    (`metrics`, `entities`, summed in `waiting`), exactly what `sm review-items --scope preseed`
+    lists, and those a person approved (`signed`). The step list and the closing summary both read
+    this, so neither can show a different number from the card. Joins are not on the card (one line
+    each, no card), so they are never in `waiting` or `signed`; `joins` alone says how many inferred
+    joins wait to be confirmed, for the build step's "N to confirm".
 
     With `since` (the onboarding run's start), `signed` is only what a person signed off from then
     on; one signed off before it (the sample's ready-made definitions, an earlier session's) is
     `earlier`. A live sample run read "9 of 9 signed" though the person signed nothing. `by_agami` is
-    what was approved with a system sign-off rather than by a person (the sample's silent build), joins
-    included: they were in the card's total while waiting, and a live sample run read "0 of 23 signed"
-    then "20 approved by agami". Joins the build approved itself (declared keys) are structure, never
-    counted."""
+    what was approved with a system sign-off rather than by a person (the sample's silent build)."""
     out = {"metrics": 0, "entities": 0, "joins": 0, "waiting": 0, "signed": 0, "earlier": 0,
            "by_agami": 0}
-    kinds = {"metric": "metrics", "entity": "entities", "relationship": "joins"}
+    kinds = {"metric": "metrics", "entity": "entities"}
     groups = [(sa.metrics, "metric") for sa in org.subject_areas]
     groups += [(sa.entities, "entity") for sa in org.subject_areas]
-    groups += [(sa.relationships, "relationship") for sa in org.subject_areas]
-    groups += [(org.cross_subject_area_metrics, "metric"),
-               (org.cross_subject_area_relationships, "relationship")]
+    groups += [(org.cross_subject_area_metrics, "metric")]
     for objs, kind in groups:
         for obj in objs:
             tab = _tab(obj)
@@ -488,9 +485,11 @@ def signoff_counts(org: Datasource, since: Optional[float] = None) -> dict[str, 
                 # An approval with no time (an approve op the caller did not stamp) is not dated before
                 # the run, so it stays the person's.
                 out["signed" if since is None or at is None or at >= since else "earlier"] += 1
-            elif tab == "auto" and getattr(obj, "review_state", None) == "approved" and (
-                    kind != "relationship" or getattr(obj, "signed_off_by", None) not in (None, "agami_introspect")):
+            elif tab == "auto" and getattr(obj, "review_state", None) == "approved":
                 out["by_agami"] += 1
+    rels = [r for sa in org.subject_areas for r in sa.relationships]
+    out["joins"] = sum(1 for r in rels + list(org.cross_subject_area_relationships)
+                       if _tab(r) == "review")
     return out
 
 

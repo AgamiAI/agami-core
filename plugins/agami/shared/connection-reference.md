@@ -13,7 +13,7 @@ These are non-negotiable. Skills that read this document must follow them under 
 3. **Never scan or guess.** Tool detection is `which <tool>` and `bash "<plugin_root>/scripts/py" -c 'import <module>'`. Nothing else. No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, port scanning, or hostname guessing. Tool paths are cached in `<artifacts_dir>/local/.config.tool_paths` so subsequent skill invocations don't even re-probe — they read the cached path and use it.
 4. **If the cached tool path is broken** (binary moved or uninstalled), surface the failure cleanly and offer to re-detect. Do not silently fall through to localhost-probing or any other discovery technique.
 5. **NEVER put the password (or any credential field) in a Bash command line.** Hosts render Bash tool calls in their UI — anything in the command, env-var assignment, or stdin is visible to anyone scrolling the chat. Use the provider-native auth files written by `scripts/setup_pgauth.py`:
-   - For postgres: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -h <host> -p <port> -U <user> -d <db> -f <artifacts_dir>/local/tmp/agami-query.txt --csv`
+   - For postgres: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -v ON_ERROR_STOP=1 -h <host> -p <port> -U <user> -d <db> -f <artifacts_dir>/local/tmp/agami-query.txt --csv`
    - For mysql: `mysql --defaults-file=<artifacts_dir>/local/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e 'source <artifacts_dir>/local/tmp/agami-query.txt' --batch --raw`
    The SQL goes in that file, written with the Write tool, never on the command line: a string literal (`WHERE status = 'paid'`) would end the shell's quoting. The file is overwritten by the next statement and holds only SQL text, never a credential; never put a secret in it.
    These auth files are chmod 600 in `<artifacts_dir>/local/`. The visible Bash command contains NO password — psql / mysql read the password from the auth file silently. **Patterns that are FORBIDDEN**: `export PGPASSWORD='<literal>'`, `export MYSQL_PWD='<literal>'`, `psql -W <password>`, `mysql -p<password>`, or anything else where the password appears in the command, env assignment, or stdin.
@@ -40,7 +40,7 @@ Reference this table whenever a skill needs to verify a connection works. Don't 
 |---|---|
 | `cli` postgres | `PGPASSFILE="<artifacts_dir>/local/.pgpass" psql -h <host> -U <user> -d <db> -c 'SELECT 1' --csv` |
 | `cli` mysql | `mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" --defaults-group-suffix="_<profile>" -e 'SELECT 1' --batch` |
-| `cli` snowflake | `snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c "<profile>" -q 'SELECT 1' -o output_format=csv -o friendly=false` |
+| `cli` snowflake | `snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c "<profile>" -q 'SELECT 1' -o exit_on_error=true -o output_format=csv -o friendly=false` |
 | `python` bigquery | `AGAMI_PROFILE="<profile>" bash "<plugin_root>/scripts/py" -m execute_sql --sql 'SELECT 1'` (BigQuery is Python-only — there's no native CLI tier today) |
 | `cli` sqlite | `sqlite3 -header -csv "<path>" 'SELECT 1'` — **always pass `-header`** so result CSVs carry column names (without it `format-table` treats row 1 as the header). |
 | `duckdb` | `duckdb -init "<init_file>" -c 'SELECT 1' --csv` (`<init_file>` is the path `build_duckdb_attach.py` prints) |
@@ -247,8 +247,11 @@ bash "<plugin_root>/scripts/py" setup_pgauth.py --profile <profile>
 # Execute a query and return CSV. Write the statement with the Write tool to
 # <artifacts_dir>/local/tmp/agami-query.txt first. PGPASSFILE points at the auth file;
 # psql reads the password silently. The bash command itself is password-free.
-PGPASSFILE="<artifacts_dir>/local/.pgpass" PGSSLMODE=<sslmode> psql -h "<host>" -p <port> -U "<user>" -d "<database>" -f "<artifacts_dir>/local/tmp/agami-query.txt" --csv
+PGPASSFILE="<artifacts_dir>/local/.pgpass" PGSSLMODE=<sslmode> psql -v ON_ERROR_STOP=1 -h "<host>" -p <port> -U "<user>" -d "<database>" -f "<artifacts_dir>/local/tmp/agami-query.txt" --csv
 ```
+
+`-v ON_ERROR_STOP=1` is what makes a failed statement fail the call: without it `psql -f` prints the
+error and exits 0, so a query the database refused reads as an empty result. With it psql exits 3.
 
 `<sslmode>` is the profile's `sslmode`, or `prefer` when it has none.
 
@@ -270,7 +273,7 @@ Redshift speaks the PostgreSQL wire protocol, so **psql works as-is**. The only 
 
 ```bash
 # Same invocation as postgres, just with the Redshift host/port and sslmode=require.
-PGPASSFILE="<artifacts_dir>/local/.pgpass" PGSSLMODE=require psql -h "<host>" -p 5439 -U "<user>" -d "<database>" -f "<artifacts_dir>/local/tmp/agami-query.txt" --csv
+PGPASSFILE="<artifacts_dir>/local/.pgpass" PGSSLMODE=require psql -v ON_ERROR_STOP=1 -h "<host>" -p 5439 -U "<user>" -d "<database>" -f "<artifacts_dir>/local/tmp/agami-query.txt" --csv
 ```
 
 `type = redshift` in the credentials profile (or a `redshift://` DSN) sets the right defaults. For the Python driver path the connection params are identical to postgres; agami's `execute_sql.py` routes `type=redshift` through the postgres execution path.
@@ -288,8 +291,10 @@ Snowflake doesn't speak the Postgres wire protocol. It needs its own native CLI 
 bash "<plugin_root>/scripts/py" setup_pgauth.py --profile <profile>
 
 # Run a query — snowsql reads the password from the config silently.
-snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c <profile> -f "<artifacts_dir>/local/tmp/agami-query.txt" -o output_format=csv -o header=true -o friendly=false -o timing=false
+snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c <profile> -f "<artifacts_dir>/local/tmp/agami-query.txt" -o exit_on_error=true -o output_format=csv -o header=true -o friendly=false -o timing=false
 ```
+
+`-o exit_on_error=true` makes a failed statement fail the call; snowsql's default carries on and exits 0.
 
 The `-o output_format=csv -o header=true` flags produce parseable output. `-o friendly=false -o timing=false` strips the human-friendly banner and timing line so the CSV is clean.
 
@@ -371,7 +376,7 @@ bash "<plugin_root>/scripts/py" setup_pgauth.py --profile <profile>
 mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" --defaults-group-suffix=_<profile> -h "<host>" -P <port> "<database>" -e 'source <artifacts_dir>/local/tmp/agami-query.txt' --batch --raw
 ```
 
-`mysql` has no file option, so `-e 'source <file>'` runs the statement from the file. Write the file with the Write tool first. `source` reads the file name to the end of the line, so a space in the path is fine; don't quote it inside `source`.
+`mysql` has no file option, so `-e 'source <file>'` runs the statement from the file. An `ERROR` line on stderr is a failed query whatever the exit code says: whether a failed statement inside `source` makes `mysql` exit non-zero differs between the MySQL and MariaDB clients. Write the file with the Write tool first. `source` reads the file name to the end of the line, so a space in the path is fine; don't quote it inside `source`.
 
 The output is tab-separated, one row per line; read it as it is (no `tr` or other filter on the line).
 
@@ -382,7 +387,7 @@ The output is tab-separated, one row per line; read it as it is (no `tr` or othe
 sqlite3 -csv -header "<path>" '.read "<artifacts_dir>/local/tmp/agami-query.txt"'
 ```
 
-`sqlite3` has no file option either; `.read "<file>"` runs the statement in the file. Keep the double quotes inside the dot-command: without them a space in the path ends the file name (`Usage: .read FILE`).
+`sqlite3` has no file option either; `.read "<file>"` runs the statement in the file. A failed statement in the file makes `sqlite3` exit 1. Keep the double quotes inside the dot-command: without them a space in the path ends the file name (`Usage: .read FILE`).
 
 **For these two, the artifacts folder's path must not contain an apostrophe**: the whole dot-command or `source` line sits in single quotes on the command line, and an apostrophe would end them. When it does, run the statement through the Python driver instead, `bash "<plugin_root>/scripts/py" -m execute_sql --profile <profile> --sql-file "<artifacts_dir>/local/tmp/agami-query.txt"`, whose path is double-quoted.
 
@@ -458,7 +463,7 @@ When introspecting databases, exclude system schemas:
 ## Security Rules
 
 - **NEVER** put passwords in any visible Bash command — not in `export PGPASSWORD='...'`, not in `mysql -p<password>`, not in stdin heredocs that interpolate the password. Hosts render Bash tool calls in their UI; the password leaks into the chat. Use the auth files generated by `scripts/setup_pgauth.py`:
-  - psql: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -h <host> -p <port> -U <user> -d <db> -f <artifacts_dir>/local/tmp/agami-query.txt --csv`
+  - psql: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -v ON_ERROR_STOP=1 -h <host> -p <port> -U <user> -d <db> -f <artifacts_dir>/local/tmp/agami-query.txt --csv`
   - mysql: `mysql --defaults-file=<artifacts_dir>/local/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e 'source <artifacts_dir>/local/tmp/agami-query.txt' --batch --raw`
   - Python driver: `bash "<plugin_root>/scripts/py" -m execute_sql --sql-file ...` (reads creds internally; never echoes them)
 - Use `--csv` or `--batch` output modes (not interactive) for predictable parsing

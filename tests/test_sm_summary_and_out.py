@@ -119,12 +119,30 @@ def _awaiting(root: Path, metrics: int, entities: int) -> None:
             (area / folder / f"copy_{i:02d}.yaml").write_text(yaml.safe_dump(doc))
 
 
+def _unreviewed_join(root: Path) -> None:
+    """Leave the sample's first join awaiting confirmation, as a join guessed from names is."""
+    path = root / "subject_areas" / "agami-example" / "relationships.yaml"
+    doc = yaml.safe_load(path.read_text())
+    rels = doc["relationships"] if isinstance(doc, dict) else doc
+    rels[0]["review_state"] = "unreviewed"
+    for k in ("signed_off_by", "signed_off_at", "signed_off_role"):
+        rels[0].pop(k, None)
+    path.write_text(yaml.safe_dump(doc))
+
+
 def test_summary_counts_what_the_sign_off_card_counts(model, capsys):
-    # A live run's summary said 11 (metrics alone) where the card said 23.
+    # A live run's summary said 11 (metrics alone) where the card said 23. The card's total is
+    # `review-items --scope preseed`: metrics, named filters and entities. A join is one line and
+    # no card, so an unreviewed join must not raise the count either.
     _awaiting(model, metrics=11, entities=12)
-    assert cli.main(["review-queue", str(model)]) == 0
-    queue = json.loads(capsys.readouterr().out)["counts"]
-    assert queue["rule_1"] + queue["rule_2"] == 23
+    _unreviewed_join(model)
+    assert cli.main(["review-items", str(model), "--scope", "preseed"]) == 0
+    card = json.loads(capsys.readouterr().out)
+    assert len(card) == 23
+    from semantic_model import curate
+
+    assert curate.model_signoff_counts(model)["waiting"] == len(card)
+    assert curate.model_signoff_counts(model)["joins"] == 1
     text = summary.onboarding_summary(model)["markdown"]
     assert text.endswith("\n\n23 definitions are waiting for sign-off: 11 metrics, 12 entities.\n")
     assert text.startswith("**Sample store: 11 tables, 12 joins, 11 metrics, 14 examples.**")
@@ -141,12 +159,14 @@ def test_summary_counts_the_review_queue_with_a_hidden_table(model, capsys):
     assert text.endswith("\n\n14 definitions are waiting for sign-off: 7 metrics, 7 entities.\n")
 
 
-def test_the_sign_off_line_names_joins_too():
+def test_the_sign_off_line_leaves_joins_out():
+    # Joins are not on the sign-off card, so the line that repeats the card's count names none.
     from semantic_model import summary as S
 
     assert S._signoff_line(
-        {"metrics": 0, "entities": 1, "joins": 2, "waiting": 3, "signed": 0}
-    ) == ("3 definitions are waiting for sign-off: 1 entity, 2 joins.")
+        {"metrics": 0, "entities": 1, "joins": 2, "waiting": 1, "signed": 0}
+    ) == ("1 definition is waiting for sign-off: 1 entity.")
+    assert S._signoff_line({"metrics": 0, "entities": 0, "joins": 2, "waiting": 0}) is None
 
 
 def test_summary_has_a_totals_row_with_two_areas(model):
