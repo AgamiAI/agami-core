@@ -43,6 +43,57 @@ class LinkedTarget(ValueError):
     """A file agami writes, or its folder, is a link: refused, so nothing is written through it."""
 
 
+class LinkedFile(OSError):
+    """A file agami opens by name is a link, has a second name (a hard link), is not a regular file,
+    or was swapped for another while it was opened: refused, so nothing passes through it."""
+
+
+# How Windows marks a symlink or a junction; `lstat` reports it in `st_file_attributes`.
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def _is_link(st) -> bool:
+    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & _REPARSE_POINT)
+
+
+def open_one_name(path: str | os.PathLike, flags: int, mode: int = 0o666) -> int:
+    """An fd for `path`, never through a link at its last part, checked on the open file: a regular
+    file with one name (`LinkedFile` otherwise; a failed open raises its own OSError).
+
+    Where the OS has no `O_NOFOLLOW` (Windows) an open follows a link, so the name is `lstat`ed
+    first, a link or reparse point refused, and the open file must be the one `lstat` saw (device
+    and inode): a link swapped in between is refused. A missing name is created only with `O_CREAT`,
+    and then exclusively, so a link planted after the `lstat` fails the open. With no inode to
+    compare, neither check is possible and the file is refused."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    before = None
+    if not nofollow:
+        try:
+            before = os.lstat(path)
+        except FileNotFoundError:
+            if not flags & os.O_CREAT:
+                raise
+            flags |= os.O_EXCL
+        else:
+            if _is_link(before):
+                raise LinkedFile(f"{path} is a link")
+            if not before.st_ino:
+                raise LinkedFile(f"{path}: can't tell whether it is a link, so it is not opened")
+    fd = os.open(path, flags | nofollow, mode)
+    try:
+        st = os.fstat(fd)
+        if before is not None and (st.st_dev, st.st_ino) != (before.st_dev, before.st_ino):
+            raise LinkedFile(f"{path} was replaced while it was opened")
+        if not stat.S_ISREG(st.st_mode):
+            raise LinkedFile(f"{path} is not a regular file")
+        if st.st_nlink != 1:
+            raise LinkedFile(f"{path} has another name elsewhere (a hard link)")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def write_replacing(path: Path, text: str, mode: int | None = None) -> None:
     """`text` at `path` through a temp file in the same folder and a rename, so a link planted at the
     name is replaced, never written through. A folder that is a link is refused (`LinkedTarget`), as
@@ -144,24 +195,20 @@ def check_input(path: str) -> Path:
 
 def read_scratch(path: str, cap: int, engine_ok: bool = False) -> bytes:
     """The bytes of scratch file `path` (or, with `engine_ok`, a build's own engine file), or
-    NotScratch. Opened without following a link and checked on the open file, so nothing can be
-    swapped in between the check and the read."""
+    NotScratch. Opened by `open_one_name`, so nothing can be swapped in between the check and the
+    read, on Windows too."""
     p = check_input(path) if engine_ok else in_scratch(path)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
     try:
-        fd = os.open(p, flags)
+        fd = open_one_name(p, flags)
     except FileNotFoundError:
         raise NotScratch(f"file not found: {p}") from None
     except IsADirectoryError:
         raise NotScratch(f"{p} is a folder, not a file") from None
+    except LinkedFile as exc:
+        raise NotScratch(f"{exc}; write a fresh file") from None
     except OSError as exc:
         raise NotScratch(f"could not open {p} (a link is refused): {exc.strerror}") from None
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-        os.close(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise NotScratch(f"{p} is not a regular file")
-        raise NotScratch(f"{p} has another name elsewhere (a hard link); write a fresh file")
     with os.fdopen(fd, "rb") as fh:
         data = fh.read(cap + 1)
     if len(data) > cap:
