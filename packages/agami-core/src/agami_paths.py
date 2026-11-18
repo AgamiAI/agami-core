@@ -64,6 +64,27 @@ def local_dir(art: Path | None = None) -> Path:
     return (art or artifacts_dir()) / LOCAL_SUBDIR
 
 
+def ensure_local_dir(art: Path | None = None) -> Path:
+    """`<artifacts_dir>/local/` made, or tightened, to 0700, and returned.
+
+    Whatever creates `local/` first decides its mode for good: a plain mkdir under the usual umask
+    left it 0755, so the credentials' and `.config`'s names, and every scratch file, were listable
+    by anyone on the machine. Every writer into `local/` calls this instead, and an existing folder
+    is tightened. A `local` that is a link is left alone: chmod would change whatever it points at."""
+    local = local_dir(art)
+    local.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.mkdir(local, 0o700)
+    except FileExistsError:
+        pass
+    if not local.is_symlink() and local.is_dir():
+        try:
+            os.chmod(local, 0o700)
+        except OSError:
+            pass
+    return local
+
+
 # --- specific paths (everything that used to live under ~/.agami) -----------
 
 
@@ -185,6 +206,11 @@ def migrate_legacy_home(art: Path | None = None) -> bool:
 
 def bootstrap() -> Path:
     """Call at the start of every entry point: runs the one-shot legacy migration
-    (idempotent — a cheap no-op once done) and returns the resolved artifacts dir."""
+    (idempotent — a cheap no-op once done), tightens an existing `local/` to 0700 (one an older
+    version made under the usual umask), and returns the resolved artifacts dir. It never creates
+    `local/`: before a folder is chosen that would leave a stray ~/agami-artifacts behind."""
     migrate_legacy_home()
-    return artifacts_dir()
+    art = artifacts_dir()
+    if local_dir(art).is_dir():
+        ensure_local_dir(art)
+    return art

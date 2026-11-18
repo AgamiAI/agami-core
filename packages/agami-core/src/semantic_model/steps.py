@@ -1,0 +1,775 @@
+"""The onboarding step list, with each step's status and count read from disk.
+
+agami-connect shows its steps as a task list. When the model re-typed them from prose, the list
+drifted between turns and was lost when a turn ended; `sm steps` prints it from the engine instead,
+so every surface draws the same list. Status comes from the marks a skill appends to
+`<root>/.introspect/timeline.jsonl` and from what is on disk (a model that loads, a build's progress
+log); every count comes from the engine's own numbers, never an estimate.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import tempfile
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+from . import loader as L
+from .say_text import count as noun_count
+from .say_text import quoted
+
+STEP_IDS = (
+    "connect",
+    "context",
+    "tables",
+    "build",
+    "describe",
+    "open_questions",
+    "signoff",
+    "examples",
+    "reports",
+    "first_question",
+)
+
+# The skill's existing wording (agami-connect "Progress tracking"), so the list reads the same.
+LABELS = {
+    "connect": "Connect your database",
+    "context": "Tell agami about your data",
+    "tables": "Pick the tables",
+    "build": "Read the tables and joins",
+    "describe": "Describe columns and add metrics",
+    "open_questions": "Answer what the data can't settle",
+    "signoff": "Sign off definitions and hide personal data",
+    "examples": "Write and check example questions",
+    "reports": "Check your reports",
+    "first_question": "Summary and first question",
+}
+
+# Steps that run only when the person asked for them: 2g only with "Ask me as you go", the report
+# check only when reports were shared. One passed over without a mark is skipped, never done.
+OPTIONAL_STEPS = ("open_questions", "reports")
+
+MARK_STATUSES = ("in_progress", "done", "skipped")
+
+# The sample database's model folder (agami-connect Phase 0s) and the steps its path never runs: no
+# table picker, no open questions, no reports. They are skipped from the first list, so the person
+# never sees steps the sample doesn't have; a mark still overrides.
+SAMPLE_PROFILE = "agami-example"
+SAMPLE_SKIPS = ("tables", "open_questions", "reports")
+
+# An unfinished build log this long untouched is taken for a build that died without a word (a
+# killed process writes no `failed:` line), so the list doesn't read "building" forever.
+STALE_BUILD_SECONDS = 1800
+
+# The longest failure reason a problem line or progress line carries. Longer than the 80 of other
+# model text: the reason can't be told apart from the engine's own hints ("no tables discovered. If
+# the catalog is locked down, …"), and a hint cut at 80 loses the advice it exists for.
+FAILURE_CAP = 200
+
+# Each progress-log line, in the person's words: (pattern, phrase, unit). The engine's own wording
+# (`columns+grain 30/52`) is for the engine; a person reads "Reading columns … 30/52 tables".
+PROGRESS_PHRASES = (
+    (re.compile(r"^batch (\d+) of (\d+)"), "Batch {0} of {1}", None),
+    (re.compile(r"^discovered (\d+) tables"), "Found {0} tables", None),
+    (re.compile(r"^columns\+grain (\d+)/(\d+)"), "Reading columns", "tables"),
+    (re.compile(r"^relationships: declared FK (\d+)/(\d+)"), "Checking joins", "keys"),
+    (re.compile(r"^building relationships"), "Working out the joins", None),
+    (re.compile(r"^joins: checking (\d+) on the data"), "Checking {0} joins on the data", None),
+    (re.compile(r"^joins checked (\d+)/(\d+)"), "Checking joins on the data", "joins"),
+    (re.compile(r"^profiling \d+ tables"), "Profiling columns", None),
+    (re.compile(r"^profiled (\d+)/(\d+) tables"), "Profiling columns", "tables"),
+    # The scan's count has no total to show against: which pairs are tested hangs on what earlier ones found.
+    (re.compile(r"^join candidates: (\d+) probed"), "Testing possible joins: {0} probed", None),
+    (re.compile(r"^join candidates: (\d+) found"), "Testing possible joins: {0} found", None),
+    (re.compile(r"^join candidates"), "Testing possible joins", None),
+    (
+        re.compile(r"^done: (\d+) tables, (\d+) (?:relationships|joins)"),
+        "Done: {0} tables, {1} joins",
+        None,
+    ),
+)
+
+# The heartbeat a slow statement writes: how long, then what it waits on (table and column names,
+# which are model text, so the second part is quoted when posted).
+WAITING = re.compile(r"^waiting on the database for ([0-9]+ (?:s|min|h)(?: [0-9]+ min)?): (.*)$")
+
+# The UTC time each log line starts with (`2026-11-17T10:04:00Z columns+grain 30/52`): for the progress
+# page, not for the person, so the reader drops it and matches the message after it.
+_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z ")
+
+
+def parse_progress(raw: str) -> Optional[tuple[re.Match, str, Optional[str]]]:
+    """The (match, phrase, unit) of the first progress phrase a log line matches, else None."""
+    for pattern, phrase, unit in PROGRESS_PHRASES:
+        m = pattern.match(raw)
+        if m:
+            return m, phrase, unit
+    return None
+
+
+def last_progress_line(log: Path) -> str:
+    """The build log's latest non-blank line without its time stamp, or "" when there is none (yet),
+    or when the log is a link out of its model folder (`<root>/.introspect/progress.log`): `sm
+    progress` prints the line."""
+    if not L.inside_model(Path(log).parent.parent, log):
+        return ""
+    try:
+        text = log.read_text(encoding="utf-8", errors="replace")
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+    except OSError:
+        return ""
+    return _STAMP.sub("", lines[-1], count=1) if lines else ""
+
+
+def attempt_started_at(root: Path) -> Optional[float]:
+    """When the standing `build=in_progress` mark was written, or None when no build is marked
+    under way."""
+    replay = _replay_marks(Path(root).expanduser())
+    return replay.build_started_at if replay.marks.get("build") == "in_progress" else None
+
+
+def attempt_progress_line(root: Path, attempt_at: Optional[float]) -> str:
+    """The build log's latest line when the log belongs to this attempt, else "". A log an earlier
+    attempt left (ending `done: …` or `failed: …`) is not this build's until the build writes to it:
+    read as this build's, `sm progress` reported a build that had not started as finished at once.
+    Same second-stamp rule as `_log_state`; with no standing build mark the log is taken as it is."""
+    log = Path(root).expanduser() / ".introspect" / "progress.log"
+    if attempt_at is not None and not _own_log(log, attempt_at):
+        return ""
+    return last_progress_line(log)
+
+
+def _timeline(root: Path) -> Path:
+    return root / ".introspect" / "timeline.jsonl"
+
+
+def parse_mark(spec: str) -> tuple[str, str]:
+    """`<id>=<status>` as (id, status); ValueError naming what is wrong."""
+    step_id, sep, status = spec.partition("=")
+    if not sep:
+        raise ValueError(f"--mark wants <id>=<status>, got {spec!r}")
+    _check(step_id, status)
+    return step_id, status
+
+
+def _check(step_id: str, status: str) -> None:
+    if step_id not in STEP_IDS:
+        raise ValueError(f"unknown step {step_id!r}; one of {', '.join(STEP_IDS)}")
+    if status not in MARK_STATUSES:
+        raise ValueError(f"unknown status {status!r}; one of {', '.join(MARK_STATUSES)}")
+
+
+def mark(root: Path, step_id: str, status: str, now: Optional[datetime] = None) -> None:
+    """Append one mark to `<root>/.introspect/timeline.jsonl`. Appended, never rewritten, so two
+    surfaces marking at once can't lose each other's line; the last mark per step wins on read."""
+    _check(step_id, status)
+    at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
+    root = Path(root).expanduser()
+    path = _timeline(root)
+    if not L.inside_model(root, path):
+        raise ValueError(f"{path} leads out of the model folder {root}; no mark was written")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"id": step_id, "status": status, "at": at.isoformat()}) + "\n")
+
+
+@dataclass
+class Run:
+    """The current run: the marks from the last restart onward (from the first mark when there was
+    none). `first_step` is the step it restarted at; `spans` holds each step's standing attempt as
+    (first `in_progress`, last `done`) epoch seconds, either None when missing; `times` is every
+    timed mark of the run in file order."""
+
+    first_step: str
+    spans: dict[str, tuple[Optional[float], Optional[float]]] = field(default_factory=dict)
+    times: list[float] = field(default_factory=list)
+
+
+@dataclass
+class _Replay:
+    """What the timeline says once replayed: the marks that still stand; whether a restart is in
+    effect (a step before the build was marked `in_progress` after the last build mark, or with no
+    build mark at all); when the standing `build=in_progress` mark was written; and the current
+    run's marks, for `sm timing`."""
+
+    marks: dict[str, str]
+    restarted: bool
+    build_started_at: Optional[float]
+    run: Run = field(default_factory=lambda: Run(STEP_IDS[0]))
+
+
+def _mark_time(doc: dict) -> Optional[float]:
+    try:
+        return datetime.fromisoformat(doc["at"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _replay_marks(root: Path) -> _Replay:
+    """Replay the marks in order (rule A).
+
+    Marking a step `in_progress` restarts the run from there: every later step's earlier
+    `in_progress`/`done` mark is dropped (a `skipped` one is kept), so a reintrospect after a
+    finished onboarding doesn't show a finished list. A line that doesn't parse (a write cut short)
+    is skipped, not fatal: the list is a view, and one bad line shouldn't hide the rest.
+
+    A mark that drops a later step's mark also starts a new run for `sm timing`: the times before
+    it, earlier steps' included, belong to an earlier run (a reload days later must not count the
+    days between). A finished step marked `in_progress` again starts a new attempt of that step."""
+    try:
+        if not L.inside_model(root, _timeline(root)):
+            raise OSError("timeline leads out of the model folder")
+        text = _timeline(root).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return _Replay({}, False, None)
+    marks: dict[str, str] = {}
+    run = Run(STEP_IDS[0])
+    build_at = STEP_IDS.index("build")
+    restarted = False
+    build_started_at: Optional[float] = None
+    for line in text.splitlines():
+        try:
+            doc = json.loads(line)
+        except ValueError:
+            continue
+        if not (
+            isinstance(doc, dict)
+            and doc.get("id") in STEP_IDS
+            and doc.get("status") in MARK_STATUSES
+        ):
+            continue
+        step_id, status = doc["id"], doc["status"]
+        at = STEP_IDS.index(step_id)
+        when = _mark_time(doc)
+        if status == "in_progress":
+            reopened = [
+                later for later in STEP_IDS[at + 1 :] if marks.get(later) in ("in_progress", "done")
+            ]
+            for later in reopened:
+                del marks[later]
+            if reopened:
+                run = Run(step_id)
+            if at < build_at:
+                restarted = True
+            if marks.get(step_id) == "done":
+                run.spans.pop(step_id, None)
+        _time_mark(run, step_id, status, when)
+        if step_id == "build" and status == "in_progress":
+            # Read only while this mark still stands (see onboarding_steps), so no reset is needed.
+            build_started_at = when
+        marks[step_id] = status
+    return _Replay(marks, restarted, build_started_at, run)
+
+
+def _time_mark(run: Run, step_id: str, status: str, when: Optional[float]) -> None:
+    """Record one mark's time on the run: a step's first `in_progress`, its latest `done`."""
+    if when is None:
+        return
+    run.times.append(when)
+    start, end = run.spans.get(step_id, (None, None))
+    if status == "in_progress" and start is None:
+        run.spans[step_id] = (when, end)
+    elif status == "done":
+        run.spans[step_id] = (start, when)
+
+
+def current_run(root: Path) -> Run:
+    """The marks of the current run, replayed as `sm steps` replays them."""
+    return _replay_marks(Path(root).expanduser()).run
+
+
+def _totals(
+    root: Path, since: Optional[float] = None
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """(overview totals, None) when the model loads, else (None, a one-line problem). The catch is
+    broad on purpose: a built model that stops loading (a hand edit, a missing area, a loader bug)
+    must still read as built, with the reason shown, rather than crash the list or send it back to
+    "building". `since` is the run's start: only a sign-off from then on is the person's."""
+    from . import curate
+
+    try:
+        # Counts come from the served model (what the queue and the summary count); only the
+        # hidden-personal-data figure needs the hidden entries too.
+        org = L.load_datasource(root, include_rejected=True)
+        return {
+            **curate.overview(L.load_datasource(root), root)["totals"],
+            "signoff": curate.model_signoff_counts(root, since),
+            "hidden": curate.hidden_personal_columns(org),
+        }, None
+    except Exception as exc:  # noqa: BLE001 — see docstring
+        first = _load_error(exc)
+        # Posted as a `say`: the engine's words first, the folder by name (no absolute path), and
+        # the loader's message, which can quote the model's own files, capped and in quotes.
+        return None, f"The model in {quoted(root.name)} couldn't be read: {quoted(first)}"
+
+
+def _load_error(exc: Exception) -> str:
+    """The first line of a load error. An OSError's own text starts with the absolute path of the
+    file it couldn't open (the home or temp folder included), so it is said as its reason and the
+    file's name alone."""
+    if isinstance(exc, OSError):
+        reason = exc.strerror or type(exc).__name__
+        # A bytes name printed as str() kept its b'' quotes ('bytes.yaml'' in the chat).
+        name = os.fsdecode(exc.filename) if isinstance(exc.filename, bytes) else str(exc.filename)
+        return f"{reason}: '{Path(name).name}'" if exc.filename else reason
+    return (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+
+
+def _log_state(
+    log: Path, model: Path, now: float, attempt_at: Optional[float] = None
+) -> tuple[str, Optional[str]]:
+    """(state, reason) of the build log that speaks for this model: "running", "failed" (with the
+    engine's reason), "stopped", or "none" when no log is newer than datasource.yaml, or the log is
+    older than this attempt's `build=in_progress` mark (`attempt_at`): a retry's list must not
+    carry the last attempt's failure until the engine truncates the log. Marks are stamped to the
+    second, so a log written in the mark's own second is this attempt's. A file that vanishes
+    between the two stats (being replaced) reads as no log, never as running."""
+    try:
+        log_at = log.stat().st_mtime
+        model_at = model.stat().st_mtime if model.exists() else None
+    except OSError:
+        return "none", None
+    if model_at is not None and log_at <= model_at:
+        return "none", None
+    if attempt_at is not None and int(log_at) < attempt_at:
+        return "none", None
+    last = last_progress_line(log)
+    if last.startswith("failed:"):
+        return "failed", last[len("failed:") :].strip()
+    if last.startswith("done:") and model_at is not None:
+        # A rebuild that has logged its end and is writing the tree: the marks decide.
+        return "none", None
+    # Unfinished, or `done:` with no tree yet (the engine logs it before writing; a run killed in
+    # between, or a dry run, never writes it): live until it has been silent too long.
+    return ("stopped" if now - log_at > STALE_BUILD_SECONDS else "running"), None
+
+
+def _own_log(log: Path, attempt_at: float) -> bool:
+    """Whether the build log was written during this attempt (same second-stamp rule as _log_state)."""
+    try:
+        return int(log.stat().st_mtime) >= attempt_at
+    except OSError:
+        return False
+
+
+_EDGE_BEFORE = "'\"(<["
+_EDGE_AFTER = "'\")>],;:.!?"
+# File extensions the engine's errors name: a relative run of folders counts as a path only when it
+# ends in one of these, so `a/b/c` and a date like `2026/11/13` are left alone.
+_FILE_EXT = (
+    r"(?:ya?ml|json|txt|tsv|csv|md|sql|db|sqlite3?|duckdb|parquet|toml|ini|cfg|conf|env|pem"
+    r"|key|crt|log|py|sh)"
+)
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
+# Where a rooted path starts: `/x`, `~/x`, `C:\x` or `C:/x`, `\\x`, at the start or after a space,
+# quote or bracket (never mid-word, so `1/2` is not one).
+_ROOTED = re.compile(
+    r"(?:(?<=^)|(?<=[\s'\"(<\[=]))(?:~?[/\\](?=[^\s/\\])|[A-Za-z]:[\\/]|\\\\(?=\S))"
+)
+_RELATIVE = re.compile(r"(?:(?<=^)|(?<=[\s'\"(<\[=]))[^\s'\"(<\[=/\\]+(?:[/\\][^\s/\\'\"]+){2,}")
+_NAMED_FILE = re.compile(r"[^\s/\\'\"]+\." + _FILE_EXT + r"(?=$|[\s'\")\],;:!?]|\.(?:\s|$))")
+_SEP = re.compile(r"[/\\]")
+
+
+def _db_name(url: str) -> str:
+    """A connection URL as its database's name (its last path part, query dropped); with no path, a
+    neutral phrase. The user, password and host never survive."""
+    rest = url.split("://", 1)[1]
+    path = rest.split("/", 1)[1] if "/" in rest else ""
+    parts = [p for p in path.split("?", 1)[0].split("#", 1)[0].split("/") if p]
+    return parts[-1] if parts else "a database URL"
+
+
+def _last_part(token: str) -> str:
+    """A path written with no spaces as its last component, the quotes and punctuation around it
+    kept."""
+    start, end = 0, len(token)
+    while start < end and token[start] in _EDGE_BEFORE:
+        start += 1
+    while end > start and token[end - 1] in _EDGE_AFTER:
+        end -= 1
+    parts = [p for p in _SEP.split(token[start:end]) if p]
+    return token[:start] + parts[-1] + token[end:] if parts else token
+
+
+def _rooted(reason: str, at: int) -> tuple[str, int]:
+    """The rooted path starting at `at` cut to its last component, and where the text after it
+    resumes. A path that may hold spaces can't be told from the words after it, so:
+      - in quotes (the character before it is a quote that closes later): up to that quote;
+      - no separator anywhere after the first word: the first word is the whole path;
+      - else, if the text after the last separator starts with a file name with a known extension,
+        everything up to that separator goes (`/Users/jane doe/x/creds.yaml not found` →
+        `creds.yaml not found`); if not, the rest of the reason becomes "a file", since any word of
+        it could be a user's or a folder's name."""
+    quote = reason[at - 1] if at and reason[at - 1] in "'\"" else ""
+    close = reason.find(quote, at) if quote else -1
+    if close > at:
+        parts = [p for p in _SEP.split(reason[at:close]) if p]
+        return (parts[-1] if parts else reason[at:close]), close
+    word_end = at
+    while word_end < len(reason) and not reason[word_end].isspace():
+        word_end += 1
+    if not _SEP.search(reason, word_end):
+        return _last_part(reason[at:word_end]), word_end
+    last = max(m.end() for m in _SEP.finditer(reason, at))
+    if _NAMED_FILE.match(reason, last):
+        return "", last
+    return "a file", len(reason)
+
+
+def strip_paths(reason: str) -> str:
+    """`reason` with its paths cut to their last component: a failure reason is posted whole, and
+    the engine's errors name files by absolute path (`/Users/…/creds.yaml not found`), the home or
+    temp folder (and so the user's name) included. Connection URLs become their database's name
+    (never a password); rooted paths (`/`, `~/`, a drive) go as `_rooted` says; a relative run of two
+    or more folders goes only when it ends in a file name with a known extension."""
+    reason = _URL.sub(lambda m: _db_name(m.group(0)), reason)
+    out, i = [], 0
+    while True:
+        m = _ROOTED.search(reason, i)
+        if not m:
+            break
+        text, resume = _rooted(reason, m.start())
+        out.append(_relative(reason[i : m.start()]) + text)
+        i = resume
+    return "".join(out) + _relative(reason[i:])
+
+
+def _relative(text: str) -> str:
+    """Relative runs of folders in `text` that end in a known kind of file, as that file's name."""
+
+    def one(m: re.Match) -> str:
+        short = _last_part(m.group(0))
+        return short if _NAMED_FILE.fullmatch(short.rstrip(_EDGE_AFTER)) else m.group(0)
+
+    return _RELATIVE.sub(one, text)
+
+
+def _unfinished(state: str, reason: Optional[str], noun: str) -> str:
+    """The problem line for a build that ended without finishing."""
+    if state == "failed":
+        # the reason is the build's error text, which can quote the database or the model
+        return f"The {noun} didn't finish: {quoted(strip_paths(reason or ''), FAILURE_CAP)}"
+    return f"The {noun} stopped before it finished."
+
+
+def _written_since(model: Path, attempt_at: float) -> bool:
+    """Whether datasource.yaml was written during this attempt (same second-stamp rule as _log_state)."""
+    try:
+        return int(model.stat().st_mtime) >= attempt_at
+    except OSError:
+        return False
+
+
+_BATCH = re.compile(r"^batch (\d+) of (\d+)")
+
+
+def _batches_left(log: Path) -> bool:
+    """Whether the log is a batched build's that has batches still to run: each batch starts a fresh
+    log whose first line is `batch n of N`, and every batch writes the model, so after batch 1 of 3
+    the model has landed and the log ends `done:` while two batches are still to come."""
+    if not L.inside_model(Path(log).parent.parent, log):
+        return False
+    try:
+        with open(log, encoding="utf-8", errors="replace") as fh:
+            first = next((ln for ln in fh if ln.strip()), "")
+    except OSError:
+        return False
+    m = _BATCH.match(_STAMP.sub("", first.strip(), count=1))
+    return bool(m) and int(m.group(1)) < int(m.group(2))
+
+
+def _build_count(log: Path) -> Optional[str]:
+    parsed = parse_progress(last_progress_line(log))
+    if parsed and parsed[2] == "tables":
+        return f"{parsed[0].group(1)} of {parsed[0].group(2)} tables"
+    return None
+
+
+def _signoff_count(signoff: dict[str, int], hidden: int) -> Optional[str]:
+    """What the sign-off step did, and only that. The card's own total (metrics and entities, as
+    `review-items --scope preseed` lists them; joins have no card), so a run that signs nothing
+    still reads "0 of 23 signed", and the step never counts metrics alone while the card says 23. A definition the person did not sign is never counted as
+    signed: one signed before this run "already signed off", one approved by a system sign-off
+    "approved by agami" (a live sample run read "9 of 9 signed" after a person signed nothing)."""
+    parts = []
+    to_sign = signoff["waiting"] + signoff["signed"]
+    if to_sign:
+        parts.append(f"{signoff['signed']} of {to_sign} signed")
+    if signoff.get("earlier"):
+        parts.append(f"{signoff['earlier']} already signed off")
+    if signoff.get("by_agami"):
+        parts.append(f"{signoff['by_agami']} approved by agami")
+    if hidden:
+        parts.append(noun_count(hidden, "personal column", "personal columns") + " hidden")
+    return ", ".join(parts) or None
+
+
+def _build_done_count(totals: dict[str, Any]) -> str:
+    """The build's tables and joins, and how many of those joins wait for sign-off. A live run said
+    "no join candidates to offer" and later "three inferred joins, flagged until you confirm them",
+    counted by hand: the joins guessed from names are in the model already, so the count says so."""
+    text = f"{totals['tables']} tables, {totals['joins']} joins"
+    waiting = (totals.get("signoff") or {}).get("joins", 0)
+    return text + (f", {waiting} to confirm" if waiting else "")
+
+
+def _later_counts(totals: dict[str, Any]) -> dict[str, Optional[str]]:
+    return {
+        "build": _build_done_count(totals),
+        "describe": f"{totals['described_pct']}% described, {totals['metrics']} metrics",
+        "signoff": _signoff_count(totals["signoff"], totals.get("hidden", 0)),
+        "examples": f"{totals['examples']} examples" if totals["examples"] else None,
+    }
+
+
+def _imply(status: dict[str, str]) -> None:
+    """Rule C: a step before the furthest one reached is done (a passed-over optional step is
+    skipped), and only the furthest step reached can still be in progress."""
+    reached = [n for n, i in enumerate(STEP_IDS) if status[i] in ("in_progress", "done")]
+    if not reached:
+        return
+    for i in STEP_IDS[: reached[-1]]:
+        if status[i] == "pending":
+            status[i] = "skipped" if i in OPTIONAL_STEPS else "done"
+        elif status[i] == "in_progress":
+            status[i] = "done"
+
+
+def _reopen_from(status: dict[str, str], step_id: str, to: str) -> None:
+    """`step_id` set to `to`, every step before it finished, every later one back to pending (a
+    skip kept)."""
+    at = STEP_IDS.index(step_id)
+    status[step_id] = to
+    for i in STEP_IDS[:at]:
+        if status[i] in ("pending", "in_progress"):
+            status[i] = "done"
+    for i in STEP_IDS[at + 1 :]:
+        if status[i] in ("in_progress", "done"):
+            status[i] = "pending"
+
+
+def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, Any]:
+    """The ten steps with status, count and the label text to show, the current step, and a
+    one-line `problem` when the model on disk or the last build needs the person's attention.
+
+    Marks decide status; disk supplies counts and a few clamps on the build: replay the marks (A),
+    let a loadable model finish an unmarked build (B), imply the steps behind the furthest one
+    reached (C), clamp the build to what its log and datasource.yaml say (D), then counts (E)."""
+    root = Path(root).expanduser()
+    build_at = STEP_IDS.index("build")
+    model = root / "datasource.yaml"
+    log = root / ".introspect" / "progress.log"
+
+    replay = _replay_marks(root)
+    marks = replay.marks
+    unmarked = "skipped" if root.name == SAMPLE_PROFILE else "pending"
+    status = {i: marks.get(i, unmarked if i in SAMPLE_SKIPS else "pending") for i in STEP_IDS}
+    since = replay.run.times[0] if replay.run.times else None
+    totals, load_problem = _totals(root, since) if model.exists() else (None, None)
+    # B: resuming a profile with no marks, or the sample's copied model. Not while a restart is in
+    # effect: a reintrospect hasn't reached its build, and the old model mustn't tick it.
+    if "build" not in marks and model.exists() and not replay.restarted:
+        status["build"] = "done"
+    _imply(status)
+
+    attempt_at = replay.build_started_at if marks.get("build") == "in_progress" else None
+    now_at = (now or datetime.now(timezone.utc)).timestamp()
+    state, reason = _log_state(log, model, now_at, attempt_at)
+    # A resume after this attempt's build wrote its model (no log running, the model loads): the
+    # skill goes on to the join cards instead of building again, which it could only have told by
+    # comparing file times itself. Checked before the staleness rule: a build that finished long ago
+    # did not die. The build's own log must be this attempt's too: `set-description`,
+    # `set-terminology` or `ensure-org-id` also rewrite datasource.yaml, and a stopped rebuild
+    # followed by one of them must not read as finished.
+    landed = (
+        state == "none"
+        and attempt_at is not None
+        and totals is not None
+        and _written_since(model, attempt_at)
+        and _own_log(log, attempt_at)
+        and not _batches_left(log)
+    )
+    if (
+        state == "none"
+        and attempt_at is not None
+        and now_at - attempt_at > STALE_BUILD_SECONDS
+        and not _own_log(log, attempt_at)
+        and not landed
+    ):
+        # A mark left by a session that ended before the build wrote a line: nothing is building.
+        state = "stopped"
+    problem: Optional[str] = None
+    live = False
+    noun = "rebuild" if model.exists() else "build"
+    if state == "running":
+        # D1: a build running now wins over any mark, and a half-written tree is no problem.
+        _reopen_from(status, "build", "in_progress")
+        live = True
+    elif status["build"] == "in_progress" or (status["build"] == "done" and not model.exists()):
+        if state == "none":
+            # D2/D4: the build was started (or marked done) but no model of this run has landed:
+            # an earlier run's model must not finish it.
+            _reopen_from(status, "build", "in_progress")
+        else:
+            # D3/D4: it stopped. The list waits at the build with the reason.
+            _reopen_from(status, "build", "pending")
+            problem = _unfinished(state, reason, noun)
+    elif status["build"] == "done":
+        # D7 first: the model's own failure to load says more than a rebuild that didn't land.
+        # D5: a built model stays built when a later rebuild didn't finish.
+        problem = load_problem or (
+            _unfinished(state, reason, "last rebuild") if state in ("failed", "stopped") else None
+        )
+    # D6: a pending build (an earlier step reopened) ignores the log. A pending or running build
+    # has no later step reached: _reopen_from or the restart already reset them. A `skipped` build
+    # is left alone, with the steps after it as marked.
+
+    # E: only a step that is done or under way carries a count.
+    counts: dict[str, Optional[str]] = {}
+    if live:
+        counts["build"] = _build_count(log)
+    elif status["build"] == "done" and totals is not None:
+        counts = _later_counts(totals)
+    elif landed and status["build"] == "in_progress":
+        counts["build"] = _later_counts(totals)["build"]
+
+    result = []
+    for i in STEP_IDS:
+        count = counts.get(i) if status[i] in ("done", "in_progress") else None
+        text = LABELS[i] if count is None else f"{LABELS[i]} — {count}"
+        result.append(
+            {"id": i, "label": LABELS[i], "status": status[i], "count": count, "text": text}
+        )
+    current = next(
+        (i for i in STEP_IDS if status[i] == "in_progress"),
+        next((i for i in STEP_IDS if status[i] == "pending"), None),
+    )
+    return {
+        "steps": result,
+        "current": current,
+        "timeline": str(_timeline(root)),
+        "problem": problem,
+        "model_written": landed and status["build"] == "in_progress",
+    }
+
+
+# The mark in front of each line of the compact list. A `skipped` step has none: it isn't listed.
+LIST_MARKS = {"done": "✓ ", "in_progress": "▶ ", "pending": "· "}
+
+
+def compact(result: dict[str, Any]) -> dict[str, Any]:
+    """`onboarding_steps`' result as the list the skill copies into its task list, one string per
+    step that isn't skipped, in order (`✓ ` done, `▶ ` in progress, `· ` pending, then the step's
+    text), with `current` and `problem` unchanged. Short on purpose: a live run's full output was
+    long enough that the skill filtered it with grep and sed, and never had the whole list to copy."""
+    return {
+        "list": [
+            LIST_MARKS[s["status"]] + s["text"]
+            for s in result["steps"]
+            if s["status"] in LIST_MARKS
+        ],
+        "current": result["current"],
+        "problem": result["problem"],
+    }
+
+
+# --- what the skill does next ------------------------------------------------------------------
+# A live run refreshed its task list after only about half of the `sm steps` / `sm progress` calls:
+# an instruction in the skill text is read long before the moment it applies. So the engine's own
+# output carries, at that moment, the text to post (`say`) and the next action (`then`). Every `then`
+# the engine prints is one of these.
+
+THEN_UPDATE = "Update the task list from `list` now, before anything else."
+THEN_UP_TO_DATE = "The task list is up to date."
+THEN_PROBLEM = "Say this to the person before going on."
+THEN_PROBLEM_AND_UPDATE = (
+    "Say this to the person before going on. Then update the task list from `list`."
+)
+THEN_LINE_AND_LIST = "Post `line` and update the task list from `list`."
+THEN_LINE = "Post `line`."
+THEN_NOTHING = "Nothing new: call this again."
+THEN_ENDED = "The build has ended: run `sm steps` and go on."
+THEN_AND_UPDATE = " Update the task list from `list`."
+THEN_MODEL_WRITTEN = "The model is already written: go to the join cards without building again."
+
+
+def _last_path(root: Path) -> Path:
+    return root / ".introspect" / "steps.last"
+
+
+def read_printed(root: Path) -> dict[str, Any]:
+    """What `sm steps` / `sm progress` last printed for this root: `list`, `line` and `problem` (the
+    last problem said). {} when nothing was, or the file can't be read: then everything reads as
+    new, which only costs one extra refresh."""
+    root = Path(root).expanduser()
+    path = _last_path(root)
+    try:
+        if not L.inside_model(root, path):
+            return {}
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def remember_printed(root: Path, before: dict[str, Any], printed: dict[str, Any]) -> None:
+    """Record what this call printed (`printed`: any of `list`, `line`, `problem`) over `before`
+    (what `read_printed` returned) in
+    `<root>/.introspect/steps.last`. Written atomically, so a reader never sees half a file, and
+    only when the model folder exists and the file stays inside it: a fresh profile gets no folder
+    made for it, and a link out of the folder is never written through."""
+    root = Path(root).expanduser()
+    path = _last_path(root)
+    if not root.is_dir():
+        return
+    try:
+        path.parent.mkdir(exist_ok=True)
+        if not L.inside_model(root, path):
+            return
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".steps.last.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({**before, **printed}, fh, ensure_ascii=False)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        pass  # a list that can't be remembered reads as changed next time: harmless
+
+
+def steps_next(
+    changed: bool, problem: Optional[str], said_before: Optional[str], model_written: bool = False
+) -> dict[str, Any]:
+    """`say` and `then` for `sm steps`.
+
+    A problem is said once: the same problem already said (`said_before`) is left out of `say`, but
+    still in `problem`. It never hides the refresh: with a changed list, `then` asks for both.
+    `model_written` (a plain call on a resume whose build already wrote this run's model) sends the
+    skill on to the join cards."""
+    fresh = problem if problem and problem != said_before else None
+    if fresh:
+        return {"say": fresh, "then": THEN_PROBLEM_AND_UPDATE if changed else THEN_PROBLEM}
+    if model_written:
+        return {"then": THEN_MODEL_WRITTEN + (THEN_AND_UPDATE if changed else "")}
+    return {"then": THEN_UPDATE if changed else THEN_UP_TO_DATE}
+
+
+def progress_next(line_new: bool, list_changed: bool, ended: bool) -> str:
+    """`then` for `sm progress`. A finished, failed or killed build's log never moves on, so "call this again"
+    would loop for ever: the skill is sent to `sm steps` instead."""
+    if line_new and list_changed:
+        return THEN_LINE_AND_LIST
+    if line_new:
+        return THEN_LINE
+    if list_changed:
+        return THEN_UPDATE
+    return THEN_ENDED if ended else THEN_NOTHING

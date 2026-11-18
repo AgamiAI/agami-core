@@ -161,7 +161,7 @@ def test_unknown_schema_is_reported_not_guessed(tmp_path):
     code, out = _run(
         tmp_path, inv, "--keep", "schemas:sales,nope", "--tables-out", str(tmp_path / "k")
     )
-    assert code == 1 and out["unmatched"] == ["nope"]
+    assert code == 0 and out["unmatched"] == ["nope"] and out["status"] == "needs_choice"
     assert not (tmp_path / "k").exists()
 
 
@@ -180,7 +180,7 @@ def test_named_tables_that_match_nothing_or_are_ambiguous_are_reported(tmp_path)
     names = tmp_path / "names.txt"
     names.write_text("orders\nwidgets\ncustomers\n", encoding="utf-8")
     code, out = _run(tmp_path, inv, "--keep", f"names:{names}", "--tables-out", str(tmp_path / "k"))
-    assert code == 1
+    assert code == 0 and out["status"] == "needs_choice" and out["then"]
     assert out["unmatched"] == ["widgets"] and out["ambiguous"] == {
         "orders": ["sales.orders", "ops.orders"]
     }
@@ -229,15 +229,18 @@ def test_keeping_nothing_is_an_error_and_writes_nothing(tmp_path):
     out_file = tmp_path / "k"
     inv = _inventory({"staging": ["a", "b"]})
     code, out = _run(tmp_path, inv, "--keep", "drop_noise", "--tables-out", str(out_file))
-    assert code == 1 and out == {"error": "no tables kept"} and not out_file.exists()
+    assert code == 0 and out["error"] == "no tables kept" and out["status"] == "needs_choice"
+    assert not out_file.exists()
     names = tmp_path / "names.txt"
     names.write_text("\n", encoding="utf-8")
     code, out = _run(tmp_path, inv, "--keep", f"names:{names}", "--tables-out", str(out_file))
-    assert code == 1 and out == {"error": "no tables kept"} and not out_file.exists()
+    assert code == 0 and out["error"] == "no tables kept" and out["status"] == "needs_choice"
+    assert not out_file.exists()
     code, out = _run(
         tmp_path, _inventory({"a": ["x"]}), "--keep", "schemas:", "--tables-out", str(out_file)
     )
-    assert code == 1 and out == {"error": "no tables kept"} and not out_file.exists()
+    assert code == 0 and out["error"] == "no tables kept" and out["status"] == "needs_choice"
+    assert not out_file.exists()
 
 
 def test_names_match_case_insensitively_and_strip_quotes(tmp_path):
@@ -328,8 +331,9 @@ def test_check_columns_cli(tmp_path, capsys):
     assert main(["--inventory", str(inv), "--check-columns", str(names)]) == 0
     assert json.loads(capsys.readouterr().out) == {"exclude_columns": ["sales.orders.Notes"]}
     names.write_text("sales.orders.ssn\n")
-    assert main(["--inventory", str(inv), "--check-columns", str(names)]) == 1
-    assert main(["--inventory", str(inv), "--show", "nope"]) == 1
+    # A name that matches nothing needs the person's answer: exit 0, never a failed command.
+    assert main(["--inventory", str(inv), "--check-columns", str(names)]) == 0
+    assert main(["--inventory", str(inv), "--show", "nope"]) == 0
 
 
 def test_used_schemas_counts_the_schemas_shared_sql_names():
@@ -402,3 +406,38 @@ def test_two_flagged_tables_never_copy_each_other(tmp_path):
     # A plain original is still found from a backup schema.
     code, out = _run(tmp_path, _inventory({"backup": ["orders"], "sales": ["orders"]}))
     assert {n["table"]: n["copy_of"] for n in out["likely_noise"]} == {"backup.orders": "sales.orders"}
+
+
+def test_check_columns_never_echoes_a_line_that_is_not_a_column_name(tmp_path):
+    """Pointed at a file that is not a column list (a credentials file, say), the reply counts the
+    lines and repeats none of them."""
+    secret = tmp_path / "credentials"
+    secret.write_text(
+        "[default]\naws_access_key_id = not-a-real-key\naws_secret_access_key = not-a-real-secret\n"
+        "not-a-real-token\nmain.t1.nope\n",
+        encoding="utf-8",
+    )
+    code, out = _run(tmp_path, _inventory({"main": ["t1"]}), "--check-columns", str(secret))
+    text = json.dumps(out)
+    assert code == 0 and out["status"] == "needs_choice"
+    assert "not-a-real" not in text and "default" not in text
+    assert out["unmatched"] == ["main.t1.nope"] and out["unmatched_not_shown"] == 4
+
+
+def test_unmatched_names_are_bounded_and_stripped_of_control_characters(tmp_path):
+    names = tmp_path / "agami-names.txt"
+    names.write_text(
+        "\n".join(["x" * 500, "bad\x1b[31mred"] + [f"nope_{i}" for i in range(30)]),
+        encoding="utf-8",
+    )
+    code, out = _run(
+        tmp_path,
+        _inventory({"main": ["t1"]}),
+        "--keep",
+        f"names:{names}",
+        "--tables-out",
+        str(tmp_path / "kept.txt"),
+    )
+    assert code == 0 and len(out["unmatched"]) <= 10 and out["unmatched_not_shown"] == 22
+    assert all(len(n) <= 64 and "\x1b" not in n for n in out["unmatched"])
+    assert out["unmatched"][1] == "bad[31mred"

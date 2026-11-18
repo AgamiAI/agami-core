@@ -41,8 +41,23 @@ GIT_BASE="git+https://github.com/AgamiAI/agami-core"
 # direct caller didn't, so no command depends on the caller remembering to export it.
 export AGAMI_PLUGIN_ROOT="${AGAMI_PLUGIN_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+# The verbs the permission hook (approve_own_calls.py, VERBS) approves with no prompt never install:
+# an install is a network fetch that runs build code, which the person must agree to. A missing or
+# stale library stops them with how to install it. tests/test_approve_own_calls.py holds this list
+# and the hook's table equal.
+NO_INSTALL_VERBS="steps progress summary overview areas coverage review-queue review-items model-tree bundle batch-id"
+APPROVED_VERB=""
+case " $NO_INSTALL_VERBS " in *" ${1:-} "*) APPROVED_VERB=1 ;; esac
+
 . "$SCRIPT_DIR/_python.sh"   # usable_python / path_python / config_python / resolve_python
-agami_scratch_dir >/dev/null   # the skills write scratch files there; make sure it exists
+# The skills write scratch files there; make sure it exists. Not for an approved verb, which writes
+# nothing: `mkdir -p` follows a linked <artifacts_dir>/local and would create a folder wherever it
+# points, before anyone agreed to anything. Nor does Python cache bytecode for one.
+if [ -n "$APPROVED_VERB" ]; then
+  export PYTHONDONTWRITEBYTECODE=1
+else
+  agami_scratch_dir >/dev/null
+fi
 
 PY="$(resolve_python)"
 if [ -z "$PY" ]; then
@@ -149,8 +164,18 @@ PY
   ) 2>/dev/null
 }
 
+# agami-core's version when its metadata is there but the model deps don't import: installed without
+# its [model] extra (#692), which only that extra fixes. Empty otherwise.
+_core_without_model_extra() {
+  ( cd / && "$PY" -c 'import pydantic, sqlglot, yaml' ) >/dev/null 2>&1 && return 0
+  ( cd / && "$PY" -c 'from importlib.metadata import version; print(version("agami-core"))' ) 2>/dev/null | tr -d '\r' || true
+}
+MODEL_EXTRA_LINE="\"$PY\" -m pip install \"agami-core[model]${PLUGIN_VER:+==$PLUGIN_VER}\""
+
 ensure_pkg() {
   _imports_ok && _version_ok && _keyring_ok && return 0
+  local bare
+  bare="$(_core_without_model_extra)"
   # Every route below is a pip install, and with stderr hidden a Python without pip would only end in
   # "couldn't install", which doesn't say what is wrong or how to fix it.
   if ! ( cd / && "$PY" -m pip --version ) >/dev/null 2>&1; then
@@ -160,10 +185,13 @@ ensure_pkg() {
       local have
       have="$( cd / && "$PY" -c 'from importlib.metadata import version; print(version("agami-core"))' 2>/dev/null | tr -d '\r' || true)"
       echo "agami: $PY has no pip, so its agami-core${have:+ $have} can't be upgraded to this plugin's${PLUGIN_VER:+ $PLUGIN_VER}." >&2
+    elif [ -n "$bare" ]; then
+      echo "agami: agami-core $bare is installed in $PY but without its model extra (pydantic, sqlglot, pyyaml), and $PY has no pip to add it." >&2
     else
       echo "agami: $PY has no pip, so agami-core can't be installed into it." >&2
     fi
     echo "       Add pip to it:  $PY -m ensurepip --upgrade   (where its Python ships ensurepip)" >&2
+    [ -z "$bare" ] || echo "       Then add the extra:  $MODEL_EXTRA_LINE" >&2
     echo "       Or point agami at a Python that has pip:  export AGAMI_PYTHON=/path/to/python" >&2
     exit 3
   fi
@@ -181,6 +209,8 @@ ensure_pkg() {
     else
       echo "agami: agami-core in $PY is older than this plugin ($PLUGIN_VER); upgrading …" >&2
     fi
+  elif [ -n "$bare" ]; then
+    echo "agami: agami-core $bare is installed in $PY but without its model extra (pydantic, sqlglot, pyyaml); installing it ($MODEL_EXTRA_LINE) …" >&2
   else
     echo "agami: installing agami-core (semantic model) into $PY …" >&2
   fi
@@ -205,7 +235,22 @@ if [ "${1:-}" = "install" ]; then
   exit 0
 fi
 
-ensure_pkg
+# The refusal has a code of its own. 3 already means "no model here" to the skills (a first `sm areas`
+# exiting 3 sends the person to agami-connect), so a library left stale by a plugin update would send
+# them to set up a database that is already connected. 12 is used by nothing sm runs or passes
+# through (sm and the CLI use 0-3, execute_sql 2-11); the skills turn it into the install step.
+STALE_LIBRARY_EXIT=12
+# These verbs never reach ensure_pkg, not even after the check passes: it probes again and installs
+# on a failure, so a library update landing in between would turn an approved call into an install.
+INSTALL_HINT="agami's library needs installing or updating: run  bash \"$(cd "$SCRIPT_DIR/.." && pwd)/scripts/sm\" install"
+if [ -n "$APPROVED_VERB" ]; then
+  if ! { _imports_ok && _version_ok; }; then
+    echo "$INSTALL_HINT" >&2
+    exit "$STALE_LIBRARY_EXIT"
+  fi
+else
+  ensure_pkg
+fi
 # Run the CLI from a neutral cwd so a `semantic_model` in the caller's cwd can't shadow the installed
 # package via `python -m` putting cwd on sys.path[0].
 # PYTHONSAFEPATH (3.11+; ignored below) is a belt-and-suspenders second guard; `cd /` is the portable
@@ -216,4 +261,29 @@ export PYTHONSAFEPATH=1
 AGAMI_CALLER_CWD="$(cygpath -m "$PWD" 2>/dev/null || printf '%s' "$PWD")"
 export AGAMI_CALLER_CWD
 cd /
-exec "$PY" -X utf8 -m semantic_model.cli "$@"
+if [ -z "$APPROVED_VERB" ]; then
+  exec "$PY" -X utf8 -m semantic_model.cli "$@"
+fi
+# An approved verb runs only on a library that holds it inside the model folder (cli.py's
+# `_within_model`). The checks above cannot say so: a `semantic_model` with no install metadata (a
+# PYTHONPATH or source layout) passes the version gate as "unknown", and an old one imports fine. So
+# the process that runs the verb asks first: the handler the CLI's own parser picks for these
+# arguments must be the contained one, or it exits 12 with the install step and runs nothing. One
+# process, so no library can change between the check and the run.
+exec "$PY" -X utf8 -c '
+import sys
+code, hint, argv = int(sys.argv[1]), sys.argv[2], sys.argv[3:]
+sys.argv = ["sm", *argv]
+try:
+    from semantic_model import cli
+    ok = callable(getattr(cli.L, "contained", None)) and getattr(
+        cli._parse_args(argv).func, "within_model", False) is True
+except SystemExit:
+    raise  # a usage error or --help: the CLI'"'"'s own answer
+except Exception:
+    ok = False
+if not ok:
+    sys.stderr.write(hint + "\n")
+    sys.exit(code)
+sys.exit(cli.main(argv))
+' "$STALE_LIBRARY_EXIT" "$INSTALL_HINT" "$@"

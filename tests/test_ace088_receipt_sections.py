@@ -668,7 +668,9 @@ def test_sections_carry_metadata_and_structure_only_never_values(org):
                    # ACE-178: the joins on a matched number's path the model does not declare, a
                    # metric whose tables the number did not all read, what a number is built from,
                    # and why one is undetermined (a fixed phrase, never caller text).
-                   "joins_not_declared", "missing_tables", "built_from", "reason"}),
+                   "joins_not_declared", "missing_tables", "built_from", "reason",
+                   # The one metric an undetermined value is written as, by name: model text.
+                   "unconfirmed"}),
     }
     assert {frozenset(i) for i in sections["tables"]["items"]} == {
         frozenset({"ref", "alias", "qname", "declared", "rows", "rows_text", "rows_as_of", "freshness",
