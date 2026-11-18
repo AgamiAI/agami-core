@@ -1143,3 +1143,21 @@ def test_rewriting_the_credentials_file_does_not_follow_a_planted_link(tmp_path:
     assert creds.read_text() == "[b]\ntype = sqlite\n" and not creds.is_symlink()
     assert creds.stat().st_mode & 0o777 == 0o600
     assert sorted(p.name for p in tmp_path.iterdir()) == ["credentials", "credentials.tmp", "victim.txt"]
+
+
+def test_an_older_installed_agami_paths_still_gets_a_private_local_dir(
+    tmp_path: Path, art: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pip-installed library older than 0.9.25 has no ensure_local_dir; the plugin's bundled one is used."""
+    import types
+
+    old = types.ModuleType("agami_paths")
+    old.LOCAL_SUBDIR = "local"  # type: ignore[attr-defined]
+    monkeypatch.setattr(connect_helper, "agami_paths", old)
+    local = art / "local"
+    local.mkdir(mode=0o755)
+    local.chmod(0o755)
+    connect_helper._write_section(_creds(art), "[demo]\ntype = sqlite\n")
+    assert _creds(art).exists()
+    if os.name == "posix":
+        assert local.stat().st_mode & 0o777 == 0o700
