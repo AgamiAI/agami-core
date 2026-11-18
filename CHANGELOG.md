@@ -20,6 +20,17 @@ below corresponds to one such version.
   `<artifacts_dir>/local/tmp/`, plus reads of the plugin's own files. Anything else asks as before, and those six commands no longer
   install the library themselves: they stop with an exit code of their own, which the skills turn
   into the `sm install` step, so a stale library is never mistaken for a missing model.
+- **A join through a step names the relationship it is keyed on.** A step that only lists one
+  table's key column (de-duplicated or filtered), joined to another table on exactly a declared
+  relationship's key, now carries `follows` on its receipt join item: that relationship's name, its
+  two tables and its review state. The join's status stays `undeclarable`, so the double-counting
+  check is unchanged. A computed or renamed key, or a declaration with a condition on the step's
+  side, follows nothing.
+- **A figure written as a metric but joined differently names it.** When a value is written as a
+  metric's binding but its tables are joined in a way the check cannot compare (an outer join whose
+  unmatched rows still count, a FULL join, a window over filtered rows), its receipt column item
+  stays `undetermined` and now carries `unconfirmed`: the one metric it is written as. It is never
+  a match.
 
 ## [0.9.24] — 2026-11-17
 

@@ -4618,6 +4618,21 @@ def assemble_receipt(
         # links cannot be told apart by their columns.
         via = (_link_columns(match, between.get(_rel_tables(match), []), dialect)
                if match is not None else None)
+        # A join through a step that hands on one declared table's key, joined on exactly a declared
+        # relationship's key: which relationship that is, beside a status that stays `undeclarable`
+        # because the step may filter or de-duplicate the rows. Read only off the column pairs, by the
+        # same subset rule as `declared`, so a declaration whose fixed-value condition sits on the
+        # step's side (unseen here) matches nothing.
+        follows = None
+        if status == UNDECLARABLE and js.keyed:
+            rel = next((rel for rel, pairs in declared_pairs
+                        if pairs is not None and pairs <= js.keyed), None)
+            if rel is not None:
+                follows = {
+                    "name": f"{rel.from_table}_to_{rel.to_table}",
+                    "from_to": f"{_echo_name(_bare(rel.from_table))} → {_echo_name(_bare(rel.to_table))}",
+                    "review_state": rel.review_state,
+                }
         left, right = js.endpoints
         join_items.append({
             "predicate": js.predicate,
@@ -4641,6 +4656,7 @@ def assemble_receipt(
             "summary": (f"{_echo_name(_bare(match.from_table))} linked to "
                         f"{_echo_name(_bare(match.to_table))} through {', '.join(via)}"
                         if via else None),
+            "follows": follows,
         })
 
     # ONE ITEM PER OUTPUT COLUMN, not one per metric the statement's TEXT happens to contain.
@@ -4816,6 +4832,13 @@ def assemble_receipt(
             "missing_tables": _missing_tables(result.missing_tables),
             "built_from": _built(result.built_from),
             "reason": result.reason,
+            # Undetermined only: the one metric this value is written as, when the way its tables
+            # were joined (an outer join whose unmatched rows still count, a FULL join, a window
+            # over filtered rows) kept the two from being compared. NOT a match: the number may
+            # differ from the metric's. Null otherwise.
+            "unconfirmed": ({"name": result.unconfirmed.metric.name,
+                             "area": result.unconfirmed.area}
+                            if status == UNDETERMINED and result.unconfirmed is not None else None),
         })
 
     def _declared_table(bare: str) -> Optional[tuple]:
@@ -6259,6 +6282,10 @@ class _JoinSite(NamedTuple):
     # WITH body, every arm that reaches that step. What decides whether a join no declaration settled
     # downgrades a number (#429). Outside both, its own scope label, which matches no arm.
     feeds: frozenset[str] = frozenset()
+    # The written ON reduced as `pairs` is, but with a WITH step that only hands on ONE declared
+    # table's key column read as that column (`_step_key_source`): what `follows` on the receipt is
+    # decided on. None when no endpoint is such a step. Never read by the status or the aggregates.
+    keyed: "frozenset[frozenset[tuple[str, str]]] | None" = None
 
 
 def _predicate_pairs(pred: "exp.Expression",
@@ -6622,6 +6649,10 @@ def _join_sites(node: "exp.Expression", visible: set[str], limit: int,
             if stood:
                 pair_map = {**scope_map, **stood}
                 resolves_to = (left_table or left, right_table or right)
+        keyed = None
+        if sidx is not None and on is not None and pinned and left_src is not None:
+            keyed = _keyed_through_step(on, scope_map, (left_src, left_declarable),
+                                        (join.this, right_declarable), smemo, sidx)
         label = _scope_label(sel, node, cte_scopes, arm_suffixes, output_ids)
         if label.startswith("cte:"):
             if reach is None:
@@ -6652,8 +6683,81 @@ def _join_sites(node: "exp.Expression", visible: set[str], limit: int,
                    if on is not None else frozenset()),
             resolves_to=resolves_to,
             feeds=feeds,
+            keyed=keyed,
         ))
     return sites, written
+
+
+def _step_key_source(src: "exp.Expression", smemo: dict,
+                     sidx: dict) -> "tuple[str, dict[str, str]] | None":
+    """(the declared table, its output name -> input column) for a WITH reference whose body reads
+    ONE declared table and nothing else, or None.
+
+    Looser than `_step_table` on purpose and used for one question only — which declared
+    relationship a join through the step is keyed on (`follows`). A DISTINCT, a WHERE or a GROUP BY
+    changes how many rows the step hands back, so the step never stands for the table in the status
+    or the double-counting analysis; it does not change WHERE a key value came from. Only a column
+    handed on as itself (`_projection_sources`) is mapped, so a computed or renamed-from-elsewhere
+    key maps to nothing. One step deep: a step reading another step is not followed.
+    """
+    if not isinstance(src, exp.Table) or _cte_binding(src) is None:
+        return None
+    step = _step_of(src, smemo)
+    if step is None or step.reason or step.listed or not isinstance(step.body, exp.Select):
+        return None
+    body = step.body
+    if any(value and arg not in (*_GRAIN_PRESERVING_SELECT_ARGS, "distinct", "group")
+           for arg, value in body.args.items()):
+        return None
+    frm = body.args.get("from_") or body.args.get("from")
+    if not isinstance(frm, exp.From) or not isinstance(frm.this, exp.Table):
+        return None
+    if frm.this.args.get("pivots") or _alias_columns(frm.this):
+        return None
+    if len(list(_find_all(body, exp.Table))) != 1 or _cte_binding(frm.this) is not None:
+        return None
+    table = _physical_table(frm.this, smemo, sidx)
+    if table is None:
+        return None
+    return table, _projection_sources(body)
+
+
+def _keyed_through_step(on: "exp.Expression", scope_map: dict[str, str],
+                        left: "tuple[exp.Expression, bool]", right: "tuple[exp.Expression, bool]",
+                        smemo: dict, sidx: dict) -> "frozenset[frozenset[tuple[str, str]]] | None":
+    """A written ON's column pairs with ONE step endpoint read through to its table's key column
+    (`_step_key_source`), the other endpoint a declarable table; None for any other join.
+
+    A conjunct on a step column the step did not hand on as itself is dropped, like any other
+    conjunct `_predicate_pairs` cannot read, which can only make a declaration harder to match.
+    Fixed-value conditions count only on the table side, where the ON states them; one a
+    declaration puts on the step's table cannot be seen here, so that declaration matches nothing.
+    """
+    sides = [(src, ok, _step_key_source(src, smemo, sidx)) for src, ok in (left, right)]
+    steps = [(src, key) for src, _ok, key in sides if key is not None]
+    others = [src for src, ok, key in sides if key is None and ok and isinstance(src, exp.Table)]
+    if len(steps) != 1 or len(others) != 1:
+        return None
+    (step_src, (table, sources)), other = steps[0], others[0]
+    step_alias, other_alias = step_src.alias_or_name, other.alias_or_name
+    other_table = _tkey(_bare(scope_map.get(other_alias, other.name)))
+    pairs: set[frozenset[tuple[str, str]]] = set()
+    for conj in _and_conjuncts(on):
+        if not isinstance(conj, exp.EQ):
+            continue
+        ends = []
+        for col in (conj.this, conj.expression):
+            if not isinstance(col, exp.Column) or not col.table:
+                break
+            if col.table == step_alias and _tkey(col.name) in sources:
+                ends.append((_tkey(_bare(table)), sources[_tkey(col.name)].lower()))
+            elif col.table == other_alias:
+                ends.append((other_table, col.name.lower()))
+        if len(ends) == 2 and ends[0][0] != ends[1][0]:
+            pairs.add(frozenset(ends))
+    if not pairs:
+        return None
+    return frozenset(pairs) | _fixed_value_pairs(on, {other_alias: other.name}, {other_alias})
 
 
 def _endpoint_table(src: "exp.Expression", smemo: dict,
@@ -10929,6 +11033,7 @@ class _ColumnMatch(NamedTuple):
     reason: Optional[str] = None     # undetermined: why, from the `_WHY_*` vocabulary
     built_from: Optional[dict] = None  # an aggregate over a matched per-group number
     aggregating: bool = False    # the number aggregates, here or in a step it was computed in
+    unconfirmed: "MetricCandidate | None" = None  # undetermined: the one binding it is written as
 
 
 # The aggregates that skip a NULL input, and the operators that keep a NULL a NULL: a number built
@@ -11129,7 +11234,13 @@ def _match_output_column(oc: OutputColumn, unread: bool,
         # add nothing to it.
         if aggregating and (path.full or (_has(expr, exp.Window) and path.rows)
                             or (path.outer_used and not _ignores_null_rows(peeled_value))):
-            return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNMODELLED, aggregating=True)
+            # The value IS written as a binding, and only how its rows were joined kept it from
+            # being compared. Which one, so a reader can say the figure could not be confirmed as
+            # that measure rather than leave it nameless; never a match.
+            near = {(c.area, c.metric.name): c for c, _conds, _g in found
+                    if {_tkey(_bare(t)) for t in (c.metric.source_tables or [])} <= read_tables}
+            return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNMODELLED, aggregating=True,
+                                unconfirmed=next(iter(near.values())) if len(near) == 1 else None)
         rows_by_form = {grouped: _rows(grouped) for grouped in own_found}
         if any(rows is None for rows in rows_by_form.values()):
             return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNMODELLED, aggregating=True)
