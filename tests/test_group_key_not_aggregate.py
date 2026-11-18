@@ -102,3 +102,22 @@ def test_grouping_on_every_column_to_deduplicate_keeps_the_figures(org, sql):
     assert items["state"]["aggregate"] is False
     assert items["team"]["aggregate"] is False
 
+
+
+TWO = ("WITH s AS (SELECT team, MAX(opened) AS total FROM incidents GROUP BY team), "
+       "o AS (SELECT team, MAX(state) AS total FROM incidents GROUP BY team) ")
+
+
+@pytest.mark.parametrize("sql", [
+    TWO + "SELECT s.total FROM s JOIN o ON s.team = o.team GROUP BY o.total",
+    TWO + "SELECT s.total FROM s JOIN o ON s.team = o.team GROUP BY total",
+], ids=["other-prefix", "bare-name-over-a-join"])
+def test_a_grouping_key_of_another_table_is_not_this_columns_label(org, sql):
+    """A bare name matches a grouping key only when the tables agree, or the SELECT reads one."""
+    assert _items(org, sql)["total"]["aggregate"] is True
+
+
+def test_the_same_prefix_or_one_source_still_matches(org):
+    assert _items(org, TWO + "SELECT s.total FROM s JOIN o ON s.team = o.team "
+                             "GROUP BY s.total")["total"]["aggregate"] is False
+    assert _items(org, TWO + "SELECT s.total FROM s GROUP BY total")["total"]["aggregate"] is False

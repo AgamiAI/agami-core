@@ -10902,9 +10902,18 @@ def _is_own_group_key(oc: "OutputColumn") -> bool:
         if isinstance(g, exp.Column) and not g.table and alias and _tkey(g.name) == _tkey(alias):
             return True
         if g == expr or (isinstance(g, exp.Column) and isinstance(expr, exp.Column)
-                         and _tkey(g.name) == _tkey(expr.name)):
+                         and _tkey(g.name) == _tkey(expr.name) and _same_source(g, expr, sel)):
             return True
     return False
+
+
+def _same_source(a: "exp.Column", b: "exp.Column", sel: "exp.Select") -> bool:
+    """Two same-named columns are one when their qualifiers agree, or one has none and the SELECT
+    reads a single source, so the bare name can mean nothing else. `GROUP BY o.total` is not
+    `s.total`, and over a join a bare `total` could be either."""
+    if a.table and b.table:
+        return _tkey(a.table) == _tkey(b.table)
+    return not sel.args.get("joins")   # a comma list parses as joins too
 
 
 def _group_by_items(sel: "exp.Select") -> "tuple | None":
