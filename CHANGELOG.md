@@ -120,6 +120,11 @@ below corresponds to one such version.
 - **A grouping label is never a figure on the receipt.** An output column the final query groups by
   (by name, position or the same expression) is `aggregate: false` even when a step took its `MAX`
   to collapse duplicates, so a consumer no longer describes the label as a computed number.
+- **agami-connect uses `$AGAMI_PYTHON` exactly as set, as `sm` does** (#692). It used to pass over a
+  pinned Python missing the model deps for another one carrying an older agami-core, without saying
+  so. Now it keeps the pinned one and reports `agami_python_lacks`: the path, what it lacks (e.g.
+  agami-core without its `[model]` extra, or the driver) and the exact install line, and the skill
+  stops there. `sm` names the missing `[model]` extra instead of saying agami-core can't be installed.
 
 ## [0.9.24] — 2026-11-17
 

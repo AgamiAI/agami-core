@@ -400,3 +400,55 @@ def test_gitignore_state_says_what_to_do_without_a_read_of_a_missing_file(tmp_pa
         (tmp_path / ".gitignore").write_text(content)
     data, _ = _run(monkeypatch, tmp_path)
     assert data["gitignore"] == state
+
+
+# #692: $AGAMI_PYTHON is the person's own choice. The resolver used to pass over it for the first
+# fully equipped candidate, which carried an older agami-core, and said only that the chosen one was
+# out of date. `sm` never passes over it, so the two disagreed about which Python was in use.
+
+
+def test_agami_python_lacking_the_model_extra_is_used_and_named_never_passed_over(monkeypatch):
+    pinned, older = "/fake/build-venv/bin/python", "/fake/usr/python3"
+    monkeypatch.setenv("AGAMI_PYTHON", pinned)
+    _fake_candidates(monkeypatch, [pinned, older], deps_for={older}, driver_for={older},
+                     no_pip={pinned}, lib={older: "0.9.11"})
+    res = CR._resolve_interpreter("sqlite", configured=older)
+    assert res["python3"] == pinned and res["has_model_deps"] is False
+    assert [c["python3"] for c in res["candidates_scored"]] == [pinned]
+    assert "$AGAMI_PYTHON" in res["chosen_because"]
+    (lacks,) = [w for w in res["warnings"] if w["kind"] == "agami_python_lacks"]
+    assert lacks["where"] == pinned
+    assert "agami-core 0.9.18 without its [model] extra (pydantic, sqlglot, pyyaml)" in lacks["detail"]
+    assert "no pip" in lacks["detail"] and "ensurepip" in lacks["detail"]
+    assert f'"{pinned}" -m pip install "agami-core[model]==0.9.18"' in lacks["detail"]
+    assert all(w["kind"] != "library_older_than_plugin" for w in res["warnings"])
+
+
+def test_agami_python_lacking_the_driver_names_the_driver_and_its_install_line(monkeypatch):
+    pinned, other = "/fake/pinned/python3", "/fake/usr/python3"
+    monkeypatch.setenv("AGAMI_PYTHON", pinned)
+    _fake_candidates(monkeypatch, [pinned, other], deps_for={pinned, other}, driver_for={other})
+    res = CR._resolve_interpreter("postgres", configured=None)
+    assert res["python3"] == pinned and res["has_driver"] is False
+    (lacks,) = [w for w in res["warnings"] if w["kind"] == "agami_python_lacks"]
+    assert "postgres driver (psycopg2)" in lacks["detail"] and "[model]" not in lacks["detail"]
+    assert f'"{pinned}" -m pip install psycopg2-binary' in lacks["detail"]
+    assert "no pip" not in lacks["detail"]
+
+
+def test_agami_python_with_everything_carries_no_lacks_anomaly(monkeypatch):
+    pinned, other = "/fake/pinned/python3", "/fake/usr/python3"
+    monkeypatch.setenv("AGAMI_PYTHON", pinned)
+    _fake_candidates(monkeypatch, [pinned, other], deps_for={pinned, other}, driver_for=set())
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["python3"] == pinned and res["warnings"] == []
+
+
+def test_agami_python_lacks_reaches_the_anomalies(tmp_path, monkeypatch, capsys):
+    pinned = "/fake/build-venv/bin/python"
+    _fake_candidates(monkeypatch, [pinned], deps_for=set(), driver_for=set(), lib={pinned: None})
+    data, anomalies = _run(monkeypatch, tmp_path, AGAMI_PYTHON=pinned)
+    assert data["interpreter"]["python3"] == pinned
+    (lacks,) = [a for a in anomalies if a["kind"] == "agami_python_lacks"]
+    assert "no agami-core" in lacks["detail"]
+    assert f"agami: $AGAMI_PYTHON is {pinned}" in capsys.readouterr().err

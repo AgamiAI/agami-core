@@ -149,8 +149,18 @@ PY
   ) 2>/dev/null
 }
 
+# agami-core's version when its metadata is there but the model deps don't import: installed without
+# its [model] extra (#692), which only that extra fixes. Empty otherwise.
+_core_without_model_extra() {
+  ( cd / && "$PY" -c 'import pydantic, sqlglot, yaml' ) >/dev/null 2>&1 && return 0
+  ( cd / && "$PY" -c 'from importlib.metadata import version; print(version("agami-core"))' ) 2>/dev/null | tr -d '\r' || true
+}
+MODEL_EXTRA_LINE="\"$PY\" -m pip install \"agami-core[model]${PLUGIN_VER:+==$PLUGIN_VER}\""
+
 ensure_pkg() {
   _imports_ok && _version_ok && _keyring_ok && return 0
+  local bare
+  bare="$(_core_without_model_extra)"
   # Every route below is a pip install, and with stderr hidden a Python without pip would only end in
   # "couldn't install", which doesn't say what is wrong or how to fix it.
   if ! ( cd / && "$PY" -m pip --version ) >/dev/null 2>&1; then
@@ -160,10 +170,13 @@ ensure_pkg() {
       local have
       have="$( cd / && "$PY" -c 'from importlib.metadata import version; print(version("agami-core"))' 2>/dev/null | tr -d '\r' || true)"
       echo "agami: $PY has no pip, so its agami-core${have:+ $have} can't be upgraded to this plugin's${PLUGIN_VER:+ $PLUGIN_VER}." >&2
+    elif [ -n "$bare" ]; then
+      echo "agami: agami-core $bare is installed in $PY but without its model extra (pydantic, sqlglot, pyyaml), and $PY has no pip to add it." >&2
     else
       echo "agami: $PY has no pip, so agami-core can't be installed into it." >&2
     fi
     echo "       Add pip to it:  $PY -m ensurepip --upgrade   (where its Python ships ensurepip)" >&2
+    [ -z "$bare" ] || echo "       Then add the extra:  $MODEL_EXTRA_LINE" >&2
     echo "       Or point agami at a Python that has pip:  export AGAMI_PYTHON=/path/to/python" >&2
     exit 3
   fi
@@ -181,6 +194,8 @@ ensure_pkg() {
     else
       echo "agami: agami-core in $PY is older than this plugin ($PLUGIN_VER); upgrading …" >&2
     fi
+  elif [ -n "$bare" ]; then
+    echo "agami: agami-core $bare is installed in $PY but without its model extra (pydantic, sqlglot, pyyaml); installing it ($MODEL_EXTRA_LINE) …" >&2
   else
     echo "agami: installing agami-core (semantic model) into $PY …" >&2
   fi
