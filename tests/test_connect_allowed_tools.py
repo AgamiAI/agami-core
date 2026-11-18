@@ -142,3 +142,12 @@ def test_the_rules_are_explained_where_they_are_listed():
     head = SKILL.read_text(encoding="utf-8").split("\n---\n", 1)[0]
     for word in ("sm install", "py -c", "AGAMI_SCRATCH_ONLY=1", "BASH_ENV"):
         assert word in head, word
+
+
+def test_every_sm_verb_the_skill_names_has_a_rule_or_asks_on_purpose():
+    # A live run hit three prompts on `suggest-metrics` and `suggest-units`: the skill names them
+    # only as `sm <verb>` in prose, and the rule list had been drawn from the full commands.
+    body = SKILL.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+    named = set(re.findall(r'(?:scripts/sm" |`sm )([a-z][a-z-]+)', body))
+    ruled = {m for r in BASH_RULES for m in re.findall(r'scripts/sm" ([a-z-]+)', r)}
+    assert named - ruled - NEVER == set()

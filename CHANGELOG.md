@@ -70,7 +70,8 @@ below corresponds to one such version.
   **Still asks:** `sm install`, `py -c`, `py -m` (pip, and `execute_sql`, used to read a few rows of
   an unclear column), `sm describe-file` and `sm apply-spec` (they read the person's own files),
   `reconcile.py`, the native query tools (`psql` and the like), the Write of the artifacts-folder
-  pointer for a non-default folder, the Linux `credentials.example`, and `USER_MEMORY.md`. Native-CLI
+  pointer for a non-default folder, the Linux `credentials.example`, `USER_MEMORY.md`, and the
+  Write of a model's `datasource.md` narrative. Native-CLI
   SQL is read from a scratch file. `sm` no longer accepts an abbreviated option (`--o` for `--out`).
 - **A choice that needs the person is not a failure.** `inventory_summary.py` exits 0 with
   `status: needs_choice` and a `then` for a name that matches nothing or several, or a choice that
