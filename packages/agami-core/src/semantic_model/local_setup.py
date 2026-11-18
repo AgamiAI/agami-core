@@ -48,6 +48,8 @@ def own_artifacts_dir(path: str) -> Path:
         raise SetupRefused(f"{path!r}: pass the artifacts folder as an absolute path")
     given = Path(os.path.expanduser(path)).resolve()
     art = artifacts_dir()
+    if given != art and os.environ.get("AGAMI_ARTIFACTS_DIR"):
+        raise SetupRefused(_env_outranks(art, given))
     if given != art:
         raise SetupRefused(
             f"{given} is not agami's artifacts folder ({art}). A folder other than "
@@ -57,10 +59,20 @@ def own_artifacts_dir(path: str) -> Path:
     return art
 
 
+def _env_outranks(art: Path, given: Path) -> str:
+    # The variable lives in the person's shell or Claude's settings, out of a skill's reach: a
+    # Bash call can't change it for later calls, so the person changes it, once.
+    return (
+        f"AGAMI_ARTIFACTS_DIR is set to {art}, and it outranks the saved folder, so agami would "
+        f"keep using {art}. Change AGAMI_ARTIFACTS_DIR to {given} (or remove it) where it is "
+        "set, restart Claude Code, and connect again."
+    )
+
+
 def choose_folder(path: str) -> dict[str, Any]:
     """Save `path` as agami's artifacts folder (the pointer file), after checking it can be one:
-    absolute, not a file, and not inside the current folder's `local/`. Creates nothing else;
-    `init-local` makes the folder."""
+    absolute, not a file, not inside the current folder's `local/`, and not overruled by an
+    AGAMI_ARTIFACTS_DIR naming another folder. Creates nothing else; `init-local` makes the folder."""
     import agami_paths
 
     if not path or not os.path.isabs(os.path.expanduser(path)):
@@ -68,6 +80,8 @@ def choose_folder(path: str) -> dict[str, Any]:
     given = Path(os.path.expanduser(path)).resolve()
     if given.exists() and not given.is_dir():
         raise SetupRefused(f"{given} is a file, not a folder: choose a folder for agami's files")
+    if os.environ.get("AGAMI_ARTIFACTS_DIR") and given != agami_paths.artifacts_dir():
+        raise SetupRefused(_env_outranks(agami_paths.artifacts_dir(), given))
     current_local = agami_paths.local_dir(agami_paths.artifacts_dir())
     if given == current_local or current_local in given.parents:
         raise SetupRefused(

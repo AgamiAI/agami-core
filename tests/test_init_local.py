@@ -283,3 +283,23 @@ def test_choose_folder_refuses_a_folder_it_cannot_use(first_run, where):
     rc, out = _run(["choose-folder", target])
     assert rc == 2 and "error" in out
     assert not agami_paths.POINTER_PATH.exists()
+
+
+def test_a_new_folder_under_the_env_override_says_how_to_switch(first_run, monkeypatch):
+    """Connecting a different company picks a new folder, but AGAMI_ARTIFACTS_DIR outranks the
+    saved pointer, so saving it would change nothing: refuse before writing, and say what to change."""
+    import agami_paths
+
+    current = first_run / "acme"
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(current))
+    new = first_run / "demo"
+    rc, out = _run(["choose-folder", str(new)])
+    assert rc == 2
+    assert "AGAMI_ARTIFACTS_DIR" in out["error"] and str(new) in out["error"]
+    assert "restart" in out["error"]
+    assert not agami_paths.POINTER_PATH.exists()
+    rc, out = _run(["init-local", str(new)])
+    assert rc == 2 and "AGAMI_ARTIFACTS_DIR" in out["error"] and "restart" in out["error"]
+    assert not new.exists()
+    rc, out = _run(["choose-folder", str(current)])  # the folder it already names is fine
+    assert rc == 0, out
