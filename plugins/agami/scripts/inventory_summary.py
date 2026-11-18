@@ -53,18 +53,22 @@ Show (a list for the chat, when the person asks what is in a schema or a table):
     -> {"schema": s, "tables": [{"table", "columns"}], "more": n}           # a schema: its tables
     -> {"table": "schema.table", "columns": [{"name", "type"}], "more": n}   # a table: its columns
     (at most 15 rows; `more` counts the rest; a name that matches nothing, or several tables, is
-    reported as {"unmatched"} or {"ambiguous"} with exit 1)
+    reported as {"unmatched"} or {"ambiguous"}, with `status` and `then`)
 
 Check columns (names typed in "Other" to leave out, one `schema.table.column` per line):
 
     inventory_summary.py --inventory <inventory.json> --check-columns <file>
     -> {"exclude_columns": ["schema.table.column", ...]}   # spelled as the inventory spells them
-    (any name that is not a column of the inventory: {"unmatched": [...]}, exit 1)
+    (any name that is not a column of the inventory: {"unmatched": [...]}, with `status` and `then`)
 
-A choice that keeps no tables prints `{"error": "no tables kept"}` (exit 1, nothing written).
+A choice that keeps no tables prints `{"error": "no tables kept"}` (nothing written).
 A schema or table name that matches nothing (or a bare table name that matches several) is
-reported as `{"unmatched": [...], "ambiguous": {...}}` with exit code 1, and nothing is written:
-the skill asks the same card again rather than guessing.
+reported as `{"unmatched": [...], "ambiguous": {...}}`, and nothing is written: the skill asks the
+same card again rather than guessing.
+
+Each of those needs the person's answer, which is not a failure: it exits 0 with
+`"status": "needs_choice"` and a `then`. (It exited 1, which the app showed as a failed command.)
+Exit 2 is a call that could not start.
 """
 
 from __future__ import annotations
@@ -74,6 +78,22 @@ import json
 import re
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import _scratch_out  # noqa: E402
+
+NEEDS_CHOICE = "needs_choice"
+THEN_ASK_AGAIN = ("Nothing was written: these names match nothing, or more than one. Ask the same "
+                  "card again, naming them in plain words, rather than guessing.")
+THEN_NONE_KEPT = "Nothing was written: that choice keeps no tables. Ask the same card again."
+
+
+def _needs_choice(payload: dict, then: str) -> int:
+    """Print a result that needs the person's answer, and exit 0: a question is not a failure."""
+    print(json.dumps({**payload, "status": NEEDS_CHOICE, "then": then}, indent=2))
+    return 0
+
 
 # Words that mark a table as a copy, scratch or staging only at the start or the end of its name
 # (`stg_orders`, `orders_bak`). A word in the middle, or `temp` / `test` leading a real fact table
@@ -608,19 +628,28 @@ def main(argv: list[str] | None = None) -> int:
         help="a file of shared SQL or questions; adds the schemas it names as `used_schemas`",
     )
     args = ap.parse_args(argv)
+    if args.tables_out and _scratch_out.guarded():
+        try:
+            _scratch_out.scratch_file(args.tables_out)
+        except _scratch_out.Refused as e:
+            return _scratch_out.refuse("inventory_summary.py", e)
 
     inventory = json.loads(Path(args.inventory).expanduser().read_text(encoding="utf-8"))
     if args.show:
         result, ok = show(inventory, args.show)
+        if not ok:
+            return _needs_choice(result, THEN_ASK_AGAIN)
         print(json.dumps(result, indent=2))
-        return 0 if ok else 1
+        return 0
     if args.numbered:
         print(json.dumps(numbered(inventory), indent=2))
         return 0
     if args.check_columns:
         found, unmatched = check_columns(inventory, _read_names(args.check_columns))
-        print(json.dumps({"unmatched": unmatched} if unmatched else {"exclude_columns": found}))
-        return 1 if unmatched else 0
+        if unmatched:
+            return _needs_choice({"unmatched": unmatched}, THEN_ASK_AGAIN)
+        print(json.dumps({"exclude_columns": found}))
+        return 0
     if not args.keep:
         summary = summarise(inventory)
         if args.used_by:
@@ -635,15 +664,16 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"error": "--keep needs --tables-out"}))
         return 2
     kept, problem = choose(inventory, args.keep, args.shown)
+    if args.keep.startswith("page:") and (problem or not kept):
+        # The page's saved file is refused whole, as before: it is not a name the person typed.
+        print(json.dumps(problem or {"error": "no tables kept"}))
+        return 1
     if problem:
-        print(json.dumps(problem))
-        return 1
+        return _needs_choice(problem, THEN_ASK_AGAIN)
     if not kept:
-        print(json.dumps({"error": "no tables kept"}))
-        return 1
+        return _needs_choice({"error": "no tables kept"}, THEN_NONE_KEPT)
     out = Path(args.tables_out).expanduser()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("".join(t + "\n" for t in kept), encoding="utf-8")
+    _scratch_out.save(out, "".join(t + "\n" for t in kept))
     print(json.dumps({"tables_file": str(out), "kept": len(kept)}))
     return 0
 

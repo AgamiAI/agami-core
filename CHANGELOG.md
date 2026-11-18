@@ -15,11 +15,13 @@ below corresponds to one such version.
 ### Added
 
 - **Fewer permission prompts.** A plugin hook approves, with no prompt, only agami's own harmless
-  calls: six read-only model commands (`areas`, `coverage`, `review-queue`, `review-items`,
-  `model-tree`, `bundle`) written with plain paths, and agami's own `agami-*` scratch files under
-  `<artifacts_dir>/local/tmp/`, plus reads of the plugin's own files. Anything else asks as before, and those six commands no longer
-  install the library themselves: they stop with an exit code of their own, which the skills turn
-  into the `sm install` step, so a stale library is never mistaken for a missing model.
+  calls: the read-only model commands `areas`, `coverage`, `review-queue`, `review-items`,
+  `model-tree`, `bundle`, `steps`, `progress`, `summary`, `overview` and `batch-id`, written with
+  plain paths (`steps --mark` only on a model folder that already exists, `--out` only into agami's
+  scratch folder), agami's own `agami-*` scratch files under `<artifacts_dir>/local/tmp/`, and
+  reads of the plugin's own files. Anything else asks as before, and those commands never install
+  the library themselves: they stop with an exit code of their own, which the skills turn into the
+  `sm install` step, so a stale library is never mistaken for a missing model.
 - **A join through a step names the relationship it is keyed on.** A step that only lists one
   table's key column (de-duplicated or filtered), joined to another table on exactly a declared
   relationship's key, now carries `follows` on its receipt join item: that relationship's name, its
@@ -31,6 +33,90 @@ below corresponds to one such version.
   unmatched rows still count, a FULL join, a window over filtered rows), its receipt column item
   stays `undetermined` and now carries `unconfirmed`: the one metric it is written as. It is never
   a match.
+- **A live task list for onboarding.** `sm steps <root>` prints the ten onboarding steps as a short
+  list to copy into the session's task list, each marked done, in progress or not started, with its
+  numbers read from disk (*"Read the tables and joins — 21 tables, 19 joins"*), never typed by hand.
+  `--mark <id>=<status>` records a step first, in `<root>/.introspect/timeline.jsonl`; what was last
+  printed is kept in `.introspect/steps.last`, so `changed` and `then` say when the list moved. A
+  build that failed, or stopped with no word for 30 minutes, is said once as a `problem`, and a
+  reload reopens the steps from where it starts; a batched build with batches left is not read as
+  finished. On the sample, the steps it never runs are left off from the first list.
+  agami-connect marks each step where it really starts and ends; agami-query marks the last one
+  done when the first question is answered.
+- **Build progress in the person's words.** `sm progress <root> --wait N` returns as soon as this
+  build's log moves on (a log an earlier attempt left is not this build's), with a line ready to
+  post (*"Reading columns ▰▰▱▱▱▱▱▱ 12/34 tables"*, the bar from the log's own counts, rounded down)
+  and the step list. agami-connect runs every build in the background and loops on it, so the turn
+  stays open; a build that raises, or fails before the engine starts, ends its log with
+  `failed: <reason>`.
+- **`sm summary`, `sm overview`.** The closing summary as markdown ready to post (totals, the
+  per-area table, what waits for sign-off, and *"Set up in 6 min 40 s"* from the step marks) and
+  the numbers an overview card shows. Every sign-off count is the card's own
+  (`review-items --scope preseed`: metrics, named filters and entities; joins have no card), and
+  only what the person signed in this run.
+- **`sm batch-id`, `--out` and text from a file.** A fresh stamp for scratch file names, and
+  `--out <path>` on `model-tree`, `bundle`, `org-draft`, `open-questions` and `seed-validate`,
+  written atomically in place of a redirect, only to one of agami's scratch files or a model's own
+  `datasource.md`. `set-org`, `set-description` and `remove-example` take the person's text from a
+  scratch file (`--name-file`, `--description-file`, `--question-file`), used as written.
+- **`sm init-local` and `sm set-config`.** agami writes its own first-run files: `init-local
+  <artifacts_dir>` makes `local/` (0700) and its scratch folder and has `.gitignore` ignore
+  `local/`, and with `--sample` writes the sample database's credential for the promoter;
+  `set-config <artifacts_dir>` writes `.config` (0600) from checked fields (a tier, a profile name,
+  interpreter and tool paths, the reviewer's identity from a scratch file), keeping every other key.
+  Both act only on agami's own artifacts folder. agami-model saves the reviewer's identity the same
+  way.
+
+### Changed
+
+- **Every agami-connect command is one literal call, pre-approved one rule per command.** The skill
+  and the shared files it links write each command as the launcher and its arguments, every path in
+  full: no `$ROOT` or `$PY`, no pipe, `;`, `&&` or redirect (the DuckDB heredocs in
+  `connection-reference.md` are left for a follow-up). The skill's `allowed-tools` has one rule per
+  `sm` verb and per plugin script it runs, with any env prefix written out (`AGAMI_SQL_MAX_ROWS=*`
+  would also let `BASH_ENV=<file>` through, which runs the file). The verbs that read a JSON or
+  table-list file (`curate`, `add`, `add-example`, `seed-examples`, `set-terminology`, `introspect`,
+  `discover`) are pre-approved only with the `AGAMI_SCRATCH_ONLY=1` prefix, under which every file
+  the call names must be one of agami's scratch files (or the build's own `join_candidates.json`).
+  **Still asks:** `sm install`, `py -c`, `py -m` (pip, and `execute_sql`, used to read a few rows of
+  an unclear column), `sm describe-file` and `sm apply-spec` (they read the person's own files),
+  `reconcile.py`, the native query tools (`psql` and the like), the Write of the artifacts-folder
+  pointer for a non-default folder, the Linux `credentials.example`, `USER_MEMORY.md`, and the
+  Write of a model's `datasource.md` narrative. Native-CLI
+  SQL is read from a scratch file. `sm` no longer accepts an abbreviated option (`--o` for `--out`).
+- **A pre-approved script writes only agami's own files.** The page renderers, the page parsers,
+  `serve_page.py`, `progress_page.py`, `inventory_summary.py`, `model_spec_workbook.py` and the
+  sample builder are pre-approved by agami-connect only with the `AGAMI_SCRATCH_ONLY=1` prefix. Under
+  it every path such a script writes or serves (`--out`, `--tables-out`, `--ops-out`, `--out-dir`,
+  `--manifest-out`, the served page and its decisions file, the progress log) must be an `agami-*`
+  file directly in `<artifacts_dir>/local/tmp/`, not a link or a hard link, or the one model file
+  that script writes (the sample's `local/samples/store.db`, the converted workbook's
+  `local/model-spec/<profile>/spec.json` and `spec-tables.txt`, a model's
+  `.introspect/progress.log`); anything else is refused in one line and nothing is written, and a
+  link planted at an allowed name is replaced, never written through. The examples page is now
+  rendered into the scratch folder, and its parsed keeps and fixes land there directly, where
+  `sm add-example` under the same guard can read them. `check_statement.py` (it writes into any
+  `--row-dir`) and `promote_credentials.py` with an argument (`--agami-dir` writes credentials
+  anywhere) are no longer pre-approved. **Known, deliberate:** a pre-approved `sm` verb outside the
+  permission hook's no-install list still installs agami-core itself when the installed library is
+  older than the plugin; it installs only agami-core, at the plugin's pinned version.
+- **A choice that needs the person is not a failure.** `inventory_summary.py` exits 0 with
+  `status: needs_choice` and a `then` for a name that matches nothing or several, or a choice that
+  keeps no tables; the table picker's `page:` keeps its exit 1. `connect_resolve.py` says where the
+  artifacts folder came from and whether `.gitignore` already ignores `local/`, and the password
+  helper prints its own `pid`.
+
+### Fixed
+
+- **A failed native-CLI query is a failure.** `psql -f` gets `-v ON_ERROR_STOP=1` and `snowsql`
+  `-o exit_on_error=true`; without them a statement the database refused exited 0 and read as an
+  empty result.
+- **`<artifacts_dir>/local/` is 0700 whoever creates it.** `sm` and `py` create `local/tmp` before
+  every call and did it under the usual umask, so `local/` came out readable by others. They, the
+  connect helper, the sample builder and the settings writer now make it 0700 and tighten an
+  existing one; `.config` is written 0600.
+- **`py <name>.py` runs only the plugin's own script of that name**, never a file of that name in the
+  current folder.
 
 ## [0.9.24] — 2026-11-17
 

@@ -5,11 +5,12 @@ A live onboarding run stopped for permission 71 times, 42 of them on agami's own
 hook fires in every session, every turn and every subagent, so it approves only what can do no
 harm whoever chose the arguments: no database connection, no credentials, no package install (`sm`
 refuses to install for these verbs, see NO_INSTALL_VERBS there), no write anywhere except a file
-in agami's scratch folder, no read of a file the call names outside that folder and this plugin,
-no read by an approved `sm` verb of anything outside the model folder it names (the CLI holds those
-verbs inside it, links and the model's own file references included), and no change to a model's
-content or trust state. Everything else gets no output, so the normal permission flow applies (a skill's `allowed-tools` still cover
-its own turn). It never denies.
+in agami's scratch folder and a model's own `.introspect/` (`timeline.jsonl`, and `steps.last`, the
+step list `steps` and `progress` last printed), no read of a file the call names outside that
+folder and this plugin, no read by an approved `sm` verb of anything outside the model folder it
+names (the CLI holds those verbs inside it, links and the model's own file references included),
+and no change to a model's content or trust state. Everything else gets no output, so the normal
+permission flow applies (a skill's `allowed-tools` still cover its own turn). It never denies.
 
   A. Bash: one call of this plugin's `scripts/sm` (an optional leading `bash`, nothing else before
      it, no shell syntax at all) whose verb is in VERBS and whose every argument passes that
@@ -55,6 +56,8 @@ UNQUOTED_SPECIAL = set("$*?[]{}()!#")
 
 TMP_NAME = re.compile(r"agami-[A-Za-z0-9._-]+\.(json|txt|tsv|md)")
 AREA = re.compile(r"[A-Za-z0-9_.-]+")
+MARK = re.compile(r"[a-z_]+=(in_progress|done|skipped)")
+SECONDS = re.compile(r"[0-9]{1,3}")
 
 # A background or long call is not something to wave through, so only these fields.
 TOOL_KEYS = {
@@ -153,7 +156,8 @@ ROOT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 def model_root(value: str) -> bool:
     """A model folder: a direct child of `<artifacts_dir>` (symlinks resolved) with a plain profile
     name, not `local`. It need not exist yet: a skill's first `sm areas` is how it learns whether a
-    model is there (exit 3, `no_model`)."""
+    model is there (exit 3). A verb that would write under it (`steps --mark`) also needs it to
+    exist (Verb.root_must_exist_with)."""
     if not _plain_path(value):
         return False
     try:
@@ -190,6 +194,10 @@ def _area(value: str) -> bool:
     return AREA.fullmatch(value) is not None and value.strip(".") != ""
 
 
+def _seconds(value: str) -> bool:
+    return SECONDS.fullmatch(value) is not None and int(value) <= 600
+
+
 Kind = Callable[[str], bool]
 
 
@@ -202,22 +210,32 @@ class Verb:
         positionals: tuple[Kind, ...] = (),
         options: Optional[dict[str, tuple[Optional[Kind], bool]]] = None,
         required: tuple[str, ...] = (),
+        root_must_exist_with: tuple[str, ...] = (),
     ) -> None:
         self.positionals = positionals
         self.options = options or {}
         self.required = required
+        # options that write under <root>: approved only when <root> is already a folder, so an
+        # approved call can't create a new profile folder in <artifacts_dir>
+        self.root_must_exist_with = root_must_exist_with
 
 
 ROOT = (model_root,)
 
 # Every verb here only loads the model at <root> and prints it (`review-queue` and `review-items`
-# also read the curation log under <root>); none writes a file, connects to a database or reads
-# credentials. Read from each handler in semantic_model/cli.py, and pinned by
-# test_an_approved_call_changes_no_file. Only the options cli.py gives each verb are listed.
+# also read the curation log under <root>), or prints a stamp (`batch-id`); none connects to a
+# database or reads credentials. The writes: `--out` writes only
+# to a scratch file; `steps --mark` appends to <root>/.introspect/timeline.jsonl; and `steps`,
+# `progress` and `coverage` (once a step timeline exists) keep the list they last printed in
+# <root>/.introspect/steps.last, replaced atomically and only inside that folder. Read from each
+# handler in semantic_model/cli.py, and pinned by test_an_approved_call_changes_no_file and
+# test_an_approved_steps_or_progress_call_writes_only_inside_introspect. Only the options cli.py
+# gives each verb are listed.
 # The model names files of its own (a storage `ref`, a subject area's path) and may hold links, so
 # cli.py runs each of these verbs contained (`_within_model`): a read that would leave <root>, links
 # resolved, stops with `outside_model` before it happens, and the error names the path, never its
-# content. Pinned by test_an_approved_verb_reads_nothing_outside_the_model.
+# content. `batch-id` takes no root and reads nothing. Pinned by
+# test_an_approved_verb_reads_nothing_outside_the_model and test_every_approved_verb_runs_contained.
 #
 # NOT approved, by design; do not add one without reading its handler. Many connect to a database,
 # use credentials, install a package, read a file the call names, write, or change the model or its
@@ -231,14 +249,25 @@ ROOT = (model_root,)
 # added later.
 # A verb joins only after its handler is read, and with the same name added to sm's NO_INSTALL_VERBS.
 VERBS: dict[str, Verb] = {
+    "steps": Verb(
+        ROOT,
+        {"--mark": (lambda v: MARK.fullmatch(v) is not None, True), "--full": (None, False)},
+        root_must_exist_with=("--mark",),
+    ),
+    "progress": Verb(ROOT, {"--wait": (_seconds, False)}),
+    "summary": Verb(ROOT, {"--json": (None, False)}),
+    "overview": Verb(ROOT),
     "areas": Verb(ROOT),
     "coverage": Verb(ROOT),
     "review-queue": Verb(ROOT),
     "review-items": Verb(
         ROOT, {"--scope": (lambda v: v in ("all", "rule1", "rule2", "preseed"), False)}
     ),
-    "model-tree": Verb(ROOT),
-    "bundle": Verb(ROOT, {"--area": (_area, False)}, required=("--area",)),
+    "model-tree": Verb(ROOT, {"--out": (scratch_file, False)}),
+    "bundle": Verb(
+        ROOT, {"--area": (_area, False), "--out": (scratch_file, False)}, required=("--area",)
+    ),
+    "batch-id": Verb(),
 }
 
 
@@ -276,6 +305,8 @@ def args_allowed(args: list[str]) -> bool:
     if len(positionals) != len(verb.positionals):
         return False
     if not all(kind(v) for kind, v in zip(verb.positionals, positionals)):
+        return False
+    if seen & set(verb.root_must_exist_with) and not os.path.isdir(os.path.realpath(positionals[0])):
         return False
     return all(r in seen for r in verb.required)
 

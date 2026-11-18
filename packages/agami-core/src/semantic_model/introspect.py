@@ -23,7 +23,9 @@ local-only execution path the rest of agami uses; no new egress.
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import functools
 import io
 import json
 import os
@@ -546,6 +548,31 @@ def make_execute_sql_runner(
 # ---------------------------------------------------------------------------
 
 
+def _logs_failure(fn: Callable) -> Callable:
+    """End the progress log with `failed: <reason>` when the run raises, then re-raise unchanged.
+    Without it a failed run leaves an unfinished log, which `sm steps` reads as a build still going."""
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        # BaseException, not Exception: a Ctrl-C must also end the log with `failed:`; it is re-raised.
+        except BaseException as exc:
+            log_failure(kwargs.get("progress_path"), exc)
+            raise
+    return run
+
+
+def log_failure(path: Optional[str | Path], exc: BaseException) -> None:
+    """End the progress log at `path` with `failed: <the exception's first line>`."""
+    reason = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+    if path:
+        # a run that fails before the engine made the folder (a missing --tables-file) still logs
+        with contextlib.suppress(OSError):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+    _progress(Path(path) if path else None, f"failed: {reason}")
+
+
+@_logs_failure
 def introspect(
     profile: str,
     db_type: str,

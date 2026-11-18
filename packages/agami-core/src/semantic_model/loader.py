@@ -124,6 +124,16 @@ def _read_yaml(path: Path) -> Any:
         return yaml.safe_load(fh)
 
 
+def inside_model(root: str | Path, path: str | Path) -> bool:
+    """Whether `path`, symlinks resolved, is inside the model folder `root`: the check for the
+    model's own logs (the step timeline, the build log, the steps.last record) before they are read
+    or written, so a link planted in a model folder can't make a read verb print, or a mark write,
+    a file elsewhere."""
+    root_real = Path(os.path.realpath(root))
+    real = Path(os.path.realpath(path))
+    return real == root_real or root_real in real.parents
+
+
 # The top-level keys `load_datasource` reads, which are exactly `Datasource`'s fields. Every other
 # key in datasource.yaml is dropped by that read, so a model written for a newer agami-core lost a
 # field it declared without a word, and a deploy fed by that load stored a model without it (#575).

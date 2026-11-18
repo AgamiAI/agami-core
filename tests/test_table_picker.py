@@ -658,11 +658,14 @@ def test_numbers_mean_nothing_where_no_list_was_shown(tmp_path):
             == 0
         )
     assert out.read_text() == "crm.crm_accounts\ncrm.crm_leads\n"
-    with contextlib.redirect_stdout(io.StringIO()):
+    # a number with no list shown needs the person's answer: exit 0 with `needs_choice`, not a failure
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
         assert (
             IS.main(["--inventory", str(path), "--keep", f"pick:{typed}", "--tables-out", str(out)])
-            == 1
+            == 0
         )
+    assert json.loads(buf.getvalue())["status"] == "needs_choice"
 
 
 def test_the_list_numbers_schemas_together_even_when_the_inventory_interleaves_them():
