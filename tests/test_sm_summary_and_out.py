@@ -363,3 +363,19 @@ def test_the_cli_refuses_an_abbreviated_out(model, tmp_path, capsys, abbrev, ver
         cli.main(argv)
     assert exc.value.code == 2
     assert not target.exists() and not (Path.cwd() / "x.json").exists()
+
+
+# --- batch-id ----------------------------------------------------------------------------------
+
+BATCH = r"^\d{8}-\d{6}-[0-9a-f]{4}$"
+
+
+def test_batch_id_is_a_utc_stamp_with_four_hex(capsys):
+    import re
+
+    assert cli.main(["batch-id"]) == 0
+    first = json.loads(capsys.readouterr().out)["batch"]
+    assert re.match(BATCH, first), first
+    assert cli.main(["batch-id"]) == 0
+    second = json.loads(capsys.readouterr().out)["batch"]
+    assert re.match(BATCH, second) and second != first  # two batches never share file names

@@ -209,8 +209,8 @@ class Verb:
 ROOT = (model_root,)
 
 # Every verb here only loads the model at <root> and prints it (`review-queue` and `review-items`
-# also read the curation log under <root>), or prints a stamp (`batch-id`) or waits on scratch files
-# (`wait-files`); none connects to a database or reads credentials. The writes: `--out` writes only
+# also read the curation log under <root>), or prints a stamp (`batch-id`); none connects to a
+# database or reads credentials. The writes: `--out` writes only
 # to a scratch file; `steps --mark` appends to <root>/.introspect/timeline.jsonl; and `steps`,
 # `progress` and `coverage` (once a step timeline exists) keep the list they last printed in
 # <root>/.introspect/steps.last, replaced atomically and only inside that folder. Read from each
@@ -235,7 +235,6 @@ VERBS: dict[str, Verb] = {
         {"--mark": (lambda v: MARK.fullmatch(v) is not None, True), "--full": (None, False)},
     ),
     "progress": Verb(ROOT, {"--wait": (_seconds, False)}),
-    "timing": Verb(ROOT),
     "summary": Verb(ROOT, {"--json": (None, False)}),
     "overview": Verb(ROOT),
     "areas": Verb(ROOT),
@@ -249,9 +248,6 @@ VERBS: dict[str, Verb] = {
         ROOT, {"--area": (_area, False), "--out": (scratch_file, False)}, required=("--area",)
     ),
     "batch-id": Verb(),
-    "wait-files": Verb(
-        (), {"--file": (scratch_file, True), "--wait": (_seconds, False)}, required=("--file",)
-    ),
 }
 
 

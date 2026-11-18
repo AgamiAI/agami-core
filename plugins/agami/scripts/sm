@@ -209,7 +209,7 @@ fi
 # an install is a network fetch that runs build code, which the person must agree to. A missing or
 # stale library stops them with how to install it. tests/test_approve_own_calls.py holds this list
 # and the hook's table equal.
-NO_INSTALL_VERBS="steps progress timing summary overview areas coverage review-queue review-items model-tree bundle batch-id wait-files"
+NO_INSTALL_VERBS="steps progress summary overview areas coverage review-queue review-items model-tree bundle batch-id"
 # The refusal has a code of its own. 3 already means "no model here" to the skills (a first `sm areas`
 # exiting 3 sends the person to agami-connect), so a library left stale by a plugin update would send
 # them to set up a database that is already connected. 12 is used by nothing sm runs or passes

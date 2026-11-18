@@ -33,16 +33,16 @@ below corresponds to one such version.
   bar from the log's own counts, rounded down) and the step list. agami-connect runs every build in
   the background and loops on it, so the turn stays open; a build that raises now ends its log with
   `failed: <reason>`.
-- **`sm summary`, `sm overview`, `sm timing`.** The closing summary as markdown ready to post
-  (totals, the per-area table, what waits for sign-off, and *"Set up in 6 min 40 s"* from the step
-  marks), the numbers an overview card shows, and how long each step took. Every count is the
-  sign-off card's own: metrics, entities and joins, and only what the person signed in this run.
-- **`sm batch-id`, `sm wait-files`, and `--out`.** A fresh stamp for scratch file names; a wait for
-  result files; and `--out <path>` on `model-tree`, `bundle`, `org-draft`, `open-questions` and
-  `seed-validate`, written atomically, in place of a redirect. `set-org`, `set-description` and
+- **`sm summary`, `sm overview`.** The closing summary as markdown ready to post (totals, the
+  per-area table, what waits for sign-off, and *"Set up in 6 min 40 s"* from the step marks) and
+  the numbers an overview card shows. Every sign-off count is the card's own: metrics, named
+  filters and entities (joins have no card), and only what the person signed in this run.
+- **`sm batch-id` and `--out`.** A fresh stamp for scratch file names, and `--out <path>` on
+  `model-tree`, `bundle`, `org-draft`, `open-questions` and `seed-validate`, written atomically, in
+  place of a redirect. `set-org`, `set-description` and
   `remove-example` take the person's text from a file (`--name-file`, `--description-file`,
   `--question-file`), used as written. The permission hook also approves `steps`, `progress`,
-  `timing`, `summary`, `overview`, `batch-id`, `wait-files` and `--out` into agami's scratch folder.
+  `summary`, `overview`, `batch-id` and `--out` into agami's scratch folder.
 
 ### Changed
 

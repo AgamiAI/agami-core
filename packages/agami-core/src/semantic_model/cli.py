@@ -30,7 +30,6 @@ import io
 import json
 import os
 import re
-import stat
 import sys
 import time
 from datetime import datetime, timezone
@@ -637,53 +636,14 @@ def cmd_progress(args) -> int:
     return 0
 
 
-# The longest one `sm wait-files` call blocks: the skill calls it again if the subagents need longer,
-# and a shell tool's own timeout (10 minutes in Claude Code) would kill a longer call mid-wait.
-WAIT_FILES_MAX = 600
-
-
-def wait_files_seconds(value: float) -> float:
-    """`--wait` clamped to 0..WAIT_FILES_MAX."""
-    return min(max(0.0, value), float(WAIT_FILES_MAX))
-
-
 def cmd_batch_id(args) -> int:
-    """Print `{"batch": "<YYYYMMDD-HHMMSS>-<4 hex>"}`: a stamp the skill puts in one batch's input
-    and result file names. Without it a result left by an earlier run (a reintrospect, a sample
-    rebuild, another database with the same area name) reads as this run's to `wait-files` at once,
-    and a subagent's Write onto a file it hasn't read can fail. The random part keeps two batches
-    started in the same second apart."""
+    """Print `{"batch": "<YYYYMMDD-HHMMSS>-<4 hex>"}`: a stamp the skill puts in the names of one
+    page's scratch files (the page, its items, the decisions it saves). Without it a file left by an
+    earlier run (a reintrospect, a sample rebuild, another database with the same area name) reads as
+    this run's, and a Write onto a file Claude hasn't read in this session fails. The random part
+    keeps two pages started in the same second apart."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     _print_json({"batch": f"{stamp}-{os.urandom(2).hex()}"})
-    return 0
-
-
-def cmd_wait_files(args) -> int:
-    """Wait until every `--file` exists and is non-empty, or until `--wait` seconds run out.
-
-    The skill runs enrichers in the background while the person answers cards, then blocks on their
-    result files with this pre-approved call, the same idea as `sm progress --wait`: a turn that ends
-    loses the skill's pre-approvals. An empty file is still waiting, since a write can land in two
-    steps. Exit 0 either way; `all_ready` says which."""
-    paths = [Path(f).expanduser() for f in args.file]
-
-    def ready(p: Path) -> bool:
-        # one stat, not is_file() then stat(): a file removed between the two would raise
-        try:
-            st = p.stat()
-        except OSError:
-            return False
-        return stat.S_ISREG(st.st_mode) and st.st_size > 0
-
-    deadline = time.monotonic() + wait_files_seconds(args.wait)
-    while True:
-        done = [p for p in paths if ready(p)]
-        left = deadline - time.monotonic()
-        if len(done) == len(paths) or left <= 0:
-            break
-        time.sleep(min(1.0, left))
-    _print_json({"ready": [str(p) for p in done], "waiting": [str(p) for p in paths if p not in done],
-                 "all_ready": len(done) == len(paths)})
     return 0
 
 
@@ -751,14 +711,6 @@ def _with_refresh(out: dict, root: Path) -> dict:
         return out
     then = out.get("then")
     return {**out, **fresh, "then": (then + steps.THEN_AND_UPDATE) if then else steps.THEN_UPDATE}
-
-
-def cmd_timing(args) -> int:
-    """How long onboarding took, from the step marks: per step, in total, and the line to show.
-    No timeline is not an error: every number is 0 and the line is empty."""
-    from . import timing
-    _print_json(timing.onboarding_timing(Path(args.root)))
-    return 0
 
 
 def cmd_summary(args) -> int:
@@ -2563,8 +2515,8 @@ def _add_out(sp: argparse.ArgumentParser) -> None:
 
 
 def write_atomically(path: Path, data: bytes) -> None:
-    """`data` at `path` through a temp file in the same folder and a rename, so a reader polling
-    for the file (`sm wait-files`) never sees it half written."""
+    """`data` at `path` through a temp file in the same folder and a rename, so a page or a later
+    command reading the file never sees it half written."""
     import tempfile
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
@@ -2585,7 +2537,7 @@ def write_atomically(path: Path, data: bytes) -> None:
 def _run_to_out(args) -> int:
     """Run the verb with its stdout captured, then write those bytes to `--out`, whatever the exit
     code, as the redirect it replaces did; the exit code passes through. A verb that raises writes
-    nothing, so no half answer lands where a poller looks. `--out` is only ever a scratch file or a
+    nothing, so no half answer is left for the next command to read. `--out` is only ever a scratch file or a
     model's own datasource.md (semantic_model/scratch.py), checked before the verb runs."""
     from . import scratch
     try:
@@ -2772,14 +2724,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_out(sp)
     sp.set_defaults(func=cmd_model_tree)
 
-    sp = sub.add_parser("batch-id", help="print a fresh stamp for one batch of subagents' input and result file names")
+    sp = sub.add_parser("batch-id", help="print a fresh stamp for the names of one page's scratch files")
     sp.set_defaults(func=cmd_batch_id)
-
-    sp = sub.add_parser("wait-files", help="wait until every --file exists and is non-empty, or --wait seconds pass; keeps the turn open while background subagents finish")
-    sp.add_argument("--file", action="append", required=True, help="a result file to wait on (repeatable)")
-    sp.add_argument("--wait", type=float, default=0.0,
-                    help=f"wait up to this many seconds (default 0: check once; at most {WAIT_FILES_MAX})")
-    sp.set_defaults(func=cmd_wait_files)
 
     sp = sub.add_parser("progress", help="the build's latest progress line, ready to post, with a bar from its own counts; --wait N returns when the log moves on")
     sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
@@ -2795,10 +2741,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--mark", action="append", default=[], metavar="ID=STATUS",
                     help="mark a step in_progress, done or skipped (repeatable, applied in order)")
     sp.set_defaults(func=cmd_steps)
-
-    sp = sub.add_parser("timing", help="how long onboarding took, from the step marks: seconds per step, the total, and a 'Set up in …' line")
-    sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
-    sp.set_defaults(func=cmd_timing)
 
     sp = sub.add_parser("summary", help="the onboarding's closing summary as markdown, ready to post: totals, the per-area table, what waits for sign-off, and the 'Set up in …' line")
     sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")

@@ -1,4 +1,4 @@
-"""`sm timing`: how long onboarding took, from the step marks `sm steps --mark` writes, so the
+"""How long onboarding took, from the step marks `sm steps --mark` writes, so the closing
 summary's "Set up in …" line is measured, never estimated. Only the current run counts, the total
 is wall-clock from its first mark to its last (what the person waited), and a run with a long break
 in it shows no line."""
@@ -14,7 +14,7 @@ import pytest
 pytest.importorskip("pydantic")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "packages" / "agami-core" / "src"))
 
-from semantic_model import cli, steps, timing  # noqa: E402
+from semantic_model import steps, timing  # noqa: E402
 
 
 def _write(root: Path, marks: list[tuple], day: int = 12) -> None:
@@ -254,14 +254,3 @@ def test_garbage_lines_ignored(tmp_path):
     result = timing.onboarding_timing(tmp_path)
     assert result["total_seconds"] == 400
     assert _seconds(result)["build"] == 130
-
-
-def test_cli_prints_the_same_dict(tmp_path, capsys):
-    _write(tmp_path, FIXED)
-    assert cli.main(["timing", str(tmp_path)]) == 0
-    assert json.loads(capsys.readouterr().out) == timing.onboarding_timing(tmp_path)
-
-
-def test_cli_with_no_timeline(tmp_path, capsys):
-    assert cli.main(["timing", str(tmp_path)]) == 0
-    assert json.loads(capsys.readouterr().out)["text"] == ""

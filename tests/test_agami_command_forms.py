@@ -4,9 +4,9 @@ A live run of `/agami-connect` stopped for permission on most of agami's own com
 them as it saw them, `R="…"; bash "$P/scripts/sm" steps "$R" | grep …`, and no `allowed-tools`
 rule matches a line that starts with an assignment or carries a pipe. Claude copies the skill's
 command forms, so the forms themselves must be the one shape that is pre-approved: the launcher,
-then its arguments, every path written out. This reads agami-connect's SKILL.md, its phase files,
-the shared files it links and the three agent files, and checks each command three ways: no shell
-syntax, matched by one of the skill's own `allowed-tools` rules, and accepted by the real `sm`
+then its arguments, every path written out. This reads agami-connect's SKILL.md and the shared
+files it links, and checks each command three ways: no shell syntax, matched by one of the skill's
+own `allowed-tools` rules (or listed as one that deliberately asks), and accepted by the real `sm`
 parser. The read-only verbs the plugin hook approves must also be approved by it, so the step list,
 progress, summary and wait calls never stop for permission in any turn.
 """
@@ -29,23 +29,18 @@ import yaml
 from skill_docs import PLUGIN, SKILLS_DIR, skill_docs
 
 CONNECT = SKILLS_DIR / "agami-connect"
-REFS = CONNECT / "references"
 SHARED = PLUGIN / "shared"
 SRC = Path(__file__).resolve().parent.parent / "packages" / "agami-core" / "src"
 HOOK = PLUGIN / "scripts" / "approve_own_calls.py"
 
 
 def _linked_shared() -> list[Path]:
-    """The shared files agami-connect links, from its SKILL.md and any phase files."""
-    names: set[str] = set()
-    for doc in [CONNECT / "SKILL.md", *REFS.glob("*.md")]:
-        names.update(re.findall(r"shared/([a-z_-]+\.md)", doc.read_text(encoding="utf-8")))
+    """The shared files agami-connect's SKILL.md links."""
+    names = set(re.findall(r"shared/([a-z_-]+\.md)", (CONNECT / "SKILL.md").read_text(encoding="utf-8")))
     return sorted(SHARED / n for n in names)
 
 
-DOCS = sorted(
-    [CONNECT / "SKILL.md", *REFS.glob("*.md"), *_linked_shared(), *(PLUGIN / "agents").glob("*.md")]
-)
+DOCS = sorted([CONNECT / "SKILL.md", *_linked_shared()])
 PLACEHOLDER = re.compile(r"<[^<>\n]+>")
 # Any mention of the launcher as a path, quoted or not; a command must use the quoted form below.
 LAUNCHER = re.compile(r"(?:\$\{CLAUDE_PLUGIN_ROOT\}|<plugin_root>)/scripts/(?:sm|py)(?![\w.-])")
@@ -99,8 +94,8 @@ FOLLOW_UP_FENCES = {
         "# Postgres",
     ): "a DuckDB heredoc; needs a one-profile attach",
     ("shared/connection-reference.md", "# MySQL"): "a DuckDB heredoc; needs a one-profile attach",
-    # own-examples.md is newer than #662: reconcile.py intake and parse_reconcile_report.py print to
-    # stdout only, so writing their output to a file still needs a redirect until they take --out
+    # reconcile.py intake and parse_reconcile_report.py print to stdout only, so writing their
+    # output to a file still needs a redirect until they take --out
     (
         "shared/own-examples.md",
         'mkdir -p "<artifacts_dir>/local/tmp"',
@@ -325,7 +320,6 @@ COMMANDS, SHORTHANDS, OTHERS, HELPER_USES, UNLABELLED = scan()
 def test_the_scan_finds_the_commands():
     assert len(COMMANDS) > 60 and len(SHORTHANDS) > 40
     assert any('sm" steps "<root>" --mark first_question=in_progress' in c for _, c in COMMANDS)
-    assert not any(w.startswith("agents/") for w, _ in COMMANDS)  # agents run no commands
     assert any("mkdir -m 700 -p" in c for _, c in OTHERS) and HELPER_USES
 
 
@@ -671,7 +665,7 @@ def test_the_checks_catch_the_live_runs_forms(art):
         'bash "<plugin_root>/scripts/sm" seed-validate "<root>" --profile <profile> > "<artifacts_dir>/local/tmp/agami-x.json"',
         'bash "<plugin_root>/scripts/sm" steps "$ROOT"',
         'bash "<plugin_root>/scripts/sm" steps "<root>" | grep text',
-        'bash "<plugin_root>/scripts/sm" steps "<root>"; bash "<plugin_root>/scripts/sm" timing "<root>"',
+        'bash "<plugin_root>/scripts/sm" steps "<root>"; bash "<plugin_root>/scripts/sm" summary "<root>"',
     ):
         with pytest.raises(AssertionError):
             test_no_shell_syntax_in_a_command("example", bad)
@@ -691,12 +685,7 @@ def test_no_skill_file_tells_claude_to_change_the_persons_characters():
         r"|(?:replace|swap|escape|turn)[^.\n]{0,40}(?:apostrophe|`'`|quote)",
         re.I,
     )
-    docs = [
-        *SKILLS_DIR.glob("*/SKILL.md"),
-        *SKILLS_DIR.glob("*/references/*.md"),
-        *SHARED.glob("*.md"),
-        *(PLUGIN / "agents").glob("*.md"),
-    ]
+    docs = [*SKILLS_DIR.glob("*/SKILL.md"), *SHARED.glob("*.md")]
     found = [
         f"{d.relative_to(PLUGIN)}: {m.group(0)}"
         for d in docs

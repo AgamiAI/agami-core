@@ -127,7 +127,6 @@ APPROVED = [
     "progress {R} --wait 20",
     "progress {R} --wait 0",
     "progress {R} --wait 600",
-    "timing {R}",
     "summary {R}",
     "summary {R} --json",
     "overview {R}",
@@ -146,8 +145,6 @@ APPROVED = [
     "bundle --area agami-example {R}",
     "bundle {R} --area agami-example --out {T}/agami-examples-1-sales.input.json",
     "batch-id",
-    "wait-files --file {T}/agami-a.result.json",
-    "wait-files --file {T}/agami-a.json --file {T}/agami-b.json --wait 60",
 ]
 
 # The approved forms that write: into the model's own .introspect/ (pinned by
@@ -303,7 +300,6 @@ REFUSED = {
     "abbrev --sc review-items": "review-items {R} --sc all",
     "--scope= review-items": "review-items {R} --scope=all",
     "--area= bundle": "bundle {R} --area=sales",
-    "abbrev --f wait-files": "wait-files --f {T}/agami-a.json",
     "abbrev --m steps": "steps {R} --m build=done",
     "abbrev --fu steps": "steps {R} --fu",
     "abbrev --wa progress": "progress {R} --wa 5",
@@ -350,10 +346,6 @@ REFUSED = {
     "wait float": "progress {R} --wait 2.5",
     "wait too long": "progress {R} --wait 601",
     "wait twice": "progress {R} --wait 1 --wait 2",
-    "wait-files outside": "wait-files --file /tmp/agami-a.json",
-    "wait-files not agami-": "wait-files --file {T}/settings.json",
-    "wait-files none": "wait-files --wait 5",
-    "wait-files too long": "wait-files --file {T}/agami-a.json --wait 601",
     "batch-id arg": "batch-id {R}",
     "json on steps": "steps {R} --json",
     "help on steps": "steps {R} -h",
@@ -1011,7 +1003,6 @@ def test_the_table_is_exactly_these_verbs():
     assert set(HOOK_MOD.VERBS) == {
         "steps",
         "progress",
-        "timing",
         "summary",
         "overview",
         "areas",
@@ -1021,7 +1012,6 @@ def test_the_table_is_exactly_these_verbs():
         "model-tree",
         "bundle",
         "batch-id",
-        "wait-files",
     }
 
 
