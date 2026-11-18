@@ -642,6 +642,85 @@ def test_reading_outside_the_plugin_says_nothing(art, path):
     assert _decision(_file("Read", path), art) is None
 
 
+# --- UNC and device paths --------------------------------------------------------------------------------
+# On Windows, resolving `\\host\share\x` (either slash style) can open an SMB session and send the
+# person's Windows credentials to `host` before anything has been approved. So such a path is refused
+# by its text alone, before any filesystem call, in every check that takes a path from the call.
+
+UNC_FORMS = [
+    "\\\\uncprobe\\share\\agami-x.json",
+    "//uncprobe/share/agami-x.json",
+    "/\\uncprobe/share/agami-x.json",
+    "\\/uncprobe\\share\\agami-x.json",
+    "\\\\?\\C:\\uncprobe\\agami-x.json",
+    "\\\\?\\UNC\\uncprobe\\share\\agami-x.json",
+    "\\\\.\\pipe\\uncprobe",
+    "//?/C:/uncprobe/agami-x.json",
+]
+
+
+@pytest.mark.parametrize("value", UNC_FORMS)
+def test_a_unc_or_device_path_is_not_a_plain_path(value):
+    assert HOOK_MOD._plain_path(value) is False
+
+
+def _no_filesystem_call_on_unc(monkeypatch) -> list:
+    """Every filesystem call the hook's checks make, made to fail the test when its argument is the
+    UNC probe: the refusal must come from the text alone."""
+    touched: list = []
+    for name in ("realpath", "exists", "isfile", "isdir", "islink", "lexists"):
+        real = getattr(os.path, name)
+
+        def spy(p, *a, _real=real, **k):
+            if "uncprobe" in str(p):
+                touched.append(p)
+            return _real(p, *a, **k)
+
+        monkeypatch.setattr(os.path, name, spy)
+    for name in ("stat", "lstat"):
+        real = getattr(os, name)
+
+        def spy(p, *a, _real=real, **k):
+            if "uncprobe" in str(p):
+                touched.append(p)
+            return _real(p, *a, **k)
+
+        monkeypatch.setattr(os, name, spy)
+    return touched
+
+
+@pytest.mark.parametrize("value", UNC_FORMS)
+def test_every_path_check_refuses_a_unc_path_before_touching_it(art, monkeypatch, value):
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    touched = _no_filesystem_call_on_unc(monkeypatch)
+    assert HOOK_MOD.scratch_file(value) is False
+    assert HOOK_MOD.plugin_file(value) is False
+    assert HOOK_MOD.model_root(value) is False
+    assert HOOK_MOD._is_launcher(value) is False
+    assert touched == []
+
+
+@pytest.mark.parametrize("tool", ["Write", "Read", "Edit"])
+@pytest.mark.parametrize("value", UNC_FORMS)
+def test_a_unc_file_path_says_nothing(art, tool, value):
+    assert _decision(_file(tool, value), art) is None
+
+
+@pytest.mark.parametrize("value", UNC_FORMS)
+def test_a_unc_model_root_or_launcher_says_nothing(art, value):
+    assert _decision(_bash(f"bash '{SM}' areas '{value}'"), art) is None
+    assert _decision(_bash(f"bash '{value}' areas '{art / 'acme'}'"), art) is None
+
+
+def test_a_doubled_leading_slash_on_an_allowed_path_says_nothing(art):
+    """POSIX leaves `//x` to the system and Windows reads it as a server, so an otherwise approved
+    path written with two leading slashes is refused too."""
+    assert _decision(_file("Read", "/" + str(PLUGIN / "scripts" / "sm")), art) is None
+    assert _decision(_file("Write", "/" + str(art / "local" / "tmp" / "agami-x.json")), art) is None
+    assert _decision(_bash(f"bash '{SM}' areas '/{art / 'acme'}'"), art) is None
+    assert _decision(_bash(f"bash '/{SM}' areas '{art / 'acme'}'"), art) is None
+
+
 @SYMLINKS
 def test_a_link_inside_the_plugin_pointing_out_says_nothing(art, tmp_path):
     outside = tmp_path / "secret.txt"

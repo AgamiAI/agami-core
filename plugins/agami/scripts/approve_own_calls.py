@@ -74,8 +74,14 @@ def _norm(p: str) -> str:
 
 
 def _plain_path(value: str) -> bool:
-    """An absolute path with no `.` or `..` segment and no `~` (which the shell would expand)."""
+    """An absolute path with no `.` or `..` segment and no `~` (which the shell would expand), and
+    not a UNC or device path. Every check calls this before any filesystem call: on Windows,
+    resolving `\\\\host\\share\\x` (either slash style) can open an SMB session and send the person's
+    credentials to `host` before anything is approved. POSIX `//x` is refused with it."""
     if value.startswith("~") or not (os.path.isabs(value) or ntpath.isabs(value)):
+        return False
+    lead = value[:2].replace("/", "\\")
+    if lead == "\\\\" or ntpath.splitdrive(ntpath.normpath(value))[0].startswith("\\\\"):
         return False
     return not any(p in (".", "..") for p in re.split(r"[\\/]", value))
 
