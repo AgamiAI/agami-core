@@ -27,6 +27,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+
+import _scratch_out  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 SEED = HERE / "seed.sql"
 
@@ -101,6 +105,12 @@ def main(argv: list[str] | None = None) -> int:
         help="skip the sqlite3 CLI and force the stdlib builder (for testing the fallback)",
     )
     args = ap.parse_args(argv)
+    if _scratch_out.guarded():
+        # Pre-approved: the build deletes what is at --out first, so only the sample's own file.
+        try:
+            _scratch_out.model_file(args.out, "local", "samples", "store.db")
+        except _scratch_out.Refused as e:
+            return _scratch_out.refuse("build_sample.py", e)
 
     out = Path(args.out)
     method = build(out, prefer_cli=not args.no_cli)

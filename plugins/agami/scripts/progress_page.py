@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import _scratch_out
 from serve_page import script_hashes
 
 HOST = "127.0.0.1"
@@ -283,6 +284,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("log", help="The build's progress log (<artifacts_dir>/<profile>/.introspect/progress.log).")
     p.add_argument("--minutes", type=float, default=240.0, help="How long to keep serving (default 240).")
     args = p.parse_args(argv)
+    if _scratch_out.guarded():
+        try:
+            _scratch_out.model_file(args.log, "<profile>", ".introspect", "progress.log", profile_at=0)
+        except _scratch_out.Refused as e:
+            return _scratch_out.refuse("progress_page.py", e)
     server = _Server(Path(args.log).expanduser().resolve())
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()

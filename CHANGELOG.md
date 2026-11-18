@@ -73,6 +73,22 @@ below corresponds to one such version.
   pointer for a non-default folder, the Linux `credentials.example`, `USER_MEMORY.md`, and the
   Write of a model's `datasource.md` narrative. Native-CLI
   SQL is read from a scratch file. `sm` no longer accepts an abbreviated option (`--o` for `--out`).
+- **A pre-approved script writes only agami's own files.** The page renderers, the page parsers,
+  `serve_page.py`, `progress_page.py`, `inventory_summary.py`, `model_spec_workbook.py` and the
+  sample builder are pre-approved by agami-connect only with the `AGAMI_SCRATCH_ONLY=1` prefix. Under
+  it every path such a script writes or serves (`--out`, `--tables-out`, `--ops-out`, `--out-dir`,
+  `--manifest-out`, the served page and its decisions file, the progress log) must be an `agami-*`
+  file directly in `<artifacts_dir>/local/tmp/`, not a link or a hard link, or the one model file
+  that script writes (the sample's `local/samples/store.db`, the converted workbook's
+  `local/model-spec/<profile>/spec.json` and `spec-tables.txt`, a model's
+  `.introspect/progress.log`); anything else is refused in one line and nothing is written, and a
+  link planted at an allowed name is replaced, never written through. The examples page is now
+  rendered into the scratch folder, and its parsed keeps and fixes land there directly, where
+  `sm add-example` under the same guard can read them. `check_statement.py` (it writes into any
+  `--row-dir`) and `promote_credentials.py` with an argument (`--agami-dir` writes credentials
+  anywhere) are no longer pre-approved. **Known, deliberate:** a pre-approved `sm` verb outside the
+  permission hook's no-install list still installs agami-core itself when the installed library is
+  older than the plugin; it installs only agami-core, at the plugin's pinned version.
 - **A choice that needs the person is not a failure.** `inventory_summary.py` exits 0 with
   `status: needs_choice` and a `then` for a name that matches nothing or several, or a choice that
   keeps no tables; the table picker's `page:` keeps its exit 1. `connect_resolve.py` says where the

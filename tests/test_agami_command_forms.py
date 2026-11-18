@@ -59,6 +59,9 @@ DELIBERATELY_ASKS = {
     r'scripts/py" reconcile\.py ': "can call an MCP server over the network",
     r'scripts/sm" add-example .*<examples_files': "reads reconcile's output under local/reconcile/",
     r'scripts/(sm|py)" <(verb|script)>': "a generic form in prose, not a command",
+    r'^bash "[^"]*scripts/py" (serve_page|render_[a-z_]+|progress_page|parse_[a-z_]+_decisions|'
+    r"inventory_summary|model_spec_workbook)\.py": "writes or serves a path it is given; pre-approved "
+    "only under AGAMI_SCRATCH_ONLY=1, which holds that path to agami's scratch folder",
 }
 SHORTHAND = re.compile(r"^sm ([a-z][a-z-]*)(?: (.*))?$")
 

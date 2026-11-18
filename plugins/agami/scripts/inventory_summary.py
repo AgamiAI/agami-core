@@ -79,6 +79,10 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import _scratch_out  # noqa: E402
+
 NEEDS_CHOICE = "needs_choice"
 THEN_ASK_AGAIN = ("Nothing was written: these names match nothing, or more than one. Ask the same "
                   "card again, naming them in plain words, rather than guessing.")
@@ -624,6 +628,11 @@ def main(argv: list[str] | None = None) -> int:
         help="a file of shared SQL or questions; adds the schemas it names as `used_schemas`",
     )
     args = ap.parse_args(argv)
+    if args.tables_out and _scratch_out.guarded():
+        try:
+            _scratch_out.scratch_file(args.tables_out)
+        except _scratch_out.Refused as e:
+            return _scratch_out.refuse("inventory_summary.py", e)
 
     inventory = json.loads(Path(args.inventory).expanduser().read_text(encoding="utf-8"))
     if args.show:
@@ -664,8 +673,7 @@ def main(argv: list[str] | None = None) -> int:
     if not kept:
         return _needs_choice({"error": "no tables kept"}, THEN_NONE_KEPT)
     out = Path(args.tables_out).expanduser()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("".join(t + "\n" for t in kept), encoding="utf-8")
+    _scratch_out.write_text(out, "".join(t + "\n" for t in kept))
     print(json.dumps({"tables_file": str(out), "kept": len(kept)}))
     return 0
 

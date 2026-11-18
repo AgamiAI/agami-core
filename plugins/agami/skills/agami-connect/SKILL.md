@@ -12,6 +12,12 @@ allowed-tools:
   # scratch folder (--name-file, --description-file, --question-file) and writes --out only there or to
   # a model's datasource.md; the five that read JSON or a table list are pre-approved only under
   # AGAMI_SCRATCH_ONLY=1, which holds every file they name to the same folder (semantic_model/scratch.py).
+  # Every `py` script that writes or serves a path it is given (a page, --out, --tables-out, --ops-out,
+  # the page server, the progress page, the sample builder) is pre-approved only under the same prefix,
+  # which holds that path to agami's scratch folder or the one model file the script writes
+  # (scripts/_scratch_out.py), so an injected call can't overwrite a file the person owns. Not here,
+  # so they ask: check_statement.py (it writes into any --row-dir) and promote_credentials.py with an
+  # argument (--agami-dir writes credentials anywhere).
   # Env prefixes are literal: a `VAR=*` rule would also let `BASH_ENV=<file>` through, which runs <file>.
   - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" steps *)
   - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" progress *)
@@ -53,22 +59,20 @@ allowed-tools:
   - Bash(AGAMI_SQL_MAX_ROWS=200000 AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" discover *)
   - Bash(AGAMI_SQL_MAX_ROWS=200000 AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect *)
   - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_resolve.py *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" promote_credentials.py *)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py *)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py *)
   - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_helper.py *)
   - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" setup_pgauth.py *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" check_statement.py *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_table_picker.py *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_open_questions_page.py *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_examples_validation.py *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_model_explorer.py *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" progress_page.py *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_open_questions_decisions.py *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_examples_decisions.py *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" model_spec_workbook.py *)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_table_picker.py *)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_open_questions_page.py *)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_examples_validation.py *)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_model_explorer.py *)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" progress_page.py *)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_open_questions_decisions.py *)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_examples_decisions.py *)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" model_spec_workbook.py *)
   - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" promote_credentials.py)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" "${CLAUDE_PLUGIN_ROOT}/samples/store/build_sample.py" *)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" "${CLAUDE_PLUGIN_ROOT}/samples/store/build_sample.py" *)
   - Read(/${CLAUDE_PLUGIN_ROOT}/**)
 ---
 
@@ -581,7 +585,7 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
 2. **The agami-core package** (trimmed 0a.5/0a.5b): SQLite needs **no DB driver** (stdlib), so only ensure the **agami-core** package is importable in `<python3>`. When step 1's `has_model_deps` is false, confirm via AskUserQuestion, then `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install` (the one, one-time install via the `sm` launcher; brings pydantic/sqlglot/pyyaml and works with no `packages/` dir). `tier` is `cli` when step 1's `data.tools.sqlite3` is a path, else `python`; no `which` call.
 3. **Build the `.db`** into the gitignored `local/` (it's regenerable machine state, not committed):
    ```bash
-   bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" "${CLAUDE_PLUGIN_ROOT}/samples/store/build_sample.py" --out "<artifacts_dir>/local/samples/store.db"
+   AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" "${CLAUDE_PLUGIN_ROOT}/samples/store/build_sample.py" --out "<artifacts_dir>/local/samples/store.db"
    ```
    Uses the `sqlite3` CLI if present, else the stdlib builder; prints the size.
 4. **Write the `[agami-example]` credential with the deterministic promoter** — don't hand-roll the INI, and don't write the file yourself. `--sample` writes `local/credentials.example` with the sample's section (its `path` the database from step 3), never over an existing one; then promote it:
@@ -674,7 +678,7 @@ other than a password, key pair or token). Start it in the background
 a foreground sleep); its `url` is `<progress_url>`:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" progress_page.py "<root>/.introspect/progress.log" --minutes 240
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" progress_page.py "<root>/.introspect/progress.log" --minutes 240
 ```
 
 It prints `{"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 14400}`; open that URL with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/open_in_browser" "<progress_url>"`, its own call.
@@ -723,7 +727,7 @@ Run `cli areas`/probe is not needed yet — schema discovery happens inside the 
   - **Show the grant to ask for**: this database's read-only grant from [`shared/readonly-grants.md`](../../shared/readonly-grants.md) in a fenced block, for the person to give their admin, then this card again.
   - **Stop for now**: nothing is introspected; say they can connect again once the role can read the catalog or they have the list.
 
-  Write the names, one per line, with the Write tool to `<artifacts_dir>/local/tmp/agami-names.txt`. Where an inventory exists (a re-introspect, or a discover pass that listed some tables), check them first with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --keep names:<artifacts_dir>/local/tmp/agami-names.txt --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"`: an `unmatched` or `ambiguous` name is said back and the same card asked again, never guessed. With no inventory to check against, pass the file as it is. Then run the engine with `--tables-file` on that file (never an unquoted `--tables` list). Everything the engine then infers (types, grain, FKs) lands `unreviewed` for sign-off.
+  Write the names, one per line, with the Write tool to `<artifacts_dir>/local/tmp/agami-names.txt`. Where an inventory exists (a re-introspect, or a discover pass that listed some tables), check them first with `AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --keep names:<artifacts_dir>/local/tmp/agami-names.txt --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"`: an `unmatched` or `ambiguous` name is said back and the same card asked again, never guessed. With no inventory to check against, pass the file as it is. Then run the engine with `--tables-file` on that file (never an unquoted `--tables` list). Everything the engine then infers (types, grain, FKs) lands `unreviewed` for sign-off.
 
 ### 1.3 — Schema picker (re-introspect only)
 
@@ -868,7 +872,7 @@ It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json
 **Summarise it in the chat, then ask one card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)).
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>"
 ```
 
 It prints `{tables, schemas, schemas_more, likely_noise, noise_all_copies, groups}`. Show:
@@ -905,7 +909,7 @@ If the person asks to skip this ("just introspect everything"), proceed to 1.7 u
 **Showing what is there (when asked).** "What's in sales?", "show me the columns of orders": list it in the chat from the inventory, then ask the same card again.
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --show "<schema | schema.table | table>"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --show "<schema | schema.table | table>"
 ```
 
 A schema prints its tables with their column counts; a table prints its columns with their types. Show them as a markdown table (`Table | Columns` or `Column | Type`), at most 15 rows, and *"and `more` more"* when `more` is not 0. `{"unmatched"}` or `{"ambiguous"}` (`status: needs_choice`): say which name didn't match, or list the tables it could mean, and ask the same card again.
@@ -913,7 +917,7 @@ A schema prints its tables with their column counts; a table prints its columns 
 **Columns to leave out, typed in "Other".** Names of the form `schema.table.column` are columns to exclude from the build, whatever the table answer (Keep everything included) or on their own. Write them one per line with the Write tool to `<artifacts_dir>/local/tmp/agami-drop-columns.txt` and check them:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --check-columns "<artifacts_dir>/local/tmp/agami-drop-columns.txt"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --check-columns "<artifacts_dir>/local/tmp/agami-drop-columns.txt"
 ```
 
 `{"exclude_columns": [...]}` → pass them to 1.7 as `--exclude-columns <names…>` and say how many columns are left out. `{"unmatched": [...]}` (`status: needs_choice`) → say which names are not columns and ask the same card again; never guess. Personal-data columns are asked about again on their own card after the build (Phase 4), and any column can be hidden later from `/agami-model`, so nobody has to find every column now.
@@ -933,7 +937,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" steps "<root>" --mark tables=skipped
 When a model spec workbook was attached in 1.5, convert it FIRST and skip the 1.6 table card — the spec already names every table to model. Its outputs go under `local/`, outside the profile, so moving a partial model aside (1.8) never takes them with it (`mkdir -p "<artifacts_dir>/local/model-spec/<profile>"` first, as its own call):
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" model_spec_workbook.py parse --file "<workbook.xlsx>" --out "<artifacts_dir>/local/model-spec/<profile>/spec.json" --tables-out "<artifacts_dir>/local/model-spec/<profile>/spec-tables.txt"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" model_spec_workbook.py parse --file "<workbook.xlsx>" --out "<artifacts_dir>/local/model-spec/<profile>/spec.json" --tables-out "<artifacts_dir>/local/model-spec/<profile>/spec-tables.txt"
 ```
 
 It prints the counts it read (`subject_areas`, `tables`, `joins`, `joins_approved`, `joins_with_condition`, `metrics`, `sensitive_columns`, `rules`). **Quote those numbers verbatim — never count a sheet by reading it.** Exit 1 prints `errors` naming the missing sheet or column: show them and stop, the person fixes the workbook. Then run 1.7 with `--tables-file` set to `spec-tables.txt` as **ONE call — the single background build with its `sm progress` wait (1.7), never `--append` batches**, however many tables the spec names. The spec is applied once, over the whole set, so read the whole set in one go.
@@ -946,8 +950,8 @@ The answer to 1.6's **Pick from a list**. A one-time page on `127.0.0.1` lists e
 2. **Render the page and start the helper in the background** (`run_in_background`), with `<batch>` the stamp `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" batch-id` prints (the time plus a random part), so two pages never share a file. Each line is its own call, the second in the background:
 
    ```bash
-   bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_table_picker.py --inventory "<inventory_path>" --save-to-helper --out "<artifacts_dir>/local/tmp/agami-tables-<batch>.html"
-   bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/tmp/agami-tables-<batch>.html" --decisions "<artifacts_dir>/local/tmp/agami-page-<batch>.json" --minutes 30
+   AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_table_picker.py --inventory "<inventory_path>" --save-to-helper --out "<artifacts_dir>/local/tmp/agami-tables-<batch>.html"
+   AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/tmp/agami-tables-<batch>.html" --decisions "<artifacts_dir>/local/tmp/agami-page-<batch>.json" --minutes 30
    ```
 
    Wait for the helper's first line as rule 6a step 3 says (the Monitor tool, never a foreground sleep): `{"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 1800}`. If no line comes, or the task exits, say so in one line with its last stderr line and go to **The numbered list**.
@@ -955,7 +959,7 @@ The answer to 1.6's **Pick from a list**. A one-time page on `127.0.0.1` lists e
 4. **The helper's final line.** `{"status": "saved", "decisions": "<file>"}` → write the kept set through the same command every other answer uses, which checks the file before it writes anything (the page and database it was rendered for, no other keys, and only names the inventory holds):
 
    ```bash
-   bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --keep page:"<decisions file>" --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"
+   AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --keep page:"<decisions file>" --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"
    ```
 
    It prints `{"tables_file", "kept"}`: say *"Keeping <kept> of <N> tables."* (`<N>` is the summary's `tables`), delete the decisions file and the page, and run 1.7 with `--tables-file "<tables_file>"`. An `{"error"}` or `{"unmatched"}` (exit 1, nothing written) means the file isn't this inventory's pick: say so in one line and ask 1.6's `Tables` card again; never edit the file to make it pass. `{"status": "expired"}` → *"The page expired before it was saved; nothing changed."*, then 1.6's `Tables` card again.
@@ -963,7 +967,7 @@ The answer to 1.6's **Pick from a list**. A one-time page on `127.0.0.1` lists e
 **The numbered list** (when a page can't open). Every table, numbered, in the chat:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --numbered
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --numbered
 ```
 
 Show its `list` as it is, in a fenced text block: a line per schema, then one numbered line per table with its columns, its rows where known and a mark on a likely copy. This is the one place the chat lists tables one by one, because it is what the page would have shown. It lists the first 200 tables (`shown` is the last number in it, `more` how many it leaves out). Past 200 tables, say how many more there are, and that patterns and schema names reach every table; numbers stop at `shown`. Then one question (header `Table pick`), *"Which tables should I keep? Type numbers, ranges or patterns in Other, like 1-12, 15 or all crm_* or everything except audit_*."*: **Keep everything** / **Drop staging and backups** (on the same terms as on 1.6's card) / **Back to the tables card**.
@@ -1397,8 +1401,8 @@ When an answer changes a metric proposed in 2c (people mean the total with tax, 
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" open-questions "<root>" --profile <profile> --all --out "<artifacts_dir>/local/tmp/agami-open-questions-<batch>.json"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_open_questions_page.py --items-file "<artifacts_dir>/local/tmp/agami-open-questions-<batch>.json" --profile <profile> --save-to-helper --artifacts-dir "<artifacts_dir>" --out "<artifacts_dir>/local/tmp/agami-questions-<batch>.html"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/tmp/agami-questions-<batch>.html" --decisions "<artifacts_dir>/local/tmp/agami-page-<batch>.json" --minutes 30
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_open_questions_page.py --items-file "<artifacts_dir>/local/tmp/agami-open-questions-<batch>.json" --profile <profile> --save-to-helper --artifacts-dir "<artifacts_dir>" --out "<artifacts_dir>/local/tmp/agami-questions-<batch>.html"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/tmp/agami-questions-<batch>.html" --decisions "<artifacts_dir>/local/tmp/agami-page-<batch>.json" --minutes 30
 ```
 
 Run `serve_page.py` with `run_in_background` and wait as rule 6a says. `--all` runs the same checks, with no cards (but the fiscal start's), adds the build's own guesses (a code list it filled in alone, an opaque column it described alone, never one a person signed) and reads up to five sample values of each unclear column (never a column flagged personal). What each row offers:
@@ -1412,7 +1416,7 @@ Blank is undecided, never a default: a row left blank writes nothing and comes b
 **What the page saved.** Never read it by hand: check it against the items file the page was rendered from, which writes the batch:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_open_questions_decisions.py --decisions-file "<artifacts_dir>/local/tmp/agami-page-<batch>.json" --items-file "<artifacts_dir>/local/tmp/agami-open-questions-<batch>.json" --expect-profile <profile> --artifacts-dir "<artifacts_dir>" --ops-out "<artifacts_dir>/local/tmp/agami-answers.json"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_open_questions_decisions.py --decisions-file "<artifacts_dir>/local/tmp/agami-page-<batch>.json" --items-file "<artifacts_dir>/local/tmp/agami-open-questions-<batch>.json" --expect-profile <profile> --artifacts-dir "<artifacts_dir>" --ops-out "<artifacts_dir>/local/tmp/agami-answers.json"
 AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-answers.json" --signer "<reviewer_email>" --role "<reviewer_role>"
 ```
 
@@ -1529,7 +1533,8 @@ Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","na
 **Show the full view** (an option on the Sign-off and item cards and the personal-data question, labelled **Review on a page** there, or asked for in words). The model explorer, with every metric, entity, join and column, which saves its own decisions ([question-cards rule 6a](../../shared/question-cards.md#6a-a-page-that-saves-its-decisions)): render it the way `/agami-model preseed` does in its Phase 5 (`render_model_explorer.py … --initial-tab review --section <metrics|entities|joins> --save-to-helper`, or `--initial-tab pii` from the personal-data question) and serve it from localhost with the helper waiting for its save, giving the person the URL (`<batch>` is the stamp `sm batch-id` prints):
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<explorer.html>" --decisions "<artifacts_dir>/local/tmp/agami-page-<batch>.json" --minutes 30
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_model_explorer.py --profile <profile> --artifacts-dir "<artifacts_dir>" --initial-tab review --section <metrics|entities|joins> --save-to-helper --out "<artifacts_dir>/local/tmp/agami-explorer-<batch>.html"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/tmp/agami-explorer-<batch>.html" --decisions "<artifacts_dir>/local/tmp/agami-page-<batch>.json" --minutes 30
 ```
 
 Run it with `run_in_background` and wait as rule 6a says. When the page saves, apply its decisions file as `/agami-model` Phase 5b does (its parser, then `sm curate` with the saved `reviewer_email` / `reviewer_role`), say what changed in one line (its 5c), then ask the card it was picked on again with what is left, or go to 4b when nothing is. A "Generate feedback for Claude" block pasted from an older page is still accepted: apply it the same way, then continue at 4b.
@@ -1632,8 +1637,8 @@ When every example has an answer, mark the step done (the `examples=done` mark a
 **Show the full view** (an option on the Examples and one-by-one cards, labelled **Mark them on a page** there, or asked for in words). The examples-validation page, with every result and its SQL, which saves its own decisions ([question-cards rule 6a](../../shared/question-cards.md#6a-a-page-that-saves-its-decisions)): Keep, Reject (drop), Edit (a fixed SQL) or a note on each example, and a note for the whole model. When `reviewer_email` / `reviewer_role` aren't saved yet, the identity card from Phase 4a first: kept examples are signed as that saved identity, which the page shows. Render it from the items and serve it from localhost with the helper waiting for its save, giving the person the URL; `<batch>` is the stamp `sm batch-id` prints, and each line is its own call:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_examples_validation.py --title "Seed examples · <profile>" --profile <profile> --items-file "<artifacts_dir>/local/tmp/agami-examples-items.json" --save-to-helper --artifacts-dir "<artifacts_dir>" --out "<artifacts_dir>/local/examples-validation/<profile>/<batch>.html"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/examples-validation/<profile>/<batch>.html" --decisions "<artifacts_dir>/local/tmp/agami-page-<batch>.json" --minutes 30
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_examples_validation.py --title "Seed examples · <profile>" --profile <profile> --items-file "<artifacts_dir>/local/tmp/agami-examples-items.json" --save-to-helper --artifacts-dir "<artifacts_dir>" --out "<artifacts_dir>/local/tmp/agami-examples-<batch>.html"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/tmp/agami-examples-<batch>.html" --decisions "<artifacts_dir>/local/tmp/agami-page-<batch>.json" --minutes 30
 ```
 
 Run `serve_page.py` with `run_in_background` and wait as rule 6a says. Its `Page` card's options are **I've marked them on the page** and **Back to the cards**; the saved page tells the person to press the first, and **Back to the cards** reads the helper's output before stopping it, as rule 6a step 4 says.
@@ -1643,7 +1648,7 @@ It takes the combined object or a single area's array; repeat `--items-file` to 
 **What the page saved.** The decisions file is `{"page": "examples", "profile", "decisions": [{"n", "area", "question", "action", "sql"?, "note"?}], "note_all"}`. Never read it by hand: check it against the items file the page was rendered from with
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_examples_decisions.py --decisions-file "<artifacts_dir>/local/tmp/agami-page-<batch>.json" --items-file "<artifacts_dir>/local/tmp/agami-examples-items.json" --expect-profile <profile> --out-dir "<artifacts_dir>/local/tmp"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_examples_decisions.py --decisions-file "<artifacts_dir>/local/tmp/agami-page-<batch>.json" --items-file "<artifacts_dir>/local/tmp/agami-examples-items.json" --expect-profile <profile> --out-dir "<artifacts_dir>/local/tmp"
 ```
 
 Give it the same `--items-file` arguments, in the same order, that rendered the page (repeated, with their `<area>=` labels, when several files went on one page): it numbers the examples exactly as the renderer did, so every decision on the page finds its example.

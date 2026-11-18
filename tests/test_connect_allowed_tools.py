@@ -63,6 +63,13 @@ HOSTILE = [
     f"{SM} introspect --profile acme --tables-file /etc/passwd",
     f"{SM} describe-file {ART}/acme --file /Users/you/.netrc",
     f"{SM} apply-spec {ART}/acme --file /Users/you/spec.json",
+    # A script that writes or serves a path it is given, without the guard that holds the path.
+    f"{PY} render_table_picker.py --inventory x --save-to-helper --out /Users/you/.zshrc",
+    f"{PY} serve_page.py /Users/you/.ssh/id_rsa.html",
+    f'{PY} "{ROOT}/samples/store/build_sample.py" --out /Users/you/thesis.db',
+    f"{PY} model_spec_workbook.py parse --file x.xlsx --out /Users/you/.bashrc",
+    f"{PY} check_statement.py --profile acme --area a --row-dir /Users/you/project",
+    f"{PY} promote_credentials.py --agami-dir /Users/you/elsewhere",
 ]
 
 
@@ -119,6 +126,47 @@ def test_sm_rules_name_one_verb_and_file_readers_carry_the_guard():
     assert len(verbs) == len(set(verbs)), "one rule per verb"
 
 
+# The `py` scripts that write or serve a path the call names (scripts/_scratch_out.py holds it).
+PATH_WRITERS = {
+    "inventory_summary.py",
+    "serve_page.py",
+    "render_table_picker.py",
+    "render_open_questions_page.py",
+    "render_examples_validation.py",
+    "render_model_explorer.py",
+    "progress_page.py",
+    "parse_open_questions_decisions.py",
+    "parse_examples_decisions.py",
+    "model_spec_workbook.py",
+    "build_sample.py",
+}
+
+
+def test_py_rules_that_write_a_named_path_carry_the_guard():
+    seen = set()
+    for rule in BASH_RULES:
+        m = re.search(
+            r'scripts/py" "?(?:\$\{CLAUDE_PLUGIN_ROOT\}/samples/store/)?([a-z_]+\.py)', rule
+        )
+        if m and m.group(1) in PATH_WRITERS:
+            seen.add(m.group(1))
+            assert rule.startswith("Bash(AGAMI_SCRATCH_ONLY=1 bash "), rule
+    assert seen == PATH_WRITERS
+    assert not any("check_statement.py" in r for r in BASH_RULES)
+    assert not any("promote_credentials.py *" in r for r in BASH_RULES)
+
+
+def test_the_skill_runs_every_path_writer_under_the_guard():
+    body = SKILL.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+    for line in body.splitlines():
+        for script in PATH_WRITERS:
+            call = re.search(
+                r'bash "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/py" "?\S*' + re.escape(script), line
+            )
+            if call:
+                assert line[: call.start()].endswith("AGAMI_SCRATCH_ONLY=1 "), line
+
+
 def test_the_skills_own_commands_are_still_approved():
     commands = [
         f"{SM} steps {ART}/acme --mark build=in_progress",
@@ -128,7 +176,9 @@ def test_the_skills_own_commands_are_still_approved():
         f"AGAMI_SQL_MAX_ROWS=200000 AGAMI_SCRATCH_ONLY=1 {SM} introspect --profile acme "
         f"--db-type sqlite --artifacts {ART} --tables-file {ART}/local/tmp/agami-keep.txt",
         f"{PY} connect_resolve.py --db-type sqlite --profile agami-example",
-        f'{PY} "{ROOT}/samples/store/build_sample.py" --out "{ART}/local/samples/store.db"',
+        f'AGAMI_SCRATCH_ONLY=1 {PY} "{ROOT}/samples/store/build_sample.py" --out "{ART}/local/samples/store.db"',
+        f"AGAMI_SCRATCH_ONLY=1 {PY} serve_page.py {ART}/local/tmp/agami-q-1.html "
+        f"--decisions {ART}/local/tmp/agami-page-1.json --minutes 30",
         f"{PY} promote_credentials.py",
         f"{SM} init-local {ART}",
         f"{SM} init-local {ART} --sample",

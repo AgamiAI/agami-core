@@ -40,6 +40,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import _scratch_out  # noqa: E402
 from _read_only_view import saved_signoff  # noqa: E402
 
 _TOP_KEYS = {"page", "profile", "decisions"}
@@ -246,6 +247,12 @@ def main(argv: list[str] | None = None) -> int:
         "--ops-out", required=True, help="where to write the `sm curate --ops-file` batch"
     )
     args = ap.parse_args(argv)
+    out = Path(args.ops_out).expanduser()
+    if _scratch_out.guarded():
+        try:
+            out = _scratch_out.scratch_file(args.ops_out, ("json",))
+        except _scratch_out.Refused as e:
+            return _fail(str(e))
     signoff = saved_signoff(Path(args.artifacts_dir).expanduser())
     if not (signoff.get("email") and signoff.get("role")):
         return _fail("no sign-off identity is saved, so no answer can be recorded as the person's")
@@ -257,9 +264,7 @@ def main(argv: list[str] | None = None) -> int:
     data, refused, error = parse(doc, items, args.expect_profile)
     if error:
         return _fail(error)
-    out = Path(args.ops_out).expanduser()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(data["ops"], indent=2), encoding="utf-8")
+    _scratch_out.write_text(out, json.dumps(data["ops"], indent=2))
     print(
         json.dumps(
             {

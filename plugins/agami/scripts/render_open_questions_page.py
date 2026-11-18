@@ -39,6 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import _scratch_out  # noqa: E402
 from _read_only_view import saved_signoff  # noqa: E402
 
 _SHARED = Path(__file__).resolve().parent.parent / "shared"
@@ -182,6 +183,12 @@ def main(argv: list[str] | None = None) -> int:
         help="the page posts its answers to `serve_page.py --decisions` (the only mode)",
     )
     args = ap.parse_args(argv)
+    page = Path(args.out).expanduser()
+    if _scratch_out.guarded():
+        try:
+            page = _scratch_out.scratch_file(args.out, _scratch_out.PAGE)
+        except _scratch_out.Refused as e:
+            return _scratch_out.refuse("render_open_questions_page.py", e)
     out_doc = json.loads(Path(args.items_file).expanduser().read_text(encoding="utf-8"))
     signoff = saved_signoff(Path(args.artifacts_dir).expanduser())
     if not (signoff.get("email") and signoff.get("role")):
@@ -195,9 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     rows = page_rows(out_doc)
-    page = Path(args.out).expanduser()
-    page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text(render(out_doc, profile=args.profile, signoff=signoff), encoding="utf-8")
+    _scratch_out.write_text(page, render(out_doc, profile=args.profile, signoff=signoff))
     kinds = [r["kind"] for r in rows]
     print(
         json.dumps(
