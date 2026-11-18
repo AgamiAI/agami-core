@@ -205,6 +205,19 @@ if [ "${1:-}" = "install" ]; then
   exit 0
 fi
 
+# The verbs the permission hook (approve_own_calls.py, VERBS) approves with no prompt never install:
+# an install is a network fetch that runs build code, which the person must agree to. A missing or
+# stale library stops them with how to install it. tests/test_approve_own_calls.py holds this list
+# and the hook's table equal.
+NO_INSTALL_VERBS="areas coverage review-queue review-items model-tree bundle"
+case " $NO_INSTALL_VERBS " in
+  *" ${1:-} "*)
+    if ! { _imports_ok && _version_ok; }; then
+      echo "agami's library needs installing or updating: run  bash \"$(cd "$SCRIPT_DIR/.." && pwd)/scripts/sm\" install" >&2
+      exit 3
+    fi ;;
+esac
+
 ensure_pkg
 # Run the CLI from a neutral cwd so a `semantic_model` in the caller's cwd can't shadow the installed
 # package via `python -m` putting cwd on sys.path[0].

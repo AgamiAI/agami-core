@@ -1,0 +1,17 @@
+{
+  "description": "Approve a short list of read-only agami sm calls and agami's own scratch files under <artifacts_dir>/local/tmp. Says nothing about anything else.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Read|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "in=$(cat); for p in python3 python; do out=$(printf '%s' \"$in\" | \"$p\" -I \"${CLAUDE_PLUGIN_ROOT}/scripts/approve_own_calls.py\" 2>/dev/null) && { printf '%s' \"$out\"; break; }; done; true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
