@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.25] — 2026-11-18
+
 ### Added
 
 - **Joins the data dictionary states are offered, even past the probe cap** (#694). A dictionary
