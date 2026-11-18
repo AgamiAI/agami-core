@@ -37,7 +37,14 @@ import yaml
 from . import pii
 from . import validator as V
 from .loader import _read_yaml as _load
-from .loader import check_contained, check_one_name, list_prompt_examples, load_datasource
+from .loader import (
+    _referenced,
+    _visible_columns,
+    check_contained,
+    check_one_name,
+    list_prompt_examples,
+    load_datasource,
+)
 from .models import (
     Ambiguity,
     CrossSubjectAreaRelationship,
@@ -45,6 +52,9 @@ from .models import (
     Entity,
     Metric,
     Relationship,
+    SubjectArea,
+    Table,
+    bare_name,
     example_metrics,
     metric_tag_key,
 )
@@ -514,6 +524,28 @@ def _live(objs: list) -> list:
     return [o for o in objs if getattr(o, "review_state", "approved") != "rejected"]
 
 
+def _referenced_here(org: Datasource, sa: SubjectArea) -> list[tuple[Table, list]]:
+    """(table, the columns `sa` exposes of it) for each live table `sa` references but another area
+    defines, resolved the way a reply to `sa` resolves it (a table the area defines itself wins, the
+    ref's schema picks among same-named ones, `expose_column_groups` narrows the columns)."""
+    own = {bare_name(t.name) for t in sa.tables_defined}
+    found: list[tuple[Table, list]] = []
+    seen: set[int] = set()
+    for ref in sa.tables:
+        bare = bare_name(ref.table)
+        if bare in own:
+            continue
+        elsewhere = [t for other in org.subject_areas if other is not sa
+                     for t in other.tables_defined if bare_name(t.name) == bare]
+        for t in _referenced(elsewhere, [ref]):
+            if id(t) in seen or getattr(t, "review_state", "approved") == "rejected":
+                continue
+            seen.add(id(t))
+            found.append((t, [c for c in _visible_columns(t, ref.expose_column_groups)
+                              if getattr(c, "review_state", "approved") != "rejected"]))
+    return found
+
+
 def overview(org: Datasource, root: str | Path) -> dict[str, Any]:
     """The numbers an overview card shows, per subject area and in total, so a card relays them
     rather than adding them up from three commands' output (where a wrong total creeps in).
@@ -527,23 +559,33 @@ def overview(org: Datasource, root: str | Path) -> dict[str, Any]:
         cols[0] += t["described"]
         cols[1] += t["columns"]
     areas = []
+    own: dict[str, tuple[int, int]] = {}
     for sa in org.subject_areas:
         done, total = described.get(sa.name, [0, 0])
         metrics, joins = _live(sa.metrics), _live(sa.relationships)
+        own_tables = len(_live(sa.tables_defined))
+        # An area also shows the tables it references from another area; the totals below count only
+        # what each area defines, so a shared table is not counted once per area that lists it.
+        shared = _referenced_here(org, sa)
+        shown_cols = total + sum(len(cols) for _, cols in shared)
+        shown_done = done + sum(1 for _, cols in shared for c in cols
+                                if (getattr(c, "description", "") or "").strip())
+        own[sa.name] = (own_tables, total)
         areas.append({
             "area": sa.name, "plain_name": plain_words(display_name(sa.name)),
-            "tables": len(_live(sa.tables_defined)), "columns": total,
-            "described_pct": round(100 * done / total) if total else 0,
+            "tables": own_tables + len(shared), "columns": shown_cols,
+            "described_pct": round(100 * shown_done / shown_cols) if shown_cols else 0,
             "metrics": len(metrics), "metrics_waiting": sum(_needs_review(m) for m in metrics),
             "joins": len(joins), "joins_waiting": sum(_needs_review(r) for r in joins),
             "examples": len(list_prompt_examples(root, sa.name)),
         })
     counts = review_queue(org)["counts"]
-    totals = {k: sum(a[k] for a in areas)
-              for k in ("tables", "columns", "metrics", "joins", "examples")}
+    totals = {k: sum(a[k] for a in areas) for k in ("metrics", "joins", "examples")}
+    totals["tables"] = sum(t for t, _ in own.values())
+    totals["columns"] = sum(c for _, c in own.values())
     totals["metrics"] += len(_live(org.cross_subject_area_metrics))
     totals["joins"] += len(_live(org.cross_subject_area_relationships))
-    all_cols = sum(a["columns"] for a in areas)
+    all_cols = totals["columns"]
     totals["described_pct"] = (round(100 * sum(d for d, _ in described.values()) / all_cols)
                                if all_cols else 0)
     totals["needs_signoff"] = counts["rule_1"]
