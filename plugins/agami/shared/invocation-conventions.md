@@ -13,7 +13,9 @@ same way.
 path written out in full.** Never put a variable assignment, a pipe, `;`, `&&`, a redirect or a
 filter on the line, and never run two agami commands in one call. A line written any other way stops
 to ask the person for permission; written this way it is pre-approved while the skill is running.
-Read the whole output: the commands print only what you need.
+Read the whole output: the commands print only what you need. Where a command starts with
+`AGAMI_SCRATCH_ONLY=1`, copy that prefix exactly: it holds every file the call names to agami's
+scratch folder, and only with it is the call pre-approved.
 
 agami ships nine skills, all prefixed `agami-` to avoid colliding with Claude Code's built-in slash commands (e.g. `/init`) and with other plugins:
 

@@ -1,6 +1,8 @@
 """`sm summary` (the closing summary as markdown, built only from engine state, so the skill posts
 it as printed) and `--out` (a file written atomically instead of a shell redirect, which made every
-call a compound command no permission rule matches)."""
+call a compound command no permission rule matches). `--out` writes only one of agami's scratch
+files or a model's own datasource.md: a pre-approved call pointed anywhere else could overwrite any
+file the person owns."""
 
 from __future__ import annotations
 
@@ -181,10 +183,18 @@ def test_a_backslash_cannot_undo_an_escaped_pipe(raw, want):
 # --- --out -----------------------------------------------------------------------------------
 
 
+@pytest.fixture
+def scratch(tmp_path, monkeypatch) -> Path:
+    """`tmp_path` as the artifacts folder, with its scratch folder."""
+    (tmp_path / "local" / "tmp").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    return tmp_path / "local" / "tmp"
+
+
 @pytest.mark.parametrize(
     "argv", [["model-tree"], ["bundle", "--area", "agami-example"], ["org-draft"]]
 )
-def test_out_writes_the_same_bytes_as_stdout(model, tmp_path, capsys, argv):
+def test_out_writes_the_same_bytes_as_stdout(model, tmp_path, capsys, scratch, argv):
     verb, *rest = argv
     assert cli.main([verb, str(model), *rest]) == 0
     printed = capsys.readouterr().out
@@ -197,32 +207,57 @@ def test_out_writes_the_same_bytes_as_stdout(model, tmp_path, capsys, argv):
     assert [p.name for p in target.parent.iterdir()] == [target.name]  # no temp file left
 
 
-def test_out_replaces_an_earlier_file(model, tmp_path, capsys):
-    target = tmp_path / "agami-tree.json"
+def test_out_replaces_an_earlier_file(model, tmp_path, capsys, scratch):
+    target = scratch / "agami-tree.json"
     target.write_text("old")
     assert cli.main(["model-tree", str(model), "--out", str(target)]) == 0
     assert json.loads(target.read_text())["datasource"] == "agami-example"
 
 
-def test_out_keeps_the_exit_code_and_writes_what_was_printed(tmp_path, capsys):
+def test_out_keeps_the_exit_code_and_writes_what_was_printed(tmp_path, capsys, scratch):
     import argparse
 
     def refuses(args):
         print('{"error": "nope"}')
         return 2
 
-    target = tmp_path / "agami-x.json"
+    target = scratch / "agami-x.json"
     assert cli._run_to_out(argparse.Namespace(func=refuses, out_file=str(target))) == 2
     assert json.loads(target.read_text()) == {
         "error": "nope"
     }  # where the redirect would have put it
 
 
-def test_out_writes_nothing_when_the_verb_raises(tmp_path, capsys):
-    target = tmp_path / "agami-tree.json"
+def test_out_writes_nothing_when_the_verb_raises(tmp_path, capsys, scratch):
+    target = scratch / "agami-tree.json"
     assert cli.main(["model-tree", str(tmp_path / "missing"), "--out", str(target)]) == 3
     assert not target.exists()
     assert json.loads(capsys.readouterr().out)["error"] == "no_model"
+
+
+@pytest.mark.parametrize("where", ["outside", "credentials", "subfolder", "dotdot", "other-name"])
+def test_out_refuses_anywhere_but_scratch(model, tmp_path, capsys, scratch, where):
+    target = {
+        "outside": tmp_path / "agami-tree.json",
+        "credentials": tmp_path / "local" / "credentials",
+        "subfolder": scratch / "x" / "agami-tree.json",
+        "dotdot": f"{scratch}/../tmp/agami-tree.json",
+        "other-name": scratch / "tree.json",
+    }[where]
+    assert cli.main(["model-tree", str(model), "--out", str(target)]) == 2
+    assert "error" in json.loads(capsys.readouterr().out)
+    assert not Path(str(target)).exists()
+
+
+def test_out_writes_a_models_own_datasource_md(tmp_path, capsys, scratch):
+    root = tmp_path / "acme"
+    shutil.copytree(SAMPLE, root)
+    assert cli.main(["org-draft", str(root), "--out", str(root / "datasource.md")]) == 0
+    assert (root / "datasource.md").read_text()
+    elsewhere = tmp_path / "x" / "acme"
+    elsewhere.mkdir(parents=True)
+    assert cli.main(["org-draft", str(root), "--out", str(elsewhere / "datasource.md")]) == 2
+    assert not (elsewhere / "datasource.md").exists()
 
 
 def test_write_atomically_cleans_up_on_failure(tmp_path, monkeypatch):
@@ -269,13 +304,13 @@ def test_the_datasource_name_is_escaped(model):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
-def test_out_file_mode_follows_the_umask_like_a_redirect(model, tmp_path, capsys):
+def test_out_file_mode_follows_the_umask_like_a_redirect(model, tmp_path, capsys, scratch):
     import os
     import stat
 
     old = os.umask(0o022)
     try:
-        target = tmp_path / "agami-tree.json"
+        target = scratch / "agami-tree.json"
         assert cli.main(["model-tree", str(model), "--out", str(target)]) == 0
         assert stat.S_IMODE(target.stat().st_mode) == 0o644
     finally:

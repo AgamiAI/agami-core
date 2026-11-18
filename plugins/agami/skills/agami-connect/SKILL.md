@@ -4,15 +4,65 @@ description: "End-to-end database connection for agami: sets up credentials on f
 when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami' / 'connect to my database' / 'introspect my database' / 'introspect the schema' / 'reload schema' / 'add a new database', wants to try agami WITHOUT a database ('I don't have a database', 'try the sample', 'use the sample data', 'demo data'), or after the user changes their schema and wants the model refreshed. Also auto-invoked by agami-query the first time it runs (when the semantic model is missing). This skill handles credential setup, introspection, enrichment, and seed-example validation — one entry point for everything before the user can query. The sample-database path (Phase 0s) needs no connection and copies in a ready, queryable model."
 argument-hint: "[sample | reintrospect | profile NAME]"
 allowed-tools:
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
-  - Bash(bash ${CLAUDE_PLUGIN_ROOT}/scripts/sm *)
-  - Bash("${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
-  - Bash(${CLAUDE_PLUGIN_ROOT}/scripts/sm *)
-  - Bash(AGAMI_SQL_MAX_ROWS=* bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
-  - Bash(AGAMI_SQL_MAX_ROWS=* bash ${CLAUDE_PLUGIN_ROOT}/scripts/sm *)
-  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" *)
-  - Bash(bash ${CLAUDE_PLUGIN_ROOT}/scripts/py *)
-  - Bash(AGAMI_PROFILE=* bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" *)
+  # Pre-approved while this skill runs, one rule per command it runs (tests/test_connect_allowed_tools.py
+  # holds this list). Rows and documents nobody vetted steer the model during onboarding, so a rule
+  # never ends in a free tail that could pick what runs. Not here, so they ask: `sm install` (a network
+  # install), `sm describe-file` and `sm apply-spec` (they read a file the person names), `py -c`, `py -m`
+  # (pip, execute_sql) and reconcile.py. Every `sm` verb here: reads text files only from agami's
+  # scratch folder (--name-file, --description-file, --question-file) and writes --out only there or to
+  # a model's datasource.md; the five that read JSON or a table list are pre-approved only under
+  # AGAMI_SCRATCH_ONLY=1, which holds every file they name to the same folder (semantic_model/scratch.py).
+  # Env prefixes are literal: a `VAR=*` rule would also let `BASH_ENV=<file>` through, which runs <file>.
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" steps *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" progress *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" summary *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" overview *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" coverage *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" model-tree *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" validate *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" snapshot *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" ensure-org-id *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" context *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" org-draft *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-org *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-personal-data *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-description *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-fiscal-year *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-units *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" remove-example *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate-gate *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" profile *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" approve-queue *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" open-questions *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" seed-validate *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" enrich-metadata *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" batch-id)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate *)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add *)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add-example *)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" seed-examples *)
+  - Bash(AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-terminology *)
+  - Bash(AGAMI_SQL_MAX_ROWS=200000 AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" discover *)
+  - Bash(AGAMI_SQL_MAX_ROWS=200000 AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_resolve.py *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" promote_credentials.py *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_helper.py *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" setup_pgauth.py *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" check_statement.py *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_table_picker.py *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_open_questions_page.py *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_examples_validation.py *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_model_explorer.py *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" progress_page.py *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_open_questions_decisions.py *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_examples_decisions.py *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" model_spec_workbook.py *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" promote_credentials.py)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" "${CLAUDE_PLUGIN_ROOT}/samples/store/build_sample.py" *)
   - Read(/${CLAUDE_PLUGIN_ROOT}/**)
 ---
 
@@ -89,7 +139,7 @@ Non-negotiable. They override every other instruction here when they conflict.
 3. **Never scan or guess.** No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, no port-listener scans, no testing connections to common hostnames. The only acceptable Bash probes here are `which <tool>` and `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -c 'import <module>'`.
 4. **If credentials are missing for the active profile, run Phase 0a.** It ends connected (the password page, 0a.4k) or with a card that waits for the filled-in file (0a.9). A person who closes the chat instead can come back later with any data question — `agami-query` auto-invokes us and 0a.10 picks the file up.
 5. **NEVER put a credential on a Bash command line** — no `export PGPASSWORD=…`, no `psql -W <pw>`, no heredoc that interpolates a secret. Hosts render Bash calls in chat; anything on the line leaks. Runtime queries use the auth files from `scripts/setup_pgauth.py` (psql/mysql) or `python -m execute_sql` (every driver, reads `<artifacts_dir>/local/credentials` itself). See [`shared/connection-reference.md → HARD RULES`](../../shared/connection-reference.md).
-6. **Run each agami command as its own Bash call: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" <verb> …` with every path written out in full.** Never put a variable assignment, a pipe, `;`, `&&`, a redirect or a filter on the line, and never run two agami commands in one call. A line written any other way stops to ask the person for permission; written this way it is pre-approved while the skill is running. Read the whole output: the commands print only what you need. `<root>` is the database's model folder, `<artifacts_dir>/<profile>`, written out in full; the artifacts folder is preflight step 1's `artifacts_dir`, never read from the pointer file; scratch files go only in `<artifacts_dir>/local/tmp/`, named `agami-…`, never `/tmp`, and are written with the Write tool ([`shared/invocation-conventions.md`](../../shared/invocation-conventions.md)). The person's own words (a company name, a description, a question) go to `sm` through a file the same way (`--name-file`, `--description-file`, `--question-file`), never on the command line.
+6. **Run each agami command as its own Bash call: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" <verb> …` with every path written out in full.** Never put a variable assignment, a pipe, `;`, `&&`, a redirect or a filter on the line, and never run two agami commands in one call. A line written any other way stops to ask the person for permission; written this way it is pre-approved while the skill is running. Read the whole output: the commands print only what you need. Where a command starts with `AGAMI_SCRATCH_ONLY=1` (and `AGAMI_SQL_MAX_ROWS=200000` before it on `discover` and `introspect`), copy that prefix exactly: it holds every file the call names to agami's scratch folder, and only with it is the call pre-approved. A few commands are never pre-approved and always ask: `sm install`, `py -c`, `py -m`, `sm describe-file` and `sm apply-spec`. `<root>` is the database's model folder, `<artifacts_dir>/<profile>`, written out in full; the artifacts folder is preflight step 1's `artifacts_dir`, never read from the pointer file; scratch files go only in `<artifacts_dir>/local/tmp/`, named `agami-…`, never `/tmp`, and are written with the Write tool ([`shared/invocation-conventions.md`](../../shared/invocation-conventions.md)). The person's own words (a company name, a description, a question) go to `sm` through a file the same way (`--name-file`, `--description-file`, `--question-file`), never on the command line.
 7. **Do what the engine says.** When an agami command's output has `say`, post it as written; when it has `then`, do that next.
 
 If you reach for a command that doesn't fit, stop and re-read this section.
@@ -443,7 +493,7 @@ The options follow the operating system the session's environment names (as at t
   "detected_at": "<ISO8601 UTC, from the stamp `sm batch-id` prints>"
 }
 ```
-`python3` MUST be the `<python3>` resolved in 0a.5 (the interpreter that has both the model deps and the DB driver) — `sm` and the introspection engine read it from here, so recording the wrong one reintroduces the interpreter mismatch. It holds no secret, and `local/` is already private (0a.1), so it needs no `chmod`.
+`python3` MUST be the `<python3>` resolved in 0a.5 (the interpreter that has both the model deps and the DB driver) — `sm` and the introspection engine read it from here, so recording the wrong one reintroduces the interpreter mismatch. It holds no secret, but it names the reviewer, so it stays private: `local/` is kept at 0700 by every agami command that writes there.
 
 The database's folder is known from here, `<root>` = `<artifacts_dir>/<profile>`: mark the step started and refresh the task list ([shared/task-list.md](../../shared/task-list.md)):
 ```bash
@@ -803,7 +853,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" steps "<root>" --mark tables=in_progress
 **Run the discover pass** — it lists tables + columns only (no grain, FK or count probes, so it's fast even over a tunnel); `--row-estimates` adds each table's size from one read of the catalog's statistics where the database keeps them, for the table picker, and never counts rows:
 
 ```bash
-AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" discover --profile <profile> --db-type <db_type> --artifacts "<artifacts_dir>" --row-estimates --schemas <schema> <schema>
+AGAMI_SQL_MAX_ROWS=200000 AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" discover --profile <profile> --db-type <db_type> --artifacts "<artifacts_dir>" --row-estimates --schemas <schema> <schema>
 ```
 
 `--schemas` is the 1.3 pick; leave it out when you didn't narrow the schemas.
@@ -937,7 +987,7 @@ This is the deterministic core — it replaces hand-authoring tables/columns/FK 
 Only if 1.6 did not already write the kept allowlist (its `--keep` writes it), write it yourself, one table per line, with the Write tool to `<artifacts_dir>/local/tmp/agami-keep.txt`; never a preset's source tables (`sys_dictionary`, `sys_choice`): 2a.0 reads those directly. Then one call, on one line:
 
 ```bash
-AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect --profile <profile> --db-type <db_type> --artifacts "<artifacts_dir>" --tables-file "<artifacts_dir>/local/tmp/agami-keep.txt" --exclude-columns <schema.table.column> <schema.table.column>
+AGAMI_SQL_MAX_ROWS=200000 AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect --profile <profile> --db-type <db_type> --artifacts "<artifacts_dir>" --tables-file "<artifacts_dir>/local/tmp/agami-keep.txt" --exclude-columns <schema.table.column> <schema.table.column>
 ```
 
 (The raised cap is the same one 1.6 explains — [why](#raised-cap). Without it a large schema's `sql_tables` / foreign-key reads are refused, the engine swallows it, and you get a model with no join graph and no error to show for it.)
@@ -964,7 +1014,7 @@ AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect --p
 
 1. **Batched build (30+ tables) — `--append`.** Batching is your call, never a card (question-cards rule 9): say in one line how many batches you ran. Split the kept allowlist into batches of ~10–15 tables and introspect **one batch per call**, each a *foreground* command. Every call MERGES into the existing model (prior tables' columns and keys are loaded from disk, not read again; every join of the model is checked on the data again each call), so you end with the full union — and you report `batch 3/5 (+12 tables)` between calls. Write each batch's tables with the Write tool to its own file, `<artifacts_dir>/local/tmp/agami-batch-1.txt`, `agami-batch-2.txt` and so on, then run one call per file, each its own Bash call (never a loop), with `--batch <n>/<N>`:
    ```bash
-   AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect --profile <profile> --db-type <db_type> --artifacts "<artifacts_dir>" --tables-file "<artifacts_dir>/local/tmp/agami-batch-1.txt" --append --batch 1/3
+   AGAMI_SQL_MAX_ROWS=200000 AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect --profile <profile> --db-type <db_type> --artifacts "<artifacts_dir>" --tables-file "<artifacts_dir>/local/tmp/agami-batch-1.txt" --append --batch 1/3
    ```
    (`--append` on the first batch just creates the model — there's nothing to merge yet. The relationship pass runs each batch across the union, deduped, so the final batch yields the complete join graph. `--batch n/N` writes `batch n of N` as the log's first line, for the progress page.)
 
@@ -989,7 +1039,7 @@ The join is the candidate's `id` without its schemas, `->` drawn as `→`. The m
 - **More than 4:** one question, with group options, and **each option's `preview` lists every join that option adds**, one per line as in the table, so the person sees exactly what a press adds: **Add the <k> full matches (Recommended)** when some match 100% (the others stay out), **Choose one by one** (cards of up to 4 as above, each with **Add all remaining**), **Add none**. Never offer a numbered range ("1–8") as an option on its own: a range is only a label for joins its preview names.
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<root>/.introspect/join_candidates.json" --candidate "<id>"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<root>/.introspect/join_candidates.json" --candidate "<id>"
 ```
 
 Never accept them all unasked: a column can match a key's values by chance (two counters that both run 1, 2, 3 …). The name-guessed joins (a `dealer_id` beside a `dealers` table) are still written `unreviewed` as before and aren't listed again.
@@ -1097,7 +1147,7 @@ Build a per-schema prompt with `$DATA_MODEL_DOC_TEXT` first (dominant prior), th
 2. **Expand the legend into one description per coded column — deterministically, NOT as N separate LLM guesses.** Write a small in-skill decoder (a token→phrase map + a per-table parse of `(prefix, metric, window, threshold)`) and compose each description from it, then emit them through the same `sm curate` batch. This is exact, internally consistent, and costs zero per-column LLM tokens. e.g. `EL_REVENUE_30D` → "Total revenue from the Electronics category over the last 30 days"; `WEST_ORDERS_12M` → "Number of orders in the West region over the last 12 months"; `EL_ORDERS_LT_1K_90D` → "Number of Electronics orders under 1,000 placed in the last 90 days." (Use the user's actual token vocabulary + domain, not these placeholders.)
 3. The same decoded legend also lands in the **structured glossary** `key_terminology` (term → definition) — abbreviations and codes a reader needs (an acronym → its expansion; a status/type code → its meaning). **Decode once, write both** — the per-column descriptions (what shows in the explorer + feeds the SQL generator's column context) AND the glossary. Write it with the packaged command (a JSON object `{term: definition, …}`); it merges over any existing terms, validates, and commits:
    ```bash
-   bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-terminology "<root>" --file "<artifacts_dir>/local/tmp/agami-terminology.json"
+   AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-terminology "<root>" --file "<artifacts_dir>/local/tmp/agami-terminology.json"
    ```
    The glossary is rendered into `datasource.md`'s `## Key terminology` by `org-draft` (which **also** auto-seeds enum legends from `choice_field` columns) — so it survives a regeneration and is never a bare placeholder. **Do NOT skip this on a code-dense schema** (abbreviations, master-coded values): an empty Key terminology on a DB full of codes is a real miss.
 
@@ -1115,7 +1165,7 @@ Why structured beats prose: the SQL generator translates "high severity" → `se
 
 Pass `area` **only** to disambiguate a bare name that exists in two schemas (curate skips an ambiguous op with a clear "pass an explicit area" reason rather than editing the wrong one). **Always include `"source":"ai"` on every generated description** — this stamps `description_source: ai_unvalidated` so the description earns trust through use (agami-query surfaces it in the answer receipt for confirmation the first time a query actually uses that column, instead of forcing an upfront review of hundreds of descriptions). **Skip any column that already has a description** (so a partial hand-edit or a reintrospect merge is never clobbered):
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-descriptions.json"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-descriptions.json"
 ```
 
 | Column | Bad (reject) | Good (keep) | Empty (preferred) |
@@ -1161,7 +1211,7 @@ If, after this, a single-grain schema genuinely has one entity, that's the right
 
 **Write them with the packaged command, not by hand** — build a JSON array and run it once (it validates each item, writes `subject_areas/<area>/entities/<slug>.yaml`, validates the whole model, reverts on failure, commits). Never author a throwaway script to loop. The canonical entity YAML shape is [`shared/metric-entity-shape.md`](../../shared/metric-entity-shape.md) — **never read another profile's artifacts to copy it** (see the boundary note under 2c):
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add "<root>" --kind entity --area <area> --file "<artifacts_dir>/local/tmp/agami-entities.json"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add "<root>" --kind entity --area <area> --file "<artifacts_dir>/local/tmp/agami-entities.json"
 ```
 
 ### 2c — Metrics
@@ -1200,12 +1250,12 @@ Apply as **one `sm curate` batch** of `{op:edit, kind:metric, area, name, field:
 
 For every metric (A or B) fill `name`, a one-line `description` (the index label — without it the metric is left out of `metric_index`), prose `calculation` (the full definition — **required**), per-dialect `bindings` (the SQL), `source_tables`, `other_names`. The canonical YAML shape is [`shared/metric-entity-shape.md`](../../shared/metric-entity-shape.md) (synthetic example). **Write them with the packaged command** — build a JSON array and run it once; never hand-write each YAML and never author a throwaway loop script. It validates each item, writes `subject_areas/<area>/metrics/<slug>.yaml`, validates the whole model, and reverts the batch on failure:
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add "<root>" --kind metric --area <area> --file "<artifacts_dir>/local/tmp/agami-metrics.json" --profile <profile>
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add "<root>" --kind metric --area <area> --file "<artifacts_dir>/local/tmp/agami-metrics.json" --profile <profile>
 ```
 > **Never read another profile to learn the shape.** Do not glob or read other profiles' artifacts (e.g. `find <artifacts_dir> -path '*/metrics/*.yaml'`, or reading `<artifacts_dir>/<other-profile>/…`) to "copy the binding shape." That crosses the profile boundary — in a hosted/multi-tenant deployment it's a **tenant-data leak** (onboarding one customer must never read another's model), and even locally it risks lifting another profile's filters / calculation text into this one. You don't need to: the packaged `sm add` command validates every item against the schema. Get the shape from `shared/metric-entity-shape.md` and the profile's **own** schema — never a sibling profile.
 Don't propose metrics depending on choice-field literals you didn't detect, or cross-area metrics unless a cross-area edge wires the join. A metric whose `source_tables` sit in two subject areas goes in the datasource's cross-area list — `--area _cross`, which writes `cross_subject_area_metrics.yaml`:
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add "<root>" --kind metric --area _cross --file "<artifacts_dir>/local/tmp/agami-cross-metrics.json" --profile <profile>
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add "<root>" --kind metric --area _cross --file "<artifacts_dir>/local/tmp/agami-cross-metrics.json" --profile <profile>
 ```
 **`--profile` runs each metric's SQL over zero rows on the database first, and writes nothing if one fails**: its `test_run` names each failing metric with the reason (a column the table doesn't have, a text code compared to a number). Fix those bindings and add again; never drop `--profile` to get past it. A `test_run` of `{"connection": {"error": …}}` means the database could not be reached (credentials, network, a missing driver), not that a metric is wrong: nothing was written, so fix the connection and add the same file again. A metric over several tables comes back `not_test_run`, and its first real check is Phase 6. `--area` must be `_cross` or a subject area `datasource.yaml` lists; any other name is refused with the list of areas (a file written under an unlisted area would never be loaded).
 
@@ -1248,7 +1298,7 @@ When 0a.0's Source answer named a currency (`$CURRENCY_HINT`), it is the `--curr
 
 **Write all of these with `sm curate` edit ops — never hand-edit `tables/*.yaml` or script a loop over them.** One ops array, one call (validated + committed + reverted on failure):
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-caveats.json"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-caveats.json"
 ```
 ```json
 [{"op":"edit","kind":"table","area":"main","name":"orders","field":"caveats","value":["Order total can be negative on refunds."]},
@@ -1337,7 +1387,7 @@ Post one progress line from its output: `✓ Checked <tables_probed> tables (<st
 | **Both are in use**, **Not sure** | nothing |
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-answers.json" --signer "<reviewer_email>" --role "<reviewer_role>"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-answers.json" --signer "<reviewer_email>" --role "<reviewer_role>"
 ```
 
 **Skip the rest** applies the card's other answers and asks nothing more; say how many were left, and that they come back the next time the schema is reloaded. **"Other" on an ambiguity** that names one of its options is that option; one that says the word isn't ambiguous here ("it's always the paid date") is that option too. A code typed for `coded_values` that isn't one of its `values`, or words you can't place, are re-asked, never guessed: say in one line what didn't match and ask the same card again; a question ("which one do the reports use?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). `curate`'s `skipped` (an ambiguity already declared, say) is said back in one line.
@@ -1364,7 +1414,7 @@ Blank is undecided, never a default: a row left blank writes nothing and comes b
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_open_questions_decisions.py --decisions-file "<artifacts_dir>/local/tmp/agami-page-<batch>.json" --items-file "<artifacts_dir>/local/tmp/agami-open-questions-<batch>.json" --expect-profile <profile> --artifacts-dir "<artifacts_dir>" --ops-out "<artifacts_dir>/local/tmp/agami-answers.json"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-answers.json" --signer "<reviewer_email>" --role "<reviewer_role>"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-answers.json" --signer "<reviewer_email>" --role "<reviewer_role>"
 ```
 
 Each op is the one the item carries, as on the cards: a reading is its `op` with that `default`, **Ask each time** its `op` with `"behaviour": "ask"`, a table its `ops`, a confirmed code list its labels as they are, a fixed one the labels typed, a confirmed column its description marked `ai_validated`, a fixed one the words typed (`source: human`), and **Hide this column** an `exclude` op; **Don't know** and **Both are in use** write nothing. `{"ok": false, "error"}` (exit 2: another page or model, no saved identity, a malformed file): say the error in one line, apply nothing, and ask the `Answer how` card again. Each of `refused` (an id not on the page, a choice its row doesn't offer, a fix with no words) is said back and not applied. Then say in one line what was recorded and for whom, from `curate`'s `applied` and the parser's `counts`: *"Recorded 14 answers as yours (<reviewer_email>): 6 questions, 5 code lists, 3 columns (1 hidden). 31 left blank come back next time."*, list `curate`'s `skipped`, delete the decisions file, the page and `agami-open-questions-<batch>.json` (it holds sample values), and go to Phase 3.
@@ -1394,7 +1444,7 @@ If they adjust, move tables with the curate `move` op — never by editing the `
 **Replace each area's auto-proposed description with a real one** — the engine seeds `"Auto-proposed subject area covering: <tables>"`, which is boilerplate, but the **subject-area description is load-bearing**: it's what the MCP shows in its first pass so the LLM can ROUTE a question to the right area (`get_datasource_schema` returns name + description per area). A blank/boilerplate description means the router is guessing. So write one business line per area — what domain it covers and when you'd query it — grounded in its tables/columns (NOT product memory). Apply through the validated path, one batch (no generator script):
 ```bash
 # one {op:edit, kind:subject_area, area:<name>, name:<name>, field:description, value:"<line>"} per area
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-area-desc.json"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-area-desc.json"
 ```
 
 ---
@@ -1437,7 +1487,7 @@ Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do 
 
 | Answer | Do |
 |---|---|
-| Approve all | The identity card first if needed (below). With more than 15 items, list the ones the table above didn't show first and confirm ([question-cards rule 4](../../shared/question-cards.md#4-lists-longer-than-a-card-holds-are-summarised)). Then one batch: `{"op":"approve","kind":"<kind>","area":"<area>","name":"<name>","bulk":true}` per item (leave `area` out when the item's `area` is null, a cross-area metric), applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`, then run `sm steps "<root>"` and do what its `then` says ([shared/task-list.md](../../shared/task-list.md)). |
+| Approve all | The identity card first if needed (below). With more than 15 items, list the ones the table above didn't show first and confirm ([question-cards rule 4](../../shared/question-cards.md#4-lists-longer-than-a-card-holds-are-summarised)). Then one batch: `{"op":"approve","kind":"<kind>","area":"<area>","name":"<name>","bulk":true}` per item (leave `area` out when the item's `area` is null, a cross-area metric), applied with `AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`, then run `sm steps "<root>"` and do what its `then` says ([shared/task-list.md](../../shared/task-list.md)). |
 | Review one by one | The one-by-one cards below. |
 | Skip for now | Nothing is written. Go to 4b. |
 | Review on a page | The full view below, then this card again, recounted. |
@@ -1451,7 +1501,7 @@ Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do 
 
 After each card, apply its answers in one `sm curate` batch (approvals with `--signer`/`--role`), run `sm steps "<root>"` and do what its `then` says ([shared/task-list.md](../../shared/task-list.md)), then ask the next card. Every approval goes through that one command with the person's identity; never mark an item approved any other way.
 
-**"Other" on an item is a change, in the person's words** ("revenue should exclude cancelled orders"). Turn it into `sm curate` edit ops on the field the change names (`calculation`, `bindings`, `description` or `other_names` on a metric; `maps_to`, `description` or `other_names` on an entity), e.g. `{"op":"edit","kind":"metric","area":"<area>","name":"<name>","field":"calculation","value":"<new definition>"}` plus the matching `bindings` edit when the SQL changes, and apply them with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-edit.json"`. Never hand-edit the YAML and never a generator script. Then ask about that item again, on the next card, showing its new meaning: an edit is not a sign-off.
+**"Other" on an item is a change, in the person's words** ("revenue should exclude cancelled orders"). Turn it into `sm curate` edit ops on the field the change names (`calculation`, `bindings`, `description` or `other_names` on a metric; `maps_to`, `description` or `other_names` on an entity), e.g. `{"op":"edit","kind":"metric","area":"<area>","name":"<name>","field":"calculation","value":"<new definition>"}` plus the matching `bindings` edit when the SQL changes, and apply them with `AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-edit.json"`. Never hand-edit the YAML and never a generator script. Then ask about that item again, on the next card, showing its new meaning: an edit is not a sign-off.
 
 **An "Other" that asks to stop is a stop, not a change.** When the words on an item card ask to stop, pause or finish later ("stop here", "I'll do the rest later", "pause") rather than change that item, apply the card's other answers, approve or change nothing more, and go to 4b's Continue / Pause card.
 
@@ -1475,7 +1525,7 @@ Flagged and suspected columns are picked the same way:
 - Always last: **Keep them queryable**, its description saying what stays: *"Flagged ones can still be counted and filtered, but a raw value is never shown. Suspected ones stay ordinary columns."* (The old label, *Keep them all queryable*, read as "ordinary columns" while the flags stayed on.)
 - "Other" takes `table.column` names to hide, flagged, suspected or any other column in the model.
 
-Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them queryable** writes nothing; say in one line what that leaves (flagged columns queryable, raw values never shown). A name in "Other" that isn't a column in the model, or **Keep them queryable** or **Review on a page** picked together with anything else, is said back and the same card asked again; never guess which column was meant.
+Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them queryable** writes nothing; say in one line what that leaves (flagged columns queryable, raw values never shown). A name in "Other" that isn't a column in the model, or **Keep them queryable** or **Review on a page** picked together with anything else, is said back and the same card asked again; never guess which column was meant.
 
 **Show the full view** (an option on the Sign-off and item cards and the personal-data question, labelled **Review on a page** there, or asked for in words). The model explorer, with every metric, entity, join and column, which saves its own decisions ([question-cards rule 6a](../../shared/question-cards.md#6a-a-page-that-saves-its-decisions)): render it the way `/agami-model preseed` does in its Phase 5 (`render_model_explorer.py … --initial-tab review --section <metrics|entities|joins> --save-to-helper`, or `--initial-tab pii` from the personal-data question) and serve it from localhost with the helper waiting for its save, giving the person the URL (`<batch>` is the stamp `sm batch-id` prints):
 
@@ -1524,7 +1574,7 @@ Tag each with its `tables` (list **all** tables it touches — both schemas for 
 
 **5b+5c — validate + write in ONE packaged call.** **Do NOT write a script to loop EXPLAIN over the seeds and don't hand-write the YAML.** `seed-examples` validates every candidate against the live DB (wraps each as a zero-row query — dialect-agnostic, scans nothing), writes the passing ones (appends, dedups by `question`, commits), and returns the rejects with their DB error. Post one progress line from its output (`totals`, or `added` and `rejected` for one area): *"✓ Wrote <added> examples; <rejected> failed the dry run."*
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" seed-examples "<root>" --profile <profile> --file "<artifacts_dir>/local/tmp/agami-seeds.json"
+AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" seed-examples "<root>" --profile <profile> --file "<artifacts_dir>/local/tmp/agami-seeds.json"
 ```
 **Write every area's seeds in this one call:** give each seed an `area` (the subject area it is stored under) and leave out `--area`, or repeat `--area` to limit the call to those areas. A seed with no `area`, or one outside the call's areas, stops the call before anything is written. With exactly one `--area` the seeds need no `area` and the output is the single-area shape `{added, written, committed, rejected:[{question, error}]}`; with several or none it is that shape with each `rejected` entry labelled `area`, plus `areas` (one such result per area, labelled `area`) and `totals` (`areas`, `added`, `rejected`). For each `rejected`, optionally regenerate once and re-run with just those; don't block the flow on a few drops. Corrections later append via `/agami-save-correction` (same `add-example` path).
 
@@ -1570,7 +1620,7 @@ The order is fixed. Put **Review one by one** first and recommend it instead of 
 
 | Answer | Do |
 |---|---|
-| Keep all | First, every example the table above didn't show is listed and confirmed ([question-cards rule 4](../../shared/question-cards.md#4-lists-longer-than-a-card-holds-are-summarised)): a sign-off is never recorded for an example the person hasn't seen. Then the identity card from Phase 4a if `reviewer_email`/`reviewer_role` aren't saved yet; here **Don't sign anything yet** leaves every example written but unsigned and goes on to Phase 7 (not 4b). Then, per area, write the examples that ran back with their own `question` and `sql` (same SQL, so it is a sign-off, not a change; their tags are kept): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add-example "<root>" --area <area> --file "<artifacts_dir>/local/tmp/agami-keep-examples.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. The sign-off is recorded in `curation_log.jsonl`, not on the example. Failed ones are left as they are; say how many. |
+| Keep all | First, every example the table above didn't show is listed and confirmed ([question-cards rule 4](../../shared/question-cards.md#4-lists-longer-than-a-card-holds-are-summarised)): a sign-off is never recorded for an example the person hasn't seen. Then the identity card from Phase 4a if `reviewer_email`/`reviewer_role` aren't saved yet; here **Don't sign anything yet** leaves every example written but unsigned and goes on to Phase 7 (not 4b). Then, per area, write the examples that ran back with their own `question` and `sql` (same SQL, so it is a sign-off, not a change; their tags are kept): `AGAMI_SCRATCH_ONLY=1 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add-example "<root>" --area <area> --file "<artifacts_dir>/local/tmp/agami-keep-examples.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. The sign-off is recorded in `curation_log.jsonl`, not on the example. Failed ones are left as they are; say how many. |
 | Drop the failing ones | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" remove-example "<root>" --question "<area>/<question>" …` (one `--question` per failed item, `--signer`/`--role` when known). They are marked rejected and kept for audit, not deleted: say so. |
 | Review one by one | The one-by-one cards over every item, failed ones first; **Keep all remaining** on each card ends the review once the failures are dealt with. |
 | Add my own | [`shared/own-examples.md`](../../shared/own-examples.md), from its step 1; it checks each statement through `/agami-reconcile`, adds the ones that agree as examples signed as the person's, and asks about the ones that disagree. Its run is separate from the seeds, so nothing on this card is decided by it. Then this card again for the seeds. |

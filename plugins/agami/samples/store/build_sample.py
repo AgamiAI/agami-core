@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -30,13 +31,28 @@ HERE = Path(__file__).resolve().parent
 SEED = HERE / "seed.sql"
 
 
+def _private_parents(folder: Path) -> None:
+    """Make `folder` and each missing folder above it 0700, one at a time. The sample goes under
+    `<artifacts_dir>/local/`, and when this is the first thing to write there it would otherwise
+    create `local/` itself under the usual umask, readable by anyone on the machine."""
+    missing = []
+    while not folder.exists():
+        missing.append(folder)
+        folder = folder.parent
+    for d in reversed(missing):
+        try:
+            os.mkdir(d, 0o700)
+        except FileExistsError:
+            pass
+
+
 def build(out_path: Path, prefer_cli: bool = True) -> str:
     """Build the sample DB at out_path from seed.sql. Returns the method used."""
     if not SEED.exists():
         raise FileNotFoundError(f"seed.sql not found next to builder: {SEED}")
 
     out_path = out_path.expanduser().resolve()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _private_parents(out_path.parent)
     # Idempotent: start clean so a rebuild can't accrete onto a stale file.
     if out_path.exists():
         out_path.unlink()

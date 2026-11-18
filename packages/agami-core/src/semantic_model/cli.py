@@ -56,7 +56,19 @@ def _print_json(obj) -> None:
 def _read_json_file(path: str) -> Any:
     """Read a command's JSON input, or stop with a JSON error naming the RESOLVED path. A traceback
     on stdout (a relative path that didn't resolve where the caller thought, a half-written file)
-    read as "nothing to apply" to a skill parsing the output, so it went on as if the call had worked."""
+    read as "nothing to apply" to a skill parsing the output, so it went on as if the call had worked.
+    Under the scratch-only guard (`AGAMI_SCRATCH_ONLY=1`) the file must be one of agami's scratch
+    files (semantic_model/scratch.py)."""
+    from . import scratch
+    if scratch.guarded():
+        try:
+            data = scratch.read_scratch(path, scratch.INPUT_CAP, engine_ok=True)
+            return json.loads(data.decode("utf-8"))
+        except scratch.NotScratch as exc:
+            _print_json({"error": str(exc)})
+        except ValueError as exc:
+            _print_json({"error": f"could not read JSON from {path}: {exc}"})
+        raise SystemExit(2)
     p = Path(path).expanduser()
     try:
         with open(p, encoding="utf-8") as fh:
@@ -71,15 +83,18 @@ def _read_json_file(path: str) -> Any:
 def _read_text_file(path: str) -> str:
     """A person's free text from a file the skill wrote with its Write tool, verbatim (UTF-8) minus one
     trailing newline. Free text never goes on the command line: a quote, `$` or `;` in a company name
-    or a question would be read by the shell, and escaping it changed the person's words."""
-    p = Path(path).expanduser()
+    or a question would be read by the shell, and escaping it changed the person's words.
+
+    Only one of agami's scratch files, always (semantic_model/scratch.py): this text is saved into
+    the org record and datasource.yaml, so a call pointed at any other file would copy it there."""
+    from . import scratch
     try:
-        text = p.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        _print_json({"error": f"file not found: {p.resolve()}"})
+        text = scratch.read_scratch(path, scratch.TEXT_CAP).decode("utf-8")
+    except scratch.NotScratch as exc:
+        _print_json({"error": str(exc)})
         raise SystemExit(2)
-    except (OSError, ValueError) as exc:
-        _print_json({"error": f"could not read text from {p.resolve()}: {exc}"})
+    except ValueError as exc:
+        _print_json({"error": f"could not read text from {Path(path).resolve()}: {exc}"})
         raise SystemExit(2)
     for end in ("\r\n", "\n"):
         if text.endswith(end):
@@ -2086,7 +2101,15 @@ def cmd_introspect(args) -> int:
     if getattr(args, "tables_file", None):
         # a newline-separated allowlist file — the shell-quoting-proof way to pass a big kept set
         # (no word-splitting to get wrong). `#` comments and blank lines ignored.
-        text = Path(args.tables_file).expanduser().read_text(encoding="utf-8")
+        from . import scratch
+        if scratch.guarded():
+            try:
+                text = scratch.read_scratch(args.tables_file, scratch.TEXT_CAP).decode("utf-8")
+            except (scratch.NotScratch, ValueError) as exc:
+                _print_json({"error": str(exc)})
+                return 2
+        else:
+            text = Path(args.tables_file).expanduser().read_text(encoding="utf-8")
         from_file = [ln.strip() for ln in text.splitlines()
                      if ln.strip() and not ln.lstrip().startswith("#")]
         tables = (tables or []) + _normalize_table_list(from_file)
@@ -2541,12 +2564,18 @@ def write_atomically(path: Path, data: bytes) -> None:
 def _run_to_out(args) -> int:
     """Run the verb with its stdout captured, then write those bytes to `--out`, whatever the exit
     code, as the redirect it replaces did; the exit code passes through. A verb that raises writes
-    nothing, so no half answer lands where a poller looks."""
+    nothing, so no half answer lands where a poller looks. `--out` is only ever a scratch file or a
+    model's own datasource.md (semantic_model/scratch.py), checked before the verb runs."""
+    from . import scratch
+    try:
+        out = scratch.check_out(args.out_file)
+    except scratch.NotScratch as exc:
+        _print_json({"error": str(exc)})
+        return 2
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = args.func(args)
     data = buf.getvalue().encode("utf-8")
-    out = Path(args.out_file).expanduser()
     write_atomically(out, data)
     # one line: the skill reads it at a glance
     print(json.dumps({"out": str(out), "bytes": len(data)}, ensure_ascii=False))
@@ -3090,10 +3119,41 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
     return args
 
 
+# Every option that names a file a verb reads, and every one that names a file or folder it writes
+# besides the model it is given. Under the scratch-only guard each must be a scratch file (or, out,
+# a model's datasource.md): the readers check again as they open, these catch the rest up front.
+_NAMED_INPUTS = ("ops", "ops_file", "file", "tables_file", "sql_file", "plan", "csv_file",
+                 "name_file", "description_file", "question_file", "spec", "items")
+_NAMED_OUTPUTS = ("out", "out_file", "inventory_out", "progress")
+
+
+def _scratch_only_refusal(args) -> Optional[str]:
+    """Under `AGAMI_SCRATCH_ONLY=1`, why the call names a file it may not, else None."""
+    from . import scratch
+    if not scratch.guarded():
+        return None
+    try:
+        for attr in _NAMED_INPUTS + _NAMED_OUTPUTS:
+            value = getattr(args, attr, None)
+            for v in value if isinstance(value, list) else [value]:
+                if isinstance(v, str) and v:
+                    if attr in _NAMED_OUTPUTS:
+                        scratch.check_out(v)
+                    else:
+                        scratch.check_input(v)
+    except scratch.NotScratch as exc:
+        return str(exc)
+    return None
+
+
 def main(argv=None) -> int:
     _utf8_stdio()
     _enter_caller_cwd()
     args = _parse_args(argv)
+    refused = _scratch_only_refusal(args)
+    if refused:
+        _print_json({"error": refused})
+        return 2
     try:
         if getattr(args, "out_file", None):
             return _run_to_out(args)

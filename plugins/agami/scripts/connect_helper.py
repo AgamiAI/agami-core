@@ -238,7 +238,10 @@ def _section_text(spec: dict[str, Any], password_ref: str | None) -> str:
 def _write_section(creds: Path, section: str) -> str:
     """Create the credentials file at 0600, or append to it and put it back to 0600. Returns the exact
     text added, so `_remove_section` can take it out again."""
-    creds.parent.mkdir(parents=True, exist_ok=True)
+    if creds.parent.name == agami_paths.LOCAL_SUBDIR:
+        agami_paths.ensure_local_dir(creds.parent.parent)  # private, whoever made it first
+    else:
+        creds.parent.mkdir(parents=True, exist_ok=True)
     if not creds.exists():
         fd = os.open(creds, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:

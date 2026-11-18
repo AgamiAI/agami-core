@@ -265,9 +265,11 @@ def test_an_approved_steps_or_progress_call_writes_only_inside_introspect(art, a
         "bundle {R} --area agami-example --out {T}/agami-b.json",
     ],
 )
-def test_an_approved_out_call_writes_only_its_scratch_file(art, args):
+def test_an_approved_out_call_writes_only_its_scratch_file(art, args, monkeypatch):
     pytest.importorskip("pydantic")
     from semantic_model import cli
+
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))  # where `--out` may write
 
     assert _decision(_bash(_sm(art, args)), art) == "allow"
     shutil.rmtree(art / "acme")

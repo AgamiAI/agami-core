@@ -1,0 +1,141 @@
+"""What agami-connect's `allowed-tools` pre-approves, and that nothing hostile fits under it.
+
+Onboarding reads rows and documents nobody vetted, and that text steers the model. A rule that ended
+in a free tail (`sm *`, `py *`, `VAR=* bash …`) pre-approved `sm install` (a network install),
+`py -c '<code>'`, `py -m pip install …`, `py -m execute_sql --no-safety`, and, through the
+assignment, `BASH_ENV=<file> bash …`, which runs <file> as shell. Every rule now names one command,
+and the commands that read a file the call names carry the scratch-only guard.
+
+Claude Code fills `${CLAUDE_PLUGIN_ROOT}` in before matching, and a `*` matches any characters,
+spaces included; the rules are compiled here the same way.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+import yaml
+
+from skill_docs import PLUGIN, SKILLS_DIR
+
+SKILL = SKILLS_DIR / "agami-connect" / "SKILL.md"
+ROOT = str(PLUGIN)
+SM = f'bash "{ROOT}/scripts/sm"'
+PY = f'bash "{ROOT}/scripts/py"'
+ART = "/Users/you/agami-artifacts"
+
+
+def _rules() -> list[str]:
+    head = SKILL.read_text(encoding="utf-8").split("\n---\n", 1)[0]
+    return yaml.safe_load(head.removeprefix("---\n"))["allowed-tools"]
+
+
+def _compile(rule: str) -> re.Pattern:
+    glob = rule[len("Bash(") : -1].replace("${CLAUDE_PLUGIN_ROOT}", ROOT)
+    return re.compile("".join(".*" if c == "*" else re.escape(c) for c in glob) + r"\Z", re.S)
+
+
+BASH_RULES = [r for r in _rules() if r.startswith("Bash(")]
+PATTERNS = [_compile(r) for r in BASH_RULES]
+
+
+def _approved(command: str) -> list[str]:
+    return [r for r, p in zip(BASH_RULES, PATTERNS) if p.match(command)]
+
+
+HOSTILE = [
+    f"{SM} install",
+    f"{SM} install --upgrade",
+    f"{PY} -c 'import os; os.system(\"id\")'",
+    f"{PY} -m pip install requests",
+    f"{PY} -m execute_sql --sql 'DELETE FROM t' --no-safety",
+    f"{PY} /tmp/planted.py",
+    f"{PY} reconcile.py run --via mcp --url https://example.com/mcp",
+    f"BASH_ENV={ART}/local/tmp/agami-x.txt {SM} steps {ART}/acme",
+    f"AGAMI_SQL_MAX_ROWS=1 BASH_ENV={ART}/local/tmp/agami-x.txt AGAMI_SCRATCH_ONLY=1 {SM} introspect",
+    f"AGAMI_PROFILE=acme BASH_ENV=/tmp/x {PY} connect_resolve.py",
+    f"PYTHONPATH=/tmp/x {SM} steps {ART}/acme",
+    f"{SM} curate {ART}/acme --ops-file /Users/you/.aws/credentials",
+    f"{SM} add {ART}/acme --kind metric --area a --file /Users/you/.ssh/id_rsa",
+    f"{SM} seed-examples {ART}/acme --profile acme --file /etc/passwd",
+    f"{SM} introspect --profile acme --tables-file /etc/passwd",
+    f"{SM} describe-file {ART}/acme --file /Users/you/.netrc",
+    f"{SM} apply-spec {ART}/acme --file /Users/you/spec.json",
+]
+
+
+@pytest.mark.parametrize("command", HOSTILE)
+def test_no_rule_approves_a_hostile_command(command):
+    assert _approved(command) == []
+
+
+def test_no_rule_has_a_free_tail_or_a_wildcard_before_the_launcher():
+    for rule in BASH_RULES:
+        body = rule[len("Bash(") : -1]
+        launcher = re.search(r'bash "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/(sm|py)"', body)
+        assert launcher, rule
+        assert "*" not in body[: launcher.start()], f"wildcard before the launcher: {rule}"
+        rest = body[launcher.end() :]
+        # one fixed word (a verb or a script) before any wildcard
+        assert re.match(r' ("[^"*]+"|[a-z][a-z0-9_.-]*)( \*)?$', rest), f"free tail: {rule}"
+
+
+def test_every_py_rule_names_a_script_the_plugin_has():
+    for rule in BASH_RULES:
+        m = re.search(r'scripts/py" (?:"([^"]+)"|([^" )]+))', rule)
+        if m:
+            path = (m.group(1) or m.group(2)).replace("${CLAUDE_PLUGIN_ROOT}", ROOT)
+            target = Path(path) if path.startswith("/") else PLUGIN / "scripts" / path
+            assert target.is_file(), rule
+            assert target.suffix == ".py", rule
+
+
+# The verbs that read a JSON or list file the call names: pre-approved only under the guard.
+FILE_READERS = {
+    "curate",
+    "add",
+    "add-example",
+    "seed-examples",
+    "set-terminology",
+    "introspect",
+    "discover",
+}
+NEVER = {"install", "describe-file", "apply-spec"}
+
+
+def test_sm_rules_name_one_verb_and_file_readers_carry_the_guard():
+    verbs = []
+    for rule in BASH_RULES:
+        m = re.search(r'scripts/sm" ([a-z-]+)', rule)
+        if not m:
+            continue
+        verb = m.group(1)
+        verbs.append(verb)
+        assert verb not in NEVER, rule
+        if verb in FILE_READERS:
+            assert "AGAMI_SCRATCH_ONLY=1 bash" in rule, rule
+    assert len(verbs) == len(set(verbs)), "one rule per verb"
+
+
+def test_the_skills_own_commands_are_still_approved():
+    commands = [
+        f"{SM} steps {ART}/acme --mark build=in_progress",
+        f"{SM} progress {ART}/acme --wait 20",
+        f"{SM} batch-id",
+        f"AGAMI_SCRATCH_ONLY=1 {SM} curate {ART}/acme --ops-file {ART}/local/tmp/agami-a.json",
+        f"AGAMI_SQL_MAX_ROWS=200000 AGAMI_SCRATCH_ONLY=1 {SM} introspect --profile acme "
+        f"--db-type sqlite --artifacts {ART} --tables-file {ART}/local/tmp/agami-keep.txt",
+        f"{PY} connect_resolve.py --db-type sqlite --profile agami-example",
+        f'{PY} "{ROOT}/samples/store/build_sample.py" --out "{ART}/local/samples/store.db"',
+        f"{PY} promote_credentials.py",
+    ]
+    for c in commands:
+        assert _approved(c), c
+
+
+def test_the_rules_are_explained_where_they_are_listed():
+    head = SKILL.read_text(encoding="utf-8").split("\n---\n", 1)[0]
+    for word in ("sm install", "py -c", "AGAMI_SCRATCH_ONLY=1", "BASH_ENV"):
+        assert word in head, word

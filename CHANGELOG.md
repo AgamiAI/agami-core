@@ -57,6 +57,28 @@ below corresponds to one such version.
   artifacts folder came from and whether `.gitignore` already ignores `local/`, and the password
   helper prints its own `pid`.
 
+### Security
+
+- **agami-connect pre-approves only the commands it runs, one rule each.** Its `allowed-tools`
+  had `sm *` and `py *`, which also pre-approved `sm install` (a network install), `py -c '<code>'`,
+  `py -m pip install …` and `py -m execute_sql --no-safety`, while rows and documents nobody vetted
+  were steering the model; and `AGAMI_SQL_MAX_ROWS=* bash …` let `BASH_ENV=<file>` ride along, which
+  runs that file. Now: one rule per `sm` verb and per plugin script the skill runs, env prefixes
+  written out in full. `sm install`, `py -c`, `py -m`, `sm describe-file` and `sm apply-spec` always
+  ask. The five verbs that read a JSON or table-list file (`curate`, `add`, `add-example`,
+  `seed-examples`, `set-terminology`) and `introspect` / `discover` are pre-approved only with the
+  `AGAMI_SCRATCH_ONLY=1` prefix, under which every file the call names must be one of agami's scratch
+  files (or the build's own `join_candidates.json`). `py <name>.py` refuses a name the plugin has no
+  script for instead of running a file of that name from the current folder.
+- **`--name-file`, `--description-file` and `--question-file` read only agami's scratch files**: a
+  plain, unlinked file directly inside `<artifacts_dir>/local/tmp/`, named `agami-…`, at most 1 MB.
+  Pointed at any other file they copied it into the organization record or `datasource.yaml`.
+  `--out` writes only such a scratch file or a model's own `datasource.md`.
+- **`<artifacts_dir>/local/` is 0700 whoever creates it.** `sm` and `py` create `local/tmp` before
+  every call, and did it under the usual umask, so `local/` came out readable by others despite the
+  skill's `mkdir -m 700`. They, the connect helper, the sample builder and the settings writer now
+  make it 0700 and tighten an existing one; `.config` is written 0600.
+
 ## [0.9.24] — 2026-11-17
 
 ### Security

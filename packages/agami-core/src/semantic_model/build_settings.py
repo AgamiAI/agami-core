@@ -47,9 +47,18 @@ def set_personal_data(artifacts_dir: str | Path, setting: str) -> Path:
         doc["personal_data"] = setting
     else:
         doc.pop("personal_data", None)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    os.chmod(
-        path, 0o600
-    )  # the same mode the skill gives this file: it also holds the reviewer's identity
+    write_private(path, json.dumps(doc, indent=2) + "\n")
     return path
+
+
+def write_private(path: Path, text: str) -> None:
+    """`text` at `path`, a file under `<artifacts_dir>/local/`, readable by its owner only (it holds
+    the reviewer's identity), with `local/` made or tightened to 0700. Created at 0600 rather than
+    written and then chmod-ed, so it is never readable by others even for a moment."""
+    from agami_paths import ensure_local_dir
+
+    ensure_local_dir(path.parent.parent)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.chmod(path, 0o600)  # an existing file keeps its old mode through O_CREAT

@@ -50,8 +50,21 @@ PLACEHOLDER = re.compile(r"<[^<>\n]+>")
 # Any mention of the launcher as a path, quoted or not; a command must use the quoted form below.
 LAUNCHER = re.compile(r"(?:\$\{CLAUDE_PLUGIN_ROOT\}|<plugin_root>)/scripts/(?:sm|py)(?![\w.-])")
 QUOTED_LAUNCHER = re.compile(
-    r'^(?:AGAMI_[A-Z_]+=\S+ )?bash "(?:\$\{CLAUDE_PLUGIN_ROOT\}|<plugin_root>)/scripts/(?:sm|py)"(?: |$)'
+    r'^(?:AGAMI_[A-Z_]+=\S+ )*bash "(?:\$\{CLAUDE_PLUGIN_ROOT\}|<plugin_root>)/scripts/(?:sm|py)"(?: |$)'
 )
+# Commands the skill shows that are deliberately NOT pre-approved: each asks the person, for the
+# reason given. Everything else must match one of the skill's `allowed-tools` rules
+# (tests/test_connect_allowed_tools.py holds what those rules may and may not approve).
+DELIBERATELY_ASKS = {
+    r'scripts/sm" install\b': "a network install, which the person agrees to",
+    r'scripts/py" -c ': "runs code given on the line",
+    r'scripts/py" -m ': "pip installs; execute_sql takes --no-safety",
+    r'scripts/sm" describe-file ': "reads the person's own document, wherever it is",
+    r'scripts/sm" apply-spec ': "reads the converted workbook under local/model-spec/",
+    r'scripts/py" reconcile\.py ': "can call an MCP server over the network",
+    r'scripts/sm" add-example .*<examples_files': "reads reconcile's output under local/reconcile/",
+    r'scripts/(sm|py)" <(verb|script)>': "a generic form in prose, not a command",
+}
 SHORTHAND = re.compile(r"^sm ([a-z][a-z-]*)(?: (.*))?$")
 
 # Commands other than agami's launchers that a fence may still show, each with the reason it stays.
@@ -464,8 +477,13 @@ _FRAGMENT = re.compile(r'scripts/py"$')
 def test_each_command_is_matched_by_an_allowed_tools_rule(where, command, art):
     if _FRAGMENT.search(command):
         pytest.skip("names the launcher only")
+    asks = [why for pat, why in DELIBERATELY_ASKS.items() if re.search(pat, command)]
     filled = _fill(command, art)
-    assert any(p.match(filled) for p in ALLOWED), f"{where}: no allowed-tools rule matches {filled}"
+    approved = any(p.match(filled) for p in ALLOWED)
+    if asks:
+        assert not approved, f"{where}: pre-approved, but it should ask ({asks[0]}): {filled}"
+        return
+    assert approved, f"{where}: no allowed-tools rule matches {filled}"
 
 
 def _sm_argv(art: Path) -> list[tuple[str, list[str]]]:
