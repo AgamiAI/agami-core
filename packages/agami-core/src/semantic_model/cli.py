@@ -1656,7 +1656,7 @@ def cmd_describe_file(args) -> int:
 
 
 def cmd_dictionary_joins(args) -> int:
-    """Turn the references the applied data dictionary states (`FK -> funds.ticker`) into join
+    """Turn the references the applied data dictionary states (`FK -> parent.pkey`) into join
     candidates, each checked once on the data (#694). With `--unjoined`, only list the columns the
     dictionary calls references that no join reads from yet: no database read."""
     from . import dialects as D

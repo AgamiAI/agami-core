@@ -15,9 +15,9 @@ below corresponds to one such version.
 ### Added
 
 - **Joins the data dictionary states are offered, even past the probe cap** (#694). A dictionary
-  applied to the model that says where a column points (`FK -> funds.ticker`, `FK to
-  funds(ticker)`, "Foreign key referencing funds.ticker", "Foreign key reference to funds" (its
-  one-column key), "references funds.ticker", or "Reference to the fund" when exactly one table
+  applied to the model that says where a column points (`FK -> parent.pkey`, `FK to
+  parent(pkey)`, "Foreign key referencing parent.pkey", "Foreign key reference to parent" (its
+  one-column key), "references parent.pkey", or "Reference to the parent" when exactly one table
   holds that entity) now becomes a join candidate: `sm dictionary-joins` checks each stated
   pair once on the data, outside the join-candidate scan's 300-probe cap, and offers it in
   `join_candidates.json` with `found_by: dictionary` and the dictionary line as evidence when at

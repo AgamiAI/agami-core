@@ -2,9 +2,9 @@
 
 A dictionary applied to the model (`sm describe-file`, `sm enrich-metadata`) lands as column
 descriptions stamped `description_source: metadata`. Some of them say where the column points:
-`FK -> funds.ticker`, `FK to funds(ticker)`, `Foreign key referencing funds.ticker`, `Foreign key
-reference to funds` (its one-column key), `references funds.ticker`, or `Reference to the fund` /
-`pointer to the fund` when exactly one table anchors that entity. Each such statement becomes one
+`FK -> parent.pkey`, `FK to parent(pkey)`, `Foreign key referencing parent.pkey`, `Foreign key
+reference to parent` (its one-column key), `references parent.pkey`, or `Reference to the parent` /
+`pointer to the parent` when exactly one table anchors that entity. Each such statement becomes one
 check on the data, the same bounded, read-only aggregate the join-candidate scan runs
 (`profile.JoinCheck`): the share of the column's filled rows found in the named key, and whether
 that key repeats. What holds is offered as a join candidate, `found_by: dictionary`, beside the
