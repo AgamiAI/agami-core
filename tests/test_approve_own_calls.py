@@ -1236,3 +1236,52 @@ def test_an_approved_verb_never_installs(art, tmp_path, verb):
         timeout=60,
     )
     assert mark.exists()
+
+
+# A Python whose library is ready the first time each readiness probe asks and broken after: a
+# concurrent update landing between `sm`'s guard and anything that probes again. The CLI run itself
+# leaves a mark, and so does every pip call.
+_SHIM_READY_THEN_BROKEN = """#!/bin/sh
+case "$1" in
+  -m) [ "$2 $3" = "pip --version" ] && exit 0; echo "$*" >> "$PIP_MARK"; exit 0 ;;
+  -X) echo "$*" >> "$RAN_MARK"; exit 0 ;;
+  -c|-)
+    [ "$1" = "-" ] && cat >/dev/null
+    key=$(printf '%s' "$1 $2" | cksum | cut -d' ' -f1)
+    if grep -qx "$key" "$SEEN" 2>/dev/null; then exit 1; fi
+    echo "$key" >> "$SEEN"; exit 0 ;;
+esac
+exit 0
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell shim")
+@pytest.mark.parametrize("verb", sorted(HOOK_MOD.VERBS))
+def test_an_approved_verb_never_reaches_the_installer_after_its_guard(art, tmp_path, verb):
+    """Once the guard has passed, nothing probes again: a library that breaks in between makes the
+    CLI fail on its own, and never turns an approved call into a pip install."""
+    cache = tmp_path / "agami-core" / "0.0.1"
+    shutil.copytree(PLUGIN / "scripts", cache / "scripts")
+    shim = tmp_path / "pyshim"
+    shim.write_text(_SHIM_READY_THEN_BROKEN)
+    shim.chmod(0o755)
+    pip, ran = tmp_path / "pip-calls", tmp_path / "cli-runs"
+    env = {
+        **os.environ,
+        "AGAMI_PYTHON": str(shim),
+        "AGAMI_ARTIFACTS_DIR": str(art),
+        "PIP_MARK": str(pip),
+        "RAN_MARK": str(ran),
+        "SEEN": str(tmp_path / "seen"),
+    }
+    args = [verb, str(art / "acme"), *(["--area", "sales"] if verb == "bundle" else [])]
+    r = subprocess.run(
+        ["bash", str(cache / "scripts" / "sm"), *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert not pip.exists(), pip.read_text()
+    assert r.returncode == 0, r.stderr
+    assert "semantic_model.cli " + verb in ran.read_text()
