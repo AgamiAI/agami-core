@@ -153,6 +153,8 @@ def _fake_candidates(monkeypatch, paths, *, deps_for, driver_for, no_pip=(), lib
     `no_pip` lists interpreters without pip; `lib` maps one to its agami-core version
     (the rest carry the plugin's own version)."""
     monkeypatch.setattr(CR, "_candidate_interpreters", lambda: list(paths))
+    # the scoring itself, not the launchers' selection (tests/test_plugin_version_check.py runs that)
+    monkeypatch.setattr(CR, "_launcher_python", lambda: None)
     monkeypatch.setattr(CR, "plugin_version", lambda: plugin)
     lib = lib or {}
     monkeypatch.setattr(CR, "_probe_install", lambda py: {
@@ -206,6 +208,7 @@ def test_duckdb_driver_requires_pytz(monkeypatch):
     have = {no_pytz: {"pydantic", "sqlglot", "yaml", "duckdb"},
             full: {"pydantic", "sqlglot", "yaml", "duckdb", "pytz"}}
     monkeypatch.setattr(CR, "_candidate_interpreters", lambda: [no_pytz, full])
+    monkeypatch.setattr(CR, "_launcher_python", lambda: None)
     # content-aware probe: an interpreter passes only if it has EVERY requested module
     monkeypatch.setattr(CR, "_probe",
                         lambda py, mods: all(m in have.get(py, set()) for m in mods if m))

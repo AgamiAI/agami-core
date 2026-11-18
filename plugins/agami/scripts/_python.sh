@@ -1,5 +1,5 @@
-# _python.sh — which Python agami runs, on every OS. Sourced (never run) by `sm` and `py`, so the two
-# can never disagree about the interpreter: $AGAMI_PYTHON, then the one agami-connect configured
+# _python.sh — which Python agami runs, on every OS. Sourced (never run) by `sm` and `py`, and asked by
+# connect_resolve.py's preflight, so none of them can disagree about the interpreter: $AGAMI_PYTHON, then the one agami-connect configured
 # (`.config` tool_paths.python3), then python3 / python on PATH — never the Windows Store stub, and
 # not a pip-less one `sm install` could never make current while a better one is on PATH (configured
 # or not).
