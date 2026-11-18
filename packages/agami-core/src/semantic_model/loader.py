@@ -34,6 +34,7 @@ Nothing here imports Pydantic-free; the whole module is v2-only.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -82,6 +83,16 @@ SIGNER_FIELDS = frozenset({"signed_off_by", "signed_off_role", "signed_off_at"})
 def _read_yaml(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
+
+
+def inside_model(root: str | Path, path: str | Path) -> bool:
+    """Whether `path`, symlinks resolved, is inside the model folder `root`: the check for the
+    model's own logs (the step timeline, the build log, the steps.last record) before they are read
+    or written, so a link planted in a model folder can't make a read verb print, or a mark write,
+    a file elsewhere."""
+    root_real = Path(os.path.realpath(root))
+    real = Path(os.path.realpath(path))
+    return real == root_real or root_real in real.parents
 
 
 # The top-level keys `load_datasource` reads, which are exactly `Datasource`'s fields. Every other

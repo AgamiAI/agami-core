@@ -30,7 +30,9 @@ import io
 import json
 import os
 import re
+import stat
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -524,13 +526,232 @@ def cmd_model_tree(args) -> int:
     return 0
 
 
+def _progress_line(raw: str) -> dict:
+    """One progress-log line as a person's line, with an 8-cell bar drawn from its own counts,
+    rounded down so the bar is full only at the end. Never an estimate: no count, no bar."""
+    from . import steps
+    parsed = steps.parse_progress(raw)
+    if not parsed:
+        # Posted as is (`then`: "Post `line`"), so a line the engine didn't phrase is quoted like
+        # other model text (a tampered log's `# …` must not render as a heading), and a failure's
+        # reason (the database's or the model's words) is quoted with the longer failure cap.
+        from .say_text import quoted
+        if raw.startswith("failed:"):
+            reason = quoted(steps.strip_paths(raw[len("failed:"):].strip()), steps.FAILURE_CAP)
+            return {"line": f"The build didn't finish: {reason}", "done": False, "failed": True}
+        return {"line": quoted(raw), "done": False, "failed": False}
+    m, phrase, unit = parsed
+    if unit:
+        n, total = int(m.group(1)), int(m.group(2))
+        filled = (8 * n) // total if total else 0
+        bar = "▰" * filled + "▱" * (8 - filled)
+        return {"line": f"{phrase} {bar} {n}/{total} {unit}", "n": n, "total": total,
+                "done": False, "failed": False}
+    return {"line": phrase.format(*m.groups()), "done": raw.startswith("done:"), "failed": False}
+
+
+def cmd_progress(args) -> int:
+    """The build's latest progress line, ready to post, from <root>/.introspect/progress.log.
+
+    With --wait N it returns as soon as the log moves on, or after N seconds. A skill loops on it
+    while the build runs in the background: each call is a pre-approved `sm` command that keeps the
+    turn open, and a turn that ends mid-onboarding loses the skill's pre-approvals, so every later
+    command would stop for permission."""
+    from . import steps
+    log = Path(args.root).expanduser() / ".introspect" / "progress.log"
+
+    def last() -> str:
+        return steps.last_progress_line(log)
+
+    start = last()
+    deadline = time.monotonic() + max(0.0, args.wait)
+    current = start
+    # A finished or failed log won't move on, so waiting on it would only stall the skill's loop.
+    while args.wait and current == start and not current.startswith(("done:", "failed:")) \
+            and time.monotonic() < deadline:
+        time.sleep(0.5)
+        current = last()
+    # The compact step list rides along only when it moved since `sm steps` or `sm progress` last
+    # printed it, so each poll is one call, and `then` says whether to refresh the task list.
+    root = Path(args.root).expanduser()
+    view = steps.compact(steps.onboarding_steps(root))
+    listed = view["list"]
+    shown = _progress_line(current) if current else {"line": "", "done": False, "failed": False}
+    before = steps.read_printed(root)
+    steps.remember_printed(root, before, {"list": listed, "line": shown["line"]})
+    # Nothing is remembered for a folder that doesn't exist yet, and its list is the fresh one every
+    # time (`sm steps` prints it): reporting it as moved would ask for a refresh on every poll.
+    list_changed = root.is_dir() and before.get("list") != listed
+    # A failure is not posted from here: `sm steps` says it as its problem, and saying it in both
+    # places posted it twice.
+    line_new = bool(shown["line"]) and not shown["failed"] and before.get("line") != shown["line"]
+    out: dict[str, Any] = {**shown, "started": bool(current)}
+    if current:
+        out["changed"] = current != start
+    if list_changed:
+        out["list"] = listed
+    out["list_changed"] = list_changed
+    # A problem on the list (a build killed with no `failed:` line) ends the build too: its log
+    # never moves on again, so "call this again" would loop for ever.
+    ended = shown["done"] or shown["failed"] or bool(view["problem"])
+    out["then"] = steps.progress_next(line_new, list_changed, ended)
+    _print_json(out)
+    return 0
+
+
+# The longest one `sm wait-files` call blocks: the skill calls it again if the subagents need longer,
+# and a shell tool's own timeout (10 minutes in Claude Code) would kill a longer call mid-wait.
+WAIT_FILES_MAX = 600
+
+
+def wait_files_seconds(value: float) -> float:
+    """`--wait` clamped to 0..WAIT_FILES_MAX."""
+    return min(max(0.0, value), float(WAIT_FILES_MAX))
+
+
+def cmd_batch_id(args) -> int:
+    """Print `{"batch": "<YYYYMMDD-HHMMSS>-<4 hex>"}`: a stamp the skill puts in one batch's input
+    and result file names. Without it a result left by an earlier run (a reintrospect, a sample
+    rebuild, another database with the same area name) reads as this run's to `wait-files` at once,
+    and a subagent's Write onto a file it hasn't read can fail. The random part keeps two batches
+    started in the same second apart."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    _print_json({"batch": f"{stamp}-{os.urandom(2).hex()}"})
+    return 0
+
+
+def cmd_wait_files(args) -> int:
+    """Wait until every `--file` exists and is non-empty, or until `--wait` seconds run out.
+
+    The skill runs enrichers in the background while the person answers cards, then blocks on their
+    result files with this pre-approved call, the same idea as `sm progress --wait`: a turn that ends
+    loses the skill's pre-approvals. An empty file is still waiting, since a write can land in two
+    steps. Exit 0 either way; `all_ready` says which."""
+    paths = [Path(f).expanduser() for f in args.file]
+
+    def ready(p: Path) -> bool:
+        # one stat, not is_file() then stat(): a file removed between the two would raise
+        try:
+            st = p.stat()
+        except OSError:
+            return False
+        return stat.S_ISREG(st.st_mode) and st.st_size > 0
+
+    deadline = time.monotonic() + wait_files_seconds(args.wait)
+    while True:
+        done = [p for p in paths if ready(p)]
+        left = deadline - time.monotonic()
+        if len(done) == len(paths) or left <= 0:
+            break
+        time.sleep(min(1.0, left))
+    _print_json({"ready": [str(p) for p in done], "waiting": [str(p) for p in paths if p not in done],
+                 "all_ready": len(done) == len(paths)})
+    return 0
+
+
+def cmd_steps(args) -> int:
+    """The onboarding step list read from disk, after applying any --mark: by default the compact
+    list the skill copies as is, `--full` the whole dict (ids, labels, counts, timeline path).
+    Every mark is checked before any is written, so a bad one leaves the timeline as it was."""
+    from . import steps
+    if not str(args.root).strip():
+        # An unset "$ROOT" arrives as "": it would put a timeline in the working directory.
+        print("sm steps: the database folder is empty; pass <artifacts_dir>/<profile>",
+              file=sys.stderr)
+        return 2
+    try:
+        marks = [steps.parse_mark(spec) for spec in args.mark]
+    except ValueError as exc:
+        print(f"sm steps: {exc}", file=sys.stderr)
+        return 2
+    try:
+        for step_id, status in marks:
+            steps.mark(Path(args.root), step_id, status)
+    except ValueError as exc:
+        print(f"sm steps: {exc}", file=sys.stderr)
+        return 2
+    root = Path(args.root).expanduser()
+    result = steps.onboarding_steps(root)
+    listed = steps.compact(result)["list"]
+    before = steps.read_printed(root)
+    changed = before.get("list") != listed
+    said = steps.steps_next(changed, result["problem"], before.get("problem"),
+                            model_written=result["model_written"] and not marks)
+    # The problem is remembered as said: it is said once, not on every call while it lasts.
+    steps.remember_printed(root, before, {"list": listed, "problem": result["problem"]})
+    # `--full` carries `list` too, so every `then` ("update the task list from `list`") reads right.
+    view = {**result, "list": listed} if args.full else steps.compact(result)
+    _print_json({**view, "changed": changed, **said})
+    return 0
+
+
+def _steps_refresh(root: Path) -> dict:
+    """`{"list": …}` when this model is being onboarded (it has a step timeline) and the step list
+    now reads differently from the one last printed, else {}. A command that changes a count the
+    list shows carries it, so the task list is refreshed where the count changed: a live run's list
+    read "2% described" while the chat said 82%, and "11 examples" after one was dropped."""
+    from . import steps
+    root = Path(root).expanduser()
+    if not (root / ".introspect" / "timeline.jsonl").is_file():
+        return {}
+    try:
+        listed = steps.compact(steps.onboarding_steps(root))["list"]
+    except Exception:  # noqa: BLE001 — the list is a view: a command never fails over it
+        return {}
+    before = steps.read_printed(root)
+    if before.get("list") == listed:
+        return {}
+    steps.remember_printed(root, before, {"list": listed})
+    return {"list": listed}
+
+
+def _with_refresh(out: dict, root: Path) -> dict:
+    """`out` with the step list when it changed, and the instruction to show it added to `then`."""
+    from . import steps
+    fresh = _steps_refresh(root)
+    if not fresh:
+        return out
+    then = out.get("then")
+    return {**out, **fresh, "then": (then + steps.THEN_AND_UPDATE) if then else steps.THEN_UPDATE}
+
+
+def cmd_timing(args) -> int:
+    """How long onboarding took, from the step marks: per step, in total, and the line to show.
+    No timeline is not an error: every number is 0 and the line is empty."""
+    from . import timing
+    _print_json(timing.onboarding_timing(Path(args.root)))
+    return 0
+
+
+def cmd_summary(args) -> int:
+    """The onboarding's closing summary as markdown, ready to post as printed; `--json` wraps it
+    with the overview's totals."""
+    from . import summary
+    result = summary.onboarding_summary(Path(args.root))
+    if args.json:
+        _print_json(result)
+    else:
+        sys.stdout.write(result["markdown"])
+    return 0
+
+
+def cmd_overview(args) -> int:
+    """The numbers an overview card shows: per subject area its tables, columns described, metrics
+    and joins (and how many await sign-off) and examples, plus totals. One call, so a card never
+    adds up model-tree, coverage and review-items itself."""
+    from . import curate
+    org = L.load_datasource(args.root, include_rejected=True)
+    _print_json(curate.overview(org, args.root))
+    return 0
+
+
 def cmd_coverage(args) -> int:
     """Per-table column-description coverage + the enrichment-completeness verdict.
     The skill runs this at the end of Phase 2 (and reports it in the Phase 7 summary):
     `ok: false` with untouched columns means enrichment skipped the column pass."""
     from . import curate
     org = L.load_datasource(args.root, include_rejected=True)
-    _print_json(curate.column_coverage(org))
+    _print_json(_with_refresh(curate.column_coverage(org), Path(args.root)))
     return 0
 
 
@@ -886,7 +1107,7 @@ def cmd_add_example(args) -> int:
     if isinstance(items, dict):
         items = items.get("examples", items.get("items", []))
     res = curate.add_examples(args.root, args.area, items, signer=args.signer, role=args.role)
-    _print_json(res.as_dict())
+    _print_json(_with_refresh(res.as_dict(), Path(args.root)))
     return 0 if (res.applied or not res.skipped) else 1
 
 
@@ -2260,6 +2481,61 @@ def cmd_discover(args) -> int:
     return 0
 
 
+def _add_out(sp: argparse.ArgumentParser) -> None:
+    """`--out <path>` on a verb whose output a skill keeps in a file: a shell redirect after the
+    launcher made the call a compound command no permission rule matches, so it stopped for
+    permission every time."""
+    sp.add_argument("--out", dest="out_file", default=None, metavar="PATH",
+                    help='write the output to PATH (atomically) instead of stdout, and print '
+                         '{"out": PATH, "bytes": N}')
+
+
+def write_atomically(path: Path, data: bytes) -> None:
+    """`data` at `path` through a temp file in the same folder and a rename, so a reader polling
+    for the file (`sm wait-files`) never sees it half written."""
+    import tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        # mkstemp makes the file 0600; a redirect would have made it 0666 less the umask.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp, 0o666 & ~umask)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _run_to_out(args) -> int:
+    """Run the verb with its stdout captured, then write those bytes to `--out`, whatever the exit
+    code, as the redirect it replaces did; the exit code passes through. A verb that raises writes
+    nothing, so no half answer lands where a poller looks."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = args.func(args)
+    data = buf.getvalue().encode("utf-8")
+    out = Path(args.out_file).expanduser()
+    write_atomically(out, data)
+    # one line: the skill reads it at a glance
+    print(json.dumps({"out": str(out), "bytes": len(data)}, ensure_ascii=False))
+    return rc
+
+
+def _no_abbreviations(parser: argparse.ArgumentParser) -> None:
+    """`allow_abbrev=False` on `parser` and every subparser under it. With abbreviations on, `--o`
+    meant `--out`, so a check that looked for `--out` (a permission hook, a reviewer) could be
+    walked past by writing less of it; an option is now only ever its full name."""
+    parser.allow_abbrev = False
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for child in action.choices.values():
+                _no_abbreviations(child)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="semantic_model", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -2290,6 +2566,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("bundle", help="one-shot subject-area bundle")
     sp.add_argument("root")
+    _add_out(sp)
     sp.add_argument("--area", required=True)
     sp.set_defaults(func=cmd_bundle)
 
@@ -2406,7 +2683,47 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("model-tree", help="browsable area→table→column tree (incl. rejected)")
     sp.add_argument("root")
+    _add_out(sp)
     sp.set_defaults(func=cmd_model_tree)
+
+    sp = sub.add_parser("batch-id", help="print a fresh stamp for one batch of subagents' input and result file names")
+    sp.set_defaults(func=cmd_batch_id)
+
+    sp = sub.add_parser("wait-files", help="wait until every --file exists and is non-empty, or --wait seconds pass; keeps the turn open while background subagents finish")
+    sp.add_argument("--file", action="append", required=True, help="a result file to wait on (repeatable)")
+    sp.add_argument("--wait", type=float, default=0.0,
+                    help=f"wait up to this many seconds (default 0: check once; at most {WAIT_FILES_MAX})")
+    sp.set_defaults(func=cmd_wait_files)
+
+    sp = sub.add_parser("progress", help="the build's latest progress line, ready to post, with a bar from its own counts; --wait N returns when the log moves on")
+    sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
+    sp.add_argument("--wait", type=float, default=0.0,
+                    help="wait up to this many seconds for the next line (default 0: answer now); "
+                         "adds `list`, the step list `sm steps` prints")
+    sp.set_defaults(func=cmd_progress)
+
+    sp = sub.add_parser("steps", help="the onboarding step list, status and counts read from disk, as a short list to copy; --mark <id>=<status> records a step first")
+    sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile> (need not exist yet)")
+    sp.add_argument("--full", action="store_true",
+                    help="print every step's id, label, status and count and the timeline path, not the short list")
+    sp.add_argument("--mark", action="append", default=[], metavar="ID=STATUS",
+                    help="mark a step in_progress, done or skipped (repeatable, applied in order)")
+    sp.set_defaults(func=cmd_steps)
+
+    sp = sub.add_parser("timing", help="how long onboarding took, from the step marks: seconds per step, the total, and a 'Set up in …' line")
+    sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
+    sp.set_defaults(func=cmd_timing)
+
+    sp = sub.add_parser("summary", help="the onboarding's closing summary as markdown, ready to post: totals, the per-area table, what waits for sign-off, and the 'Set up in …' line")
+    sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
+    sp.add_argument("--json", action="store_true",
+                    help='print {"markdown": <the same text>, "totals": {...}} instead')
+    sp.set_defaults(func=cmd_summary)
+
+    sp = sub.add_parser("overview", help="per-area numbers for an overview card: tables, %% described, metrics/joins (and how many await sign-off), examples")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_overview)
+
 
     sp = sub.add_parser("coverage", help="per-table column-description coverage + enrichment-completeness verdict (ok:false ⇒ columns were skipped)")
     sp.add_argument("root")
@@ -2671,6 +2988,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "database keeps one (never a count) — for the table picker page")
     sp.set_defaults(func=cmd_discover)
 
+    _no_abbreviations(p)
     return p
 
 
@@ -2733,6 +3051,8 @@ def main(argv=None) -> int:
     _enter_caller_cwd()
     args = _parse_args(argv)
     try:
+        if getattr(args, "out_file", None):
+            return _run_to_out(args)
         return args.func(args)
     except FileNotFoundError as e:
         # No model at this root yet. This is an expected, clean signal (not a crash):
