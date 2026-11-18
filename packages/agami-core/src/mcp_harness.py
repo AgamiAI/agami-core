@@ -87,8 +87,8 @@ def _handle_tools_list(req_id: Any) -> None:
                 "name": name,
                 "description": tool_description(name, meta["description"]),
                 "inputSchema": meta["inputSchema"],
-                # Omitted, not null, for a tool that declares none — optional on the wire.
-                **({"annotations": hints} if (hints := tool_annotations(meta)) else {}),
+                # Every tool states its title and hints, as the HTTP server does.
+                "annotations": tool_annotations(meta, name),
             }
             for name, meta in TOOLS.items()
         ]

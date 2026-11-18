@@ -5545,27 +5545,46 @@ def tool_description(name: str, description: str) -> str:
     return description.replace(_EXECUTE_SQL_LIMITS_AT_IMPORT, _execute_sql_limits_sentence())
 
 
-def tool_annotations(meta: dict[str, Any]) -> dict[str, bool] | None:
-    """The MCP tool annotations a registry entry advertises, in the spec's field names, or None for
-    an entry that declares none. Called by both MCP servers at list-tools time so the two transports
-    state the same hints.
+def tool_title(name: str, meta: dict[str, Any]) -> str:
+    """The human-readable title a tool advertises: the entry's own `title` when it declares one,
+    else its name as a sentence (`list_datasources` -> "List datasources"). Every tool gets one
+    because Claude's connector directory rejects a tool without a title, and a consumer tool
+    registered without one should not be the reason a deployment cannot be listed."""
+    title = meta.get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    return name.replace("_", " ").strip().capitalize()
+
+
+def tool_annotations(meta: dict[str, Any], name: str | None = None) -> dict[str, Any]:
+    """The MCP tool annotations a registry entry advertises, in the spec's field names. Called by
+    both MCP servers at list-tools time so the two transports state the same hints.
 
     `read_only: True` becomes `readOnlyHint` with `destructiveHint` off — the spec defaults that one
     to ON, so leaving it implicit would contradict the read-only claim. The hints are what a client's
     confirmation policy keys off: Gemini Enterprise assumes an un-annotated tool can mutate data and
     asks the person before each call, so a reading tool without the hint costs a prompt per query,
     per distinct argument set. Opt-in, and only by the literal `True`: an entry without the flag, or
-    with a config-sourced `"false"` string on it, advertises nothing and keeps whatever caution the
-    client applies by default, which is what a consumer tool that writes (feedback, say) must get.
-    Every core tool carries the flag because every one reads — the three model lookups by
-    construction, `execute_sql` by the guard, which admits one SELECT and nothing else."""
-    if meta.get("read_only") is not True:
-        return None
-    return {"readOnlyHint": True, "destructiveHint": False}
+    with a config-sourced `"false"` string on it, is stated as a write (`readOnlyHint` off,
+    `destructiveHint` on). That is the same caution a client applies to an un-annotated tool, made
+    explicit, because Claude's connector directory requires every tool to state one hint or the
+    other and flags a tool that states neither. Every core tool carries the flag because every one
+    reads — the three model lookups by construction, `execute_sql` by the guard, which admits one
+    SELECT and nothing else.
+
+    With `name`, the annotations also carry the tool's `title` (see `tool_title`)."""
+    if meta.get("read_only") is True:
+        hints: dict[str, Any] = {"readOnlyHint": True, "destructiveHint": False}
+    else:
+        hints = {"readOnlyHint": False, "destructiveHint": True}
+    if name is not None:
+        hints = {"title": tool_title(name, meta), **hints}
+    return hints
 
 
 TOOLS: dict[str, dict[str, Any]] = {
     "list_datasources": {
+        "title": "List datasources",
         "handler": tool_list_datasources,
         # Advertised as the MCP `readOnlyHint`; see `tool_annotations` for why and for the bar a
         # tool must clear to carry it.
@@ -5608,6 +5627,7 @@ TOOLS: dict[str, dict[str, Any]] = {
         },
     },
     "get_datasource_schema": {
+        "title": "Get datasource schema",
         "handler": tool_get_datasource_schema,
         "read_only": True,
         "description": (
@@ -5730,6 +5750,7 @@ TOOLS: dict[str, dict[str, Any]] = {
         },
     },
     "get_prompt_examples": {
+        "title": "Get example queries",
         "handler": tool_get_prompt_examples,
         "read_only": True,
         "description": (
@@ -5800,6 +5821,7 @@ TOOLS: dict[str, dict[str, Any]] = {
         },
     },
     "execute_sql": {
+        "title": "Run read-only SQL",
         "handler": tool_execute_sql,
         "read_only": True,
         "description": (

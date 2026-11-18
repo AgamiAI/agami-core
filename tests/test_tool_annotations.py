@@ -1,4 +1,5 @@
-"""Read-only tools advertise the MCP `readOnlyHint` on both transports, and only they do.
+"""Read-only tools advertise the MCP `readOnlyHint` on both transports, and only they do; every other
+tool states itself as a write, and every tool carries a title.
 
 Why the hint exists, and the bar a tool must clear to carry it, is stated once at
 `tools.tool_annotations`. These tests hold the wire shape, the opt-in, and that the two MCP servers
@@ -15,9 +16,10 @@ import subprocess
 import sys
 
 import pytest
-from tools import TOOLS, register, require_thread_id, tool_annotations
+from tools import TOOLS, register, require_thread_id, tool_annotations, tool_title
 
 READ_ONLY = {"readOnlyHint": True, "destructiveHint": False}
+WRITE = {"readOnlyHint": False, "destructiveHint": True}
 
 
 def _consumer_tool() -> dict:
@@ -36,15 +38,17 @@ def test_every_core_tool_claims_read_only(name):
     assert tool_annotations(TOOLS[name]) == READ_ONLY
 
 
-def test_a_tool_without_the_flag_advertises_nothing():
-    """Opt-in, not inferred: the server cannot tell a write from a read except by the flag."""
-    assert tool_annotations(_consumer_tool()) is None
+def test_a_tool_without_the_flag_is_stated_as_a_write():
+    """Opt-in, not inferred: the server cannot tell a write from a read except by the flag, so a tool
+    without it is stated as one that may modify data, the caution a client would apply anyway. Claude's
+    connector directory flags a tool that states neither hint."""
+    assert tool_annotations(_consumer_tool()) == WRITE
 
 
 @pytest.mark.parametrize("value", ["true", "false", 1, 1.0, None])
 def test_only_the_literal_true_counts(value):
     """A config-sourced string or a truthy number must not promote a writing tool to unconfirmed."""
-    assert tool_annotations({**_consumer_tool(), "read_only": value}) is None
+    assert tool_annotations({**_consumer_tool(), "read_only": value}) == WRITE
 
 
 def test_the_flag_survives_the_thread_id_promotion():
@@ -57,7 +61,7 @@ def test_register_can_opt_a_consumer_read_in_and_defaults_out():
         register("t_read", lambda a: "ok", "reads", {"type": "object"}, read_only=True)
         register("t_write", lambda a: "ok", "writes", {"type": "object"})
         assert tool_annotations(TOOLS["t_read"]) == READ_ONLY
-        assert tool_annotations(TOOLS["t_write"]) is None
+        assert tool_annotations(TOOLS["t_write"]) == WRITE
     finally:
         TOOLS.pop("t_read", None)
         TOOLS.pop("t_write", None)
@@ -99,8 +103,9 @@ def _listed_over_http(registry: dict | None = None) -> dict:
 def test_http_lists_the_hint_in_the_spec_field_names():
     listed = _listed_over_http({**TOOLS, "log_note": _consumer_tool()})
     wire = listed["execute_sql"].model_dump(by_alias=True, exclude_none=True)
-    assert wire["annotations"] == READ_ONLY
-    assert listed["log_note"].annotations is None
+    assert wire["annotations"] == {"title": "Run read-only SQL", **READ_ONLY}
+    note = listed["log_note"].model_dump(by_alias=True, exclude_none=True)
+    assert note["annotations"] == {"title": "Log note", **WRITE}
 
 
 def test_create_app_refuses_a_non_bool_flag(monkeypatch):
@@ -137,4 +142,30 @@ def test_stdio_lists_the_same_hints():
     by_id = {m.get("id"): m for m in map(json.loads, filter(str.strip, proc.stdout.splitlines()))}
     tools = by_id[2]["result"]["tools"]
     assert {t["name"] for t in tools} == set(TOOLS)
-    assert all(t["annotations"] == READ_ONLY for t in tools)
+    assert all(
+        t["annotations"] == {"title": tool_title(t["name"], TOOLS[t["name"]]), **READ_ONLY}
+        for t in tools
+    )
+
+
+# --- Titles ------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", sorted(TOOLS))
+def test_every_core_tool_lists_a_title(name):
+    """Claude's connector directory rejects a tool without a title."""
+    assert tool_annotations(TOOLS[name], name)["title"]
+
+
+def test_title_is_the_name_as_a_sentence_unless_declared():
+    assert tool_title("list_datasources", {}) == "List datasources"
+    assert (
+        tool_title("list_datasources", {"title": "  List the datasources "})
+        == "List the datasources"
+    )
+    assert tool_title("list_datasources", {"title": "   "}) == "List datasources"
+
+
+def test_without_a_name_the_hints_carry_no_title():
+    """Callers that only want the hints (and consumers' own tests) keep the old shape."""
+    assert "title" not in tool_annotations(TOOLS["execute_sql"])
