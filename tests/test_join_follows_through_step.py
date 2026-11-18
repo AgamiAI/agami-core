@@ -1,6 +1,6 @@
 """A join reached through a step, keyed on exactly a declared relationship's key, names it.
 
-The live shape (2026-11-18): a step lists the distinct parent keys a child table holds
+A common shape: a step lists the distinct parent keys a child table holds
 (`SELECT DISTINCT oi.order_id FROM order_items oi WHERE ...`), and the parent table is LEFT JOINed to
 it on that key. The step de-duplicates, so it never stands for `order_items` in the join's status or
 the double-counting analysis (`undeclarable`, as before). But the key it hands on is
@@ -32,7 +32,7 @@ from semantic_model import runtime as rt  # noqa: E402
 
 from test_semantic_model_runtime import _sales_org  # noqa: E402
 
-# The shape of the live statement: a de-duplicated key list, joined to its parent inside a second
+# A common shape: a de-duplicated key list, joined to its parent inside a second
 # step that groups, read by an outer query.
 LIVE_SHAPE = (
     "WITH orders_with_items AS ("
@@ -132,3 +132,15 @@ def test_a_join_between_two_tables_or_a_row_for_row_step_carries_no_follows():
         "SELECT COUNT(o.id) AS n FROM orders o JOIN oi ON oi.order_id = o.id"
     )
     assert stood["status"] == rt.DECLARED and stood["follows"] is None
+
+
+def test_a_sampled_key_list_still_follows_the_relationship():
+    """Decision: sampling only drops rows, like a WHERE or a DISTINCT, so every key the step hands on
+    still comes from `order_items.order_id`; the join is keyed on the relationship. The status stays
+    `undeclarable`, so the sample still never stands for the table in the double-counting check."""
+    item = _only_join(
+        "WITH w AS (SELECT DISTINCT order_id FROM order_items TABLESAMPLE BERNOULLI (10)) "
+        "SELECT COUNT(o.id) AS n FROM orders o JOIN w ON w.order_id = o.id"
+    )
+    assert item["status"] == rt.UNDECLARABLE
+    assert item["follows"]["name"] == "order_items_to_orders"

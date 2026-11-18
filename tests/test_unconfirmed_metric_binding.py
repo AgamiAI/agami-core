@@ -1,7 +1,7 @@
 """A figure written as a metric's binding, word for word, but joined in a way the check cannot
 compare, names the metric it could not be confirmed as.
 
-The live shape (2026-11-18): a metric over two tables, its binding written unqualified, and a
+A common shape: a metric over two tables, its binding written unqualified, and a
 statement that used the binding verbatim with the two tables' aliases, LEFT JOINing the many side
 with an extra condition in the ON. The binding does not say how its tables are joined, and under a
 LEFT JOIN the rows with no match still count (`handoffs = 0` needs no event), so the number can
