@@ -72,6 +72,10 @@ agami_artifacts_dir() {
 # On POSIX a `local/` another user owns, or one chmod can't make 0700, fails closed (stderr, return 1,
 # nothing made in it), as agami_paths.ensure_local_dir does: that user could change it back, and the
 # credentials and `.config` go in next. Git Bash on Windows has no such mode to check.
+# The way out is another folder, but `sm choose-folder` and `py connect_resolve.py` start here too, so
+# the refusal names the form that works: AGAMI_ARTIFACTS_DIR set to the new folder for that one call,
+# which then checks (and makes) nothing in the old one, and saves the new folder for every call after.
+_RECOVER="To use another folder, run: AGAMI_ARTIFACTS_DIR=\"<new folder>\" bash \"${_PY_VERSION_HELPER%/*}/sm\" choose-folder \"<new folder>\""
 _local_is_mine() { [ -O "$1" ]; }
 _windows_shell() { case "$(uname -s 2>/dev/null || true)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; esac; return 1; }
 agami_scratch_dir() {
@@ -82,11 +86,11 @@ agami_scratch_dir() {
     [ -d "$art/local" ] || mkdir -m 700 "$art/local" 2>/dev/null || true
     if [ -d "$art/local" ] && ! _windows_shell; then
       if ! _local_is_mine "$art/local"; then
-        echo "agami: $art/local belongs to another user, so agami won't keep credentials or settings in it. Choose another artifacts folder, or have its owner remove it." >&2
+        echo "agami: $art/local belongs to another user, so agami won't keep credentials or settings in it. Choose another artifacts folder, or have its owner remove it. ${_RECOVER}" >&2
         return 1
       fi
       if ! chmod 700 "$art/local" 2>/dev/null; then
-        echo "agami: $art/local could not be made private (0700), so agami won't keep credentials or settings in it until it can be." >&2
+        echo "agami: $art/local could not be made private (0700), so agami won't keep credentials or settings in it until it can be. ${_RECOVER}" >&2
         return 1
       fi
     else

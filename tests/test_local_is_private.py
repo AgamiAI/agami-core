@@ -246,3 +246,46 @@ def test_sm_stops_before_running_anything_in_a_local_it_cannot_make_private(tmp_
         )
         assert r.returncode == 2, (script, r.stderr)
         assert "0700" in r.stderr, script
+
+
+# #699: the refusal above must leave a way out. `sm choose-folder` and `py connect_resolve.py` are the
+# recovery, but they start through the same launchers, so the message names the one form that works:
+# AGAMI_ARTIFACTS_DIR set to the new folder for that call, so nothing is checked or made in the old one.
+
+
+def _unsafe_old_folder(tmp_path: Path) -> tuple[Path, dict]:
+    home, old = tmp_path / "home", tmp_path / "old"
+    (old / "local").mkdir(parents=True)
+    (home / ".config" / "agami").mkdir(parents=True)
+    (home / ".config" / "agami" / "path").write_text(f"{old}\n")
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    (shims / "chmod").write_text("#!/bin/sh\nexit 1\n")
+    os.chmod(shims / "chmod", 0o755)
+    env = {k: v for k, v in os.environ.items() if k != "AGAMI_ARTIFACTS_DIR"}
+    env.update(
+        HOME=str(home),
+        AGAMI_PYTHON=sys.executable,
+        PATH=f"{shims}{os.pathsep}{os.environ['PATH']}",
+    )
+    return old, env
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
+def test_a_refused_local_names_the_recovery_and_the_recovery_works(tmp_path):
+    old, env = _unsafe_old_folder(tmp_path)
+    r = subprocess.run(
+        ["bash", str(SCRIPTS / "sm"), "choose-folder", str(tmp_path / "new")],
+        env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 2 and "0700" in r.stderr
+    assert "AGAMI_ARTIFACTS_DIR=" in r.stderr and "choose-folder" in r.stderr, r.stderr
+    new = tmp_path / "new"
+    r = subprocess.run(
+        ["bash", str(SCRIPTS / "sm"), "choose-folder", str(new)],
+        env={**env, "AGAMI_ARTIFACTS_DIR": str(new)}, capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    pointer = Path(env["HOME"]) / ".config" / "agami" / "path"
+    assert pointer.read_text().strip() == str(new.resolve())
+    assert not (old / "local" / "tmp").exists()
