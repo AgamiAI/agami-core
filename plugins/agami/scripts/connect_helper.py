@@ -46,6 +46,7 @@ import platform
 import re
 import secrets
 import signal
+import stat
 import sys
 import tempfile
 import threading
@@ -93,8 +94,11 @@ _STORE_CLEAR = {
 REASONS = (
     "bad_spec", "bad_name", "bad_field", "name_taken", "unreadable_credentials", "stale_install",
     "unsupported_os", "no_store", "saved_password_exists", "store_error", "write_failed", "not_replaceable",
+    "linked_credentials",
 )
 _UNREADABLE = "The credentials file could not be read. Fix or move it, then try again."
+# How Windows marks a symlink or a junction; `lstat` reports it in `st_file_attributes`.
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _HEADER_RE = re.compile(r"\s*\[(.+?)\]\s*$")
 
 
@@ -194,6 +198,24 @@ def _name_problem(creds: Path, profile: str) -> tuple[str, str] | None:
     """(reason, detail) when a new profile cannot take this name because the file already has it."""
     if profile in _existing_profiles(creds):
         return "name_taken", f"A profile named {profile} already exists. Pick another name, or use --replace to change its password."
+    return None
+
+
+def _linked_problem(creds: Path) -> tuple[str, str] | None:
+    """(reason, detail) when `local/` or the credentials file is a link, or the file has a second name
+    (a hard link), else None. A write would land wherever it points, in a folder whose owner can read
+    or change it, not in the private 0700 `local/`. Checked with `lstat`, which follows neither."""
+    for path in (creds.parent, creds):
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        linked = stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & _REPARSE_POINT)
+        if linked or (path == creds and stat.S_ISREG(st.st_mode) and st.st_nlink > 1):
+            return "linked_credentials", (
+                f"{path} is a link to another place, so agami won't write credentials through it. "
+                "Replace it with a real folder or file (move what it points at here), then try again."
+            )
     return None
 
 
@@ -501,7 +523,9 @@ def _store_and_connect(spec: dict[str, Any], secret: str, out: TextIO, *, replac
     creds = agami_paths.credentials_path()
     # Checked again: the file or the store may have changed while the page was open.
     try:
-        problem = _replace_problem(creds, profile) if replace else _name_problem(creds, profile)
+        problem = _linked_problem(creds) or (
+            _replace_problem(creds, profile) if replace else _name_problem(creds, profile)
+        )
     except (configparser.Error, UnicodeDecodeError):
         return _refuse(out, "unreadable_credentials", profile, _UNREADABLE)
     if problem:
@@ -631,7 +655,9 @@ def run(spec: Any, out: TextIO, *, expires_in: float = EXPIRES_IN, replace: bool
         return _refuse(out, "not_replaceable", profile, "An SSO profile has no saved password for --replace to change.")
     creds = agami_paths.credentials_path()
     try:
-        taken = _replace_problem(creds, profile) if replace else _name_problem(creds, profile)
+        taken = _linked_problem(creds) or (
+            _replace_problem(creds, profile) if replace else _name_problem(creds, profile)
+        )
     except (configparser.Error, UnicodeDecodeError):
         return _refuse(out, "unreadable_credentials", profile, _UNREADABLE)
     if taken:

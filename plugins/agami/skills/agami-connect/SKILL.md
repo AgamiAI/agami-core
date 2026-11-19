@@ -277,7 +277,7 @@ The helper exits when the page is submitted or the 5 minutes pass, and that exit
 | `refused`, `bad_name` | `detail`. | The name card (0a.3) again. |
 | `refused`, `bad_field` | `detail` (a field the credentials file can't hold). | The connection fields card (0a.4c) again. |
 | `refused`, `bad_spec` | Nothing to the person: the spec file you wrote is unreadable. | Rewrite it (step 1) and run step 2 again, once. A second `bad_spec`: say connecting failed and offer `Use a file instead (manual)`. |
-| `refused`, `unreadable_credentials` | `detail` (the credentials file under `<artifacts_dir>/local/` can't be parsed). | Card `Next step`: `I've fixed it` (step 2 again) / `Stop`. Never open or print the file: it can hold passwords. |
+| `refused`, `unreadable_credentials` or `linked_credentials` | `detail` (the credentials file under `<artifacts_dir>/local/` can't be parsed, or it or `local/` is a link). | Card `Next step`: `I've fixed it` (step 2 again) / `Stop`. Never open or print the file: it can hold passwords. |
 | `refused`, `unsupported_os` | `detail`. | The file path: 0a.4, then 0a.9. |
 | `refused`, `not_replaceable` | `detail` (`--replace` was run for a profile that doesn't exist or doesn't keep its password in the OS store). | Connect it as a new profile: the name card (0a.3), then step 2 without `--replace`. |
 | `refused`, `store_error` or `write_failed` | `detail` (the store or the credentials file refused the write; nothing was kept). | Card `Next step`: `Try again` (step 2) / `Use a file instead (manual)`. |
