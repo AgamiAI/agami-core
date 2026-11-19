@@ -248,6 +248,11 @@ NOT_CREDITED = {
     # An inner join in effect, which written as INNER is already refused.
     "far_side_not_null": KEYED + " WHERE h.id IS NOT NULL",
     "far_side_in_having": KEYED + " HAVING MAX(h.kind) = 'routing'",
+    # A subquery is not looked inside: a correlated one reads the far side all the same, and
+    # whichever side one reads, it is refused rather than analysed.
+    "far_side_in_exists": KEYED + " WHERE EXISTS (SELECT 1 WHERE h.kind = 'routing')",
+    "subquery_in_where": KEYED
+    + " WHERE t.id IN (SELECT ticket_id FROM public.handoffs WHERE kind = 'routing')",
 }
 
 
@@ -299,6 +304,7 @@ def test_each_refused_shape_counts_something_other_than_its_credited_twin(duck):
     assert got["far_side_in_on"] != got["far_side_in_where"]
     assert got["kept_side_in_on"] != kept_where
     assert got["far_side_not_null"] != keyed
+    assert got["far_side_in_exists"] != keyed and got["subquery_in_where"] != keyed
 
 
 # --- the model and validator ---------------------------------------------------------------------

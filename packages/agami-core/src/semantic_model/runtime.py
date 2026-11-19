@@ -10574,7 +10574,8 @@ def _inner_joins(s: "exp.Select", arm: _ArmRestrictions, wide: frozenset, tr: _T
                                  optional=far[-1][1] if far else None,
                                  optional_ref=far[0][0] if far else None,
                                  exact=id(join) in tr.exact,
-                                 filtered=any(optional & _condition_refs(c, arm) for c in filters))
+                                 filtered=any(optional & _condition_refs(c, arm)
+                                              or _has(c, exp.Select) for c in filters))
         inner.append((line, tables))
 
 
@@ -11609,7 +11610,9 @@ def _declared_join_fits(cand: "MetricCandidate", jm: _JoinMatch, tables: "frozen
     WHERE or HAVING condition anywhere on the path (`rows`, the path's restrictions) reading its
     optional side. Anything more changes the figure in a way the receipt's restriction lines do not
     tell apart: an extra ON key or an ON condition keeps rows a WHERE would drop, and a WHERE on the
-    optional side drops the tickets it null-extended (an inner join in effect). Fails closed."""
+    optional side drops the tickets it null-extended (an inner join in effect). A condition holding
+    a subquery (EXISTS, IN, a scalar one) is never looked inside, so it is not credited whichever
+    side it reads: a correlated one can read the optional side unseen. Fails closed."""
     sources = {_tkey(_bare(t)) for t in (cand.metric.source_tables or [])}
     if not (tables and len(tables) == 2 and tables <= sources):
         return None
@@ -11621,7 +11624,7 @@ def _declared_join_fits(cand: "MetricCandidate", jm: _JoinMatch, tables: "frozen
         return (len(declared) == 1 and declared.get(jm.optional) == "left"
                 and join_status.get(jm.join_id, (None, None))[0] == DECLARED
                 and jm.exact and not jm.filtered and jm.optional_ref is not None
-                and not any(jm.optional_ref in r.refs for r in rows))
+                and not any(jm.optional_ref in r.refs or _has(r.node, exp.Select) for r in rows))
     # A declared inner join fits on the same terms as the LEFT one's key: ON exactly a declared
     # relationship's key. Without it `kind: inner` would credit a join on another relationship.
     return ("left" not in declared.values()
