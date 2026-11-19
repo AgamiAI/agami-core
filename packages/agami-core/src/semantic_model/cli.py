@@ -973,10 +973,71 @@ def cmd_curate(args) -> int:
         return 2
     if isinstance(ops, dict):
         ops = ops.get("ops", [])
+    if args.allow:
+        tables = {t.strip() for t in args.tables.split(",") if t.strip()} if args.tables else None
+        refused = _ops_outside(ops, {f.strip() for f in args.allow.split(",") if f.strip()},
+                               args.area, tables)
+        if refused:
+            _print_json({"applied": 0, "validated": False, "refused": refused,
+                         "error": "nothing applied: every op must be an edit of an allowed field"
+                                  + (f" in area {args.area}" if args.area else "")
+                                  + (" on the named tables" if tables is not None else "")})
+            return 1
+    elif args.area or args.tables:
+        _print_json({"error": "--area and --tables only narrow --allow; give --allow too"})
+        return 2
     _stamp_approve_ops(ops)
     res = curate.apply(args.root, ops, signer=args.signer, role=args.role)
     _print_json(res.as_dict())
     return 0 if res.validated else 1
+
+
+# What an agami-enricher subagent may change, passed as `curate --allow`: descriptions, the "looked,
+# couldn't tell" flag, coded values' labels and a wide table's column groups. Never a sign-off, a hide,
+# an add or a move: the person decides those on cards the subagent can't show.
+ENRICH_FIELDS = ("description", "description_source", "choice_field", "column_groups",
+                 "column_group_descriptions")
+
+
+def _ops_outside(ops: Any, fields: set[str], area: Optional[str],
+                 tables: Optional[set[str]] = None) -> list[str]:
+    """The ops in a batch that do more than edit one of `fields` (in `area`, on `tables`, when given).
+
+    A subagent's proposals are applied with `--allow`, so a batch that would approve, hide, add or
+    touch another area or another chunk's table is refused whole, by the engine rather than by the
+    reader's eye."""
+    if not isinstance(ops, list):
+        return ["the ops file is not a list of ops"]
+    out = []
+    for i, op in enumerate(ops):
+        if (not isinstance(op, dict) or op.get("op") != "edit" or not isinstance(op.get("kind", ""), str)
+                or not isinstance(op.get("field"), str) or op.get("field") not in fields):
+            out.append(f"op {i}: {json.dumps(op, default=str)[:120]}")
+        elif area is not None and op.get("area") != area:
+            out.append(f"op {i}: area {op.get('area')!r}, not {area!r}")
+        elif area is not None and op.get("kind") == "relationship":
+            # curate looks a join up in every area and the cross-area lists when the named area lacks
+            # it, so `area` doesn't hold it in; and a subagent describes tables, the person decides joins.
+            out.append(f"op {i}: a join ({op.get('name')!r}) is not an edit made in area {area!r}")
+        elif tables is not None and (op.get("kind") != "table" or op.get("name") not in tables):
+            out.append(f"op {i}: {op.get('kind')} {op.get('name')!r} is not one of the named tables")
+        elif bad := _path_keys(op):
+            out.append(f"op {i}: {', '.join(bad)} is not a plain name: {json.dumps(op)[:120]}")
+    return out
+
+
+# The kinds whose `name` curate puts into a file path as-is (subject_areas/<area>/tables/<name>.yaml).
+# Entity and metric names are slugged first, and a column is only compared, so a real name like
+# `price/unit` stays allowed.
+_NAME_IS_PATH_KINDS = frozenset({"table", "placeholder"})
+
+
+def _path_keys(op: dict) -> list[str]:
+    """The fields of `op` that would reach a file path and are not plain names: curate joins `area`
+    (and a table's `name`) into a path, so `../tables/x` would edit a file the area check never saw."""
+    keys = ["area"] + (["name"] if op.get("kind") in _NAME_IS_PATH_KINDS else [])
+    return [k for k in keys if k in op
+            and not (isinstance(op[k], str) and not any(s in op[k] for s in ("/", "\\", "..")))]
 
 
 def cmd_approve_queue(args) -> int:
@@ -2913,6 +2974,7 @@ def build_parser() -> argparse.ArgumentParser:
                                         "ranges, frequent values and findings, and every join's check")
     sp.add_argument("root")
     sp.add_argument("--table", nargs="*", default=None, help="only these tables (bare or schema.table)")
+    _add_out(sp)
     sp.set_defaults(func=cmd_profile)
 
     sp = sub.add_parser("choice-coverage", help="coded columns whose choice_field labels are still blank (value-enum decode not done)")
@@ -2955,6 +3017,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "stamps it on the item as its sign-off (an approve needs it), while an edit to what an "
                          "approved item computes or connects sends it back to review as stale")
     sp.add_argument("--role", default=None, help="the signer's role, recorded and stamped with --signer")
+    sp.add_argument("--allow", default=None, metavar="FIELD,FIELD",
+                    help="comma-separated: refuse the whole batch unless every op is an edit of one "
+                         "of these fields (for proposals a subagent returned)")
+    sp.add_argument("--area", default=None,
+                    help="with --allow: refuse the batch unless every op is in this subject area")
+    sp.add_argument("--tables", default=None, metavar="T1,T2",
+                    help="with --allow: refuse the batch unless every op edits one of these tables")
     sp.set_defaults(func=cmd_curate, after_parse=lambda a, extra, sp=sp: _one_ops_file(sp, a, extra))
 
     sp = sub.add_parser("history", help="the model's curation log, newest first (what changed, when, by whom, the prior value)")
