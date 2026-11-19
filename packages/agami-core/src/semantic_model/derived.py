@@ -660,14 +660,14 @@ def _join_edge(metric_name: str, anchor: str, other: str, base, org):
     return rel
 
 
-def _join_sql(rel, other: str, storage_type: str) -> str:
+def _join_sql(rel, other: str, storage_type: str, kind: str = "inner") -> str:
     if rel.on:
         cond = rel.on
     else:
         left = f"{_ident(bare_name(rel.from_table), storage_type)}.{_ident(rel.from_column, storage_type)}"
         right = f"{_ident(bare_name(rel.to_table), storage_type)}.{_ident(rel.to_column, storage_type)}"
         cond = f"{left} = {right}"
-    return f" INNER JOIN {_table_ref(other, storage_type)} ON {cond}"
+    return f" {'LEFT' if kind == 'left' else 'INNER'} JOIN {_table_ref(other, storage_type)} ON {cond}"
 
 
 def _table_def(name: str, org, base=None):
@@ -799,7 +799,10 @@ def _measured_tables(inner_sql: str, base, froms: list[str], org, storage_type: 
 
 def _from_clause(metric_name: str, base, froms: list[str], org, storage_type: str,
                  inner_sql: str) -> str:
-    """FROM the anchor table, INNER JOINed directly to each other source table."""
+    """FROM the anchor table, joined directly to each other source table the way the base metric
+    declares (`Metric.joins`: LEFT where it keeps the anchor's rows without that table), else
+    INNER. A declared LEFT join that keeps the other tables' rows without the anchor would need the
+    anchor on the optional side, which joining from it cannot write: refused."""
     if org is None:
         raise DerivedError(
             f"second-order metric {metric_name!r}: its base spans {froms}, and joining them "
@@ -814,11 +817,19 @@ def _from_clause(metric_name: str, base, froms: list[str], org, storage_type: st
             f"from different schemas ({clash}); synthesis can't tell them apart"
         )
     anchor = _anchor(metric_name, base, froms, org, storage_type, inner_sql)
+    kinds = {table_key(j.table, None)[1].lower(): j.kind for j in getattr(base, "joins", None) or ()}
+    if kinds.get(table_key(anchor, None)[1].lower()) == "left":
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: its base metric {base.name!r} declares a left "
+            f"join that keeps rows without {anchor!r}, the table it measures; that outer join "
+            "can't be composed yet"
+        )
     sql = _table_ref(anchor, storage_type)
     for other in froms:
         if other == anchor:
             continue
-        sql += _join_sql(_join_edge(metric_name, anchor, other, base, org), other, storage_type)
+        sql += _join_sql(_join_edge(metric_name, anchor, other, base, org), other, storage_type,
+                         kinds.get(table_key(other, None)[1].lower(), "inner"))
     return sql
 
 
@@ -838,7 +849,8 @@ def synthesize_second_order(metric, storage_type: str, idx: dict, org=None) -> s
     Raises DerivedError if the shape isn't `OUTERAGG({base})`, the base is unknown / not a
     plain aggregate, `inner_grain` is empty, it has no source table, or a multi-table join
     can't be built safely (an unclear anchor, no direct edge, several edges, a fan-out, an
-    unresolvable grain)."""
+    unresolvable grain, a declared left join that keeps
+    rows without the measured table)."""
     binding = (getattr(metric, "bindings", None) or {}).get(storage_type)
     if binding is None:
         raise DerivedError(f"metric {metric.name!r} has no {storage_type} binding")
