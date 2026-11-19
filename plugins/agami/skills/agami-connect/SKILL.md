@@ -1661,7 +1661,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" steps "<root>" --mark reports=skipped
 
 ## Phase 7: Post-introspect summary (MANDATORY — NEVER SKIP)
 
-**Sequencing gate (read first):** Phases 7–8 run **only after the user has finished validating** — i.e. after every Phase 6 example has an answer on a card (or, in the full view, they sent `done`), and after the Phase 4 cards were answered. **Never print this summary or the Phase 8 closing while a review or examples card is still unanswered** (a full view page being open doesn't hold it: the page is read-only and its card is asked again) — wait for the person, don't summarize over them.
+**Sequencing gate (read first):** Phases 7–8 run **only after the user has finished validating** — i.e. after every Phase 6 example has an answer on a card (or, in the full view, they sent `done`), and after the Phase 4 cards were answered. **Never print this summary or the Phase 8 closing while a review or examples card is still unanswered** (a full view page being open doesn't hold it: the page is read-only and its card is asked again) — wait for the person, don't summarize over them. **The closing message ends onboarding's last turn, and no card follows it** ([long-text.md](../../shared/long-text.md)): Phases 7 and 8 are one message, with every call (Phase 8.5, the overview card's tiles, the step mark, `sm summary`) made first.
 
 Runs on **every** invocation that produces or refreshes a model — even if Phase 4 found nothing and all entries auto-approved.
 
@@ -1684,11 +1684,13 @@ When 2g ran, one line from its answers: *"<k> answers recorded as yours; <n> que
 
 When 2f drafted the company description, show it too, in one line: *"Company (draft): <description>. Correct it in /agami-model."* After the block, state the datasource's one-line description from `datasource.yaml` — *"Agents will pick this datasource by: "<description>" — edit it any time with `sm set-description`."* If you generated it in 2f, say it is a draft. If it is empty (they skipped 1.4 C), say so in one line: an organization with several datasources routes questions by this line.
 
-Then **AskUserQuestion**: `Review what needs sign-off` (→ `/agami-model review` — approve or reject the pending metrics/entities on cards; when that review ends, come back here to Phase 8, the starter questions, rather than agami-model's overview card, so onboarding still ends on a first question) / `See the model` (→ `/agami-model` — the overview in the chat, then hide tables or columns) / `Show the full view` (→ `/agami-model`'s Phase 5: the model explorer page served from localhost; give the URL, then this card again) / `Skip — I'll review later` (default). If a sibling skill isn't built yet, omit that option — don't error.
+Then Phase 8's list, in the same message, which ends with the reply line: *Reply with a number, or "review" to sign off what's waiting, "model" to see and refine it, "full view" for the model explorer, or ask your own question.* No card follows: the closing message is the turn's last message, and the person's reply is handled as Phase 8 says. Where nothing is waiting for sign-off, leave "review" out; where a sibling skill isn't built yet, leave its word out — don't error.
 
 ---
 
-## Phase 8: Follow-up suggestions
+## Phase 8: Follow-up suggestions, and the replies
+
+This is the end of the closing message, not a message of its own (Phase 7).
 
 (No telemetry — agami has none; don't surface anything about it.)
 
@@ -1727,7 +1729,16 @@ The model keeps improving as you use it:
 • /agami-model — the model in the chat: sign off metrics/joins/entities, hide tables
   or columns you don't want queried, add metrics, and edit descriptions.
 ```
-End the turn, with the last step still in progress: "Summary and first question" is done when the first question is answered, not when it is offered, and agami-query marks it done then. Picking a number routes the question into query-database. Keep each suggestion under 80 chars and grounded in real tables.
+End the turn, with the last step still in progress, on the reply line: "Summary and first question" is done when the first question is answered, not when it is offered, and agami-query marks it done then. Picking a number routes the question into query-database. Keep each suggestion under 80 chars and grounded in real tables.
+
+**The person's reply** (words that mean one of these count as it; a question about the closing message is answered first, [question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again); a reply you can't place is asked about in one line, never guessed):
+
+| Reply | Do |
+|---|---|
+| A number, or a question of their own | [agami-query](../agami-query/SKILL.md). |
+| "review" | `/agami-model review` (approve or reject the pending metrics and entities on cards). When that review ends, come back here to Phase 8, the starter questions, rather than agami-model's overview card, so onboarding still ends on a first question. |
+| "model" | `/agami-model`: the overview in the chat, then hide tables or columns. |
+| "full view" | `/agami-model`'s Phase 5: the model explorer page served from localhost. Give the URL and end the turn on the same reply line. |
 
 ---
 

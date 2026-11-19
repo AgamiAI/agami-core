@@ -223,7 +223,7 @@ def test_review_cards_offer_a_page_that_saves_on_every_question() -> None:
     # (#651): the page was offered on the first question of a card only, and could not take a decision.
     review = _review()
     assert review.count("- **Review on a page**") == 2      # the Sign-off card and the item cards
-    assert "| Review on a page | Phase 5 with `initial_tab=review`, then this card again, recounted. |" in review
+    assert "| Review on a page | Phase 5 with `initial_tab=review`, then the list again, recounted, ending its turn on the reply line. |" in review
     assert "Offer it on every question of the card, not only the first" in review
     assert "first question only" not in _text()
     assert "Then ask again the card it was picked on" in _full_view()

@@ -614,9 +614,9 @@ def test_6a_asks_its_fix_on_a_card():
         assert label in s
 
 
-def test_review_from_phase_7_returns_to_the_starter_questions():
-    s = _between("## Phase 7:", "## Phase 8:")
-    line = next(ln for ln in s.splitlines() if "Review what needs sign-off" in ln)
+def test_review_from_the_closing_message_returns_to_the_starter_questions():
+    s = _between("## Phase 8:", "## Phase 8.5:")
+    line = next(ln for ln in s.splitlines() if ln.startswith('| "review"'))
     assert "Phase 8" in line
 
 
@@ -740,8 +740,8 @@ def test_review_cards_offer_the_full_view_as_an_option():
     assert "and **Mark them on a page** (the page below, on every question of the card" in six  # item cards
     assert "| Review on a page |" in four and "| Mark them on a page |" in six
     assert "first question only" not in four + six
-    phase_7 = _phase("## Phase 7", "## Phase 8")
-    assert "`Show the full view`" in phase_7
+    phase_8 = _phase("## Phase 8:", "## Phase 8.5")
+    assert '| "full view" |' in phase_8
 
 
 def test_currency_and_flag_rate_asks_name_columns_in_words():
