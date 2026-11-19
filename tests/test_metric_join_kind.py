@@ -1,11 +1,11 @@
 """A two-table metric can say how its tables join, and a figure written as its binding over that
 join is credited as the metric.
 
-The live shape (2026-11-18): an approved first-contact-resolution count over tickets and their
+The shape: an approved first-contact-resolution count over tickets and their
 handoff history, written word for word with a LEFT JOIN, which is right for it — a ticket never
 handed off has no history row. Its binding does not say how the tables join, and an outer join's
 null-extended rows can change the figure, so the receipt left it `undetermined` with `unconfirmed`
-naming the metric (ACE-177 item 8). A metric now declares `joins: [{table, kind}]`; a statement
+naming the metric. A metric now declares `joins: [{table, kind}]`; a statement
 whose join between the metric's tables is that kind, on a declared relationship's key, is matched.
 Any other join stays exactly as before: fail closed.
 """
@@ -46,7 +46,7 @@ WRITTEN = (
     .replace("value", "h.value")
     .replace("THEN number", "THEN t.number")
 )
-# The key alone, and the live shape: the key plus a condition on the history in the ON. Without a
+# The key alone, and the usual shape: the key plus a condition on the history in the ON. Without a
 # declaration the second is the one left unconfirmed (an ON condition on the optional side, whose
 # null-extended rows still count); the first, undeclared, is still read as a join that keeps only
 # the tickets with a history row, unchanged here.
@@ -335,6 +335,24 @@ def test_curate_edits_a_metrics_joins(tmp_path):
     assert res.validated, res.errors
     doc = yaml.safe_load((root / "subject_areas/sales/metrics/revenue.yaml").read_text())
     assert "joins" not in doc, "clearing the joins removes the key"
+
+
+def test_a_joins_only_edit_on_an_approved_metric_sends_it_back_to_review(tmp_path):
+    root = tmp_path / "demo"
+    _write_model(root)
+    kw = {"signer": "editor@example.com", "role": "analyst"}
+    # reach a state where the metric reads both tables and is approved, then change only its joins
+    curate.apply(root, [_edit("metric", "revenue", "source_tables", ["orders", "customers"])], **kw)
+    res = curate.apply(
+        root, [{"op": "approve", "kind": "metric", "area": "sales", "name": "revenue"}], **kw)
+    assert res.validated, res.errors
+    met = L.load_datasource(root, include_rejected=True).subject_areas[0].metrics[0]
+    assert met.review_state == "approved"
+    res = curate.apply(
+        root, [_edit("metric", "revenue", "joins", [{"table": "customers", "kind": "left"}])], **kw)
+    assert res.validated, res.errors
+    met = L.load_datasource(root, include_rejected=True).subject_areas[0].metrics[0]
+    assert met.review_state == "stale", "a joins-only edit changes what the metric counts"
 
 
 def test_curate_refuses_a_join_on_a_table_the_metric_does_not_read(tmp_path):

@@ -640,6 +640,8 @@ The person's next message, read for what it says (the four replies keep the old 
 | Show as a chart | Phase 4e: a bar chart drawn here in the chat (4e.iii, then 4e.iii-b). The HTML report (4e.iv–vi) only when the person then asks for the full view. |
 | Sign off the definitions used | The identity card first if `reviewer_email` / `reviewer_role` aren't in `<artifacts_dir>/local/.config` (the one in [agami-model Phase 0](../agami-model/SKILL.md#phase-0-preflight)); its **Don't sign anything yet** signs nothing here and goes on to the star ask (4e.5), since there is no overview card in this skill. Otherwise one batch, `{"op":"approve","kind":"metric","area":"<area>","name":"<name>"}` per unsigned model metric in the receipt, written with the Write tool and applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. A `stale` one: say what changed in the line before, from its `changes_since_approval` in `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope rule1`. An ad-hoc metric isn't in the model, so it can't be signed off; offer to save it as a metric through agami-save-correction. |
 
+**The star ask comes first.** When one of the four replies above arrives and 4e.5's gate says to ask, ask the star card first at the start of the next turn, then handle the reply. A number or a new question never triggers it.
+
 **Any other reply:** a new data question is answered as one (Phase 2). A question about this answer ("show me the SQL", "why these tables?") is answered first, as [question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again) says, ending on the same reply line again. Anything else you can't place is said back in one line, asking what they meant; never guess. After one of the four replies is handled: the one-time star ask (4e.5); never right after a new question's answer.
 
 ### 4e — Show as a chart: drawn in the chat; the HTML report is the full view
@@ -788,7 +790,7 @@ The page is read-only (`--read-only`): the reply to the answer (4d.2) is where t
 
 ### 4e.5 — GitHub-star ask (one-time, after the reply to an answer)
 
-**This step is required once the person's reply to an answer (4d.2) is handled, never in the same turn as the answer.** An answer's turn ends on its reply line; the star ask is a card, and a card never follows an answer.
+**This step is required when the person's reply to an answer (4d.2) arrives, asked before that reply is handled and never in the same turn as the answer.** An answer's turn ends on its reply line; the star ask is a card, and a card never follows an answer.
 
 ```bash
 test -f <artifacts_dir>/local/.optins
@@ -797,7 +799,7 @@ test -f <artifacts_dir>/local/.optins
 **Sample-profile exception (check first):** if `active_profile` is `agami-example`, **skip this star modal entirely** — don't prompt someone to star off the throwaway sample dataset. The sample's one-time orientation footer (4f) carries a single-line star mention instead.
 
 - **Exit 0** (`.optins` exists) — skip this step.
-- **Exit 1** (`.optins` missing) AND the person's reply to the answer (4d.2) has just been handled, one of the four replies, never a new question's answer — surface the GitHub-star ask via `AskUserQuestion`, never in the turn that posted the answer, whose last message is the reply line. Its answer comes back in the same turn as the ask; handle it and the `/agami-serve` pointer, then carry on with what the reply asked for. Full ask + handling in [Phase 6 below](#phase-6-post-install-github-star-ask-full-spec--triggered-from-phase-4e5); the trigger lives here (not only in Phase 6) so it fires after that reply. **Read Phase 6's two HARD RULES (verbatim prose, literal URL `https://github.com/AgamiAI/agami-core`) before emitting.**
+- **Exit 1** (`.optins` missing) AND the person's reply to the answer (4d.2) has just arrived, one of the four replies, never a number or a new question — surface the GitHub-star ask via `AskUserQuestion`: ask the star card first at the start of the next turn, then handle the reply (never in the turn that posted the answer, whose last message is the reply line). A number or a new question never triggers it. Its answer comes back in the same turn as the ask; handle it and the `/agami-serve` pointer, then carry on with what the reply asked for. Full ask + handling in [Phase 6 below](#phase-6-post-install-github-star-ask-full-spec--triggered-from-phase-4e5); the trigger lives here (not only in Phase 6) so it fires once that reply arrives. **Read Phase 6's two HARD RULES (verbatim prose, literal URL `https://github.com/AgamiAI/agami-core`) before emitting.**
 
 The `.optins` file is the never-re-prompt gate. Once it's written (with any of the three response values), this check skips for every future query. If the user reports they never see the ask, they probably had `.optins` from an earlier install — `ls -la <artifacts_dir>/local/.optins` will show whether the file exists, and `rm <artifacts_dir>/local/.optins` re-arms the prompt for the next query.
 
@@ -931,7 +933,7 @@ If the user takes a positive follow-up action — picking one of the 5 numbered 
 
 ## Phase 6: Post-install GitHub-star ask (full spec — triggered from Phase 4e.5)
 
-**This is the full spec for the GitHub-star ask. The trigger lives in Phase 4e.5 above** (after the person's reply to the answer, never in the answer's own turn) — the textual order of phases here is misleading because the ask must run after that reply, not after Phase 5. If you read straight through 4f → Phase 5 (whose log line was already written right after 4d.1, before the answer is posted) → Phase 6, the ask never fires; that's why the trigger is duplicated up in 4e.5 with a pointer down here for the details.
+**This is the full spec for the GitHub-star ask. The trigger lives in Phase 4e.5 above** (at the start of the turn after the answer, before its reply is handled, never in the answer's own turn) — the textual order of phases here is misleading because the ask runs when that reply arrives, not after Phase 5. If you read straight through 4f → Phase 5 (whose log line was already written right after 4d.1, before the answer is posted) → Phase 6, the ask never fires; that's why the trigger is duplicated up in 4e.5 with a pointer down here for the details.
 
 **HARD RULES — read before emitting the ask (the LLM has hallucinated both of these):**
 
@@ -944,8 +946,8 @@ A one-time, low-friction ask after the user's first successful query: "if this w
 
 Sequence:
 
-1. The answer (approach, fetching, insight, table, how this was answered, the follow-ups) ends its turn (Phase 4a–4f); the person replies to it, and the reply is handled (4d.2).
-2. If `<artifacts_dir>/local/.optins` does not exist AND the query succeeded: **surface the GitHub-star ask NOW**, after that reply is handled. Use `AskUserQuestion`:
+1. The answer (approach, fetching, insight, table, how this was answered, the follow-ups) ends its turn (Phase 4a–4f); the person replies to it.
+2. If `<artifacts_dir>/local/.optins` does not exist AND the query succeeded: **surface the GitHub-star ask NOW**: ask the star card first at the start of the next turn, then handle the reply (only when it is one of the four replies; a number or a new question never triggers it). Use `AskUserQuestion`:
 
    > Quick one — first query worked. **If this was useful, would you star us on GitHub?**
    >
@@ -956,7 +958,7 @@ Sequence:
    - `Maybe later` — write `.optins` so we don't ask again, surface "No problem. The link is github.com/AgamiAI/agami-core if you change your mind." (No `(Recommended)` marker — we'd genuinely prefer "Yes" if the user found it useful, but no marker on any of the three options keeps the ask non-pushy.)
    - `Already starred` — surface "Thanks for the early support." and write `.optins`.
 3. **Wait for the answer to the card.** It comes back in the same turn.
-4. In the same turn, once the card is answered: process the decision (write `<artifacts_dir>/local/.optins`). Then — **whatever they answered** — surface the one-time **`/agami-serve` pointer** (below), then carry on with what their reply to the answer asked for.
+4. In the same turn, once the card is answered: process the decision (write `<artifacts_dir>/local/.optins`). Then — **whatever they answered** — surface the one-time **`/agami-serve` pointer** (below), then handle the reply to the answer (4d.2), which waited for the star card.
 
 **The `/agami-serve` pointer (one-time, right after the star answer).** Plain prose — NOT an `AskUserQuestion`, NOT one of the numbered follow-ups. Surface it once, here, regardless of which of the three star responses they gave:
 

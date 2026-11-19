@@ -95,3 +95,22 @@ def test_a_sign_off_list_ends_its_turn_on_typed_replies():
     assert "No card follows the list" in section
     overview = _between(MODEL, "## Phase 1:", "## Phase 2:")
     assert "No card follows the overview: it ends the turn (" in " ".join(overview.split())
+
+
+def test_connect_never_asks_a_card_after_a_table_in_the_same_message():
+    """The sign-off, the join list, the schema summary, the seed results and the hand-off each end
+    their turn on a typed-reply line; none is followed by a card in the same message."""
+    flat = _flat(CONNECT)
+    signoff = _between(CONNECT, "**Sign-offs (when `preseed_count` > 0).**", "**One by one.**")
+    joins = _between(CONNECT, "**Show every join before asking", "Never accept them all unasked")
+    tables = _between(CONNECT, "**Summarise it in the chat, ending the turn on a reply line**", "### 1.6s ")
+    examples = _between(CONNECT, "**Show what ran, then a reply line**", "**Add my own** is in the reply line")
+    handoff = _between(CONNECT, "### 0a.9 ", "### 0a.10 ")
+    for name, text in (("sign-off", signoff), ("joins", joins), ("tables", tables),
+                       ("examples", examples), ("hand-off", handoff)):
+        assert "Then call AskUserQuestion" not in text, name
+        assert "Reply " in text, name
+    assert 'Reply "approve all", "review each" or "later"' in " ".join(signoff.split())
+    assert 'Reply "add the <k> recommended", "review each" or "add none".' in " ".join(joins.split())
+    assert "the table ending its turn on the same reply line" in flat
+    assert "then the card" not in " ".join(joins.split()).lower()

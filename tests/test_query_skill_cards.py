@@ -231,6 +231,15 @@ def _option_lists(text: str) -> list[list[str]]:
             j += 1
         if bullets:
             lists.append(bullets)
+    # an "Options:" line followed by (indented) bullets is a card too: the star ask is written so
+    for i, line in enumerate(lines):
+        if line.strip() == "Options:":
+            bullets, j = [], i + 1
+            while j < len(lines) and lines[j].lstrip().startswith("- "):
+                bullets.append(lines[j])
+                j += 1
+            if bullets:
+                lists.append(bullets)
     return lists
 
 
@@ -238,6 +247,8 @@ def test_no_card_lists_more_than_four_options():
     # The answer is a reply line now, so this skill may hold no bulleted card at all; the guard stays
     # for any card added later.
     lists = _option_lists(_text())
+    # not vacuous: the star ask is a bulleted card, so the parser must find it
+    assert any(any("Maybe later" in b for b in opts) for opts in lists), lists
     too_many = [opts for opts in lists if len(opts) > 4]
     assert not too_many, too_many
 

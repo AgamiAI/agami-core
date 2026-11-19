@@ -869,7 +869,7 @@ def test_the_one_row_stamp_reads_the_models_own_spelling_of_a_key(tmp_path):
 
 
 def test_the_unique_column_fallback_decides_a_declared_edge_whose_one_side_is_the_left(tmp_path):
-    """The live shape of the fallback: a declared relationship matched the written pair, its one
+    """The usual shape of the fallback: a declared relationship matched the written pair, its one
     side is the LEFT table, and the right column is nevertheless unique by the semantic model."""
     _ran_ok(tmp_path)
     join = _join_probe("orders", "id", "order_items", "order_id", declared_between=True, matches=True)

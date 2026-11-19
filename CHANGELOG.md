@@ -55,9 +55,10 @@ below corresponds to one such version.
 
 - **Each join candidate says which answer its card recommends** (ported from #662). Every entry
   in `join_candidates.json` carries `recommend`: `add` only when the data clears the match bar and
-  the column's name reads as a reference to the table (named for the key, or the table's word with
-  at most one of `id`/`ref`/`key`/`no`/`num`/`fk`, or `code` against a code key), or the dictionary
-  states it; `leave_out` for anything else (`store_visits`, `seats_taken`, a type-only match, a near
+  either the column's name reads as a reference to the table (named for the key, or the table's word
+  with at most one of `id`/`ref`/`key`/`no`/`num`/`fk`, or `code` against a code key) or the
+  dictionary states the join (a dictionary-stated join the data does not bear out is never
+  recommended); `leave_out` for anything else (`store_visits`, `seats_taken`, a type-only match, a near
   miss). The join cards put that answer first with "(Recommended)", and the one-by-one cards add
   only the remaining recommended joins, so the first answer is no longer the chance match.
 
@@ -67,9 +68,10 @@ below corresponds to one such version.
   message follows it: onboarding ends on one closing message (the summary and the starter
   questions, with typed replies for review, the model and the full view) and no card; an answer ends
   on a typed-reply line ("looks right", what is off, "chart", "sign off") with no card after it, and
-  the one-time star ask comes after the person's reply; a sign-off list ends on "approve all",
-  "review each" or "later"; the overview ends on a reply line; and nothing a person needs to answer
-  a card lives only in an option's preview.
+  the one-time star ask is asked first, at the start of the next turn, before that reply is
+  handled; in agami-connect the credentials hand-off, the schema summary, the join list, the sign-off
+  list and the seed results each end on a typed-reply line ("approve all", "review each" or "later"
+  for sign-off); and nothing a person needs to answer a card lives only in an option's preview.
 
 ## [0.9.25] — 2026-11-18
 
