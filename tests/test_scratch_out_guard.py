@@ -479,6 +479,21 @@ def _no_resolve_of(monkeypatch, probe: str) -> list:
     return touched
 
 
+def test_a_guarded_examples_page_never_resolves_an_items_file_before_reading_it(art, monkeypatch):
+    """Copilot on #703: the dedupe key used `realpath`, which would follow a file swapped for a
+    network-share link before the no-follow reader refused it. Under the guard it is lexical."""
+    items = art / "local" / "tmp" / "agami-itemsprobe.json"
+    items.write_text("[]")
+    out = art / "local" / "tmp" / "agami-page.html"
+    touched = _no_resolve_of(monkeypatch, "itemsprobe")
+    _main(
+        "render_examples_validation",
+        ["--title", "t", "--profile", "acme", "--items-file", str(items), "--out", str(out)],
+        monkeypatch,
+    )
+    assert touched == []
+
+
 @pytest.mark.parametrize("which", ["--out", "--manifest-out"])
 def test_a_guarded_explorer_refuses_a_unc_output_before_resolving_it(art, monkeypatch, capsys, which):
     unc = "//uncprobe/share/agami-x." + ("html" if which == "--out" else "json")

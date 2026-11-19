@@ -148,7 +148,11 @@ def _read_files(args: list[str], read=None) -> list[tuple[str, object, list]]:
     files, seen = [], {}
     for arg in args:
         area, path = _split_label(arg)
-        real = os.path.realpath(os.path.expanduser(path))
+        # Under the guard (`read` given) the key is lexical: resolving links here would follow a
+        # file swapped for a network-share link before the no-follow reader could refuse it.
+        expanded = os.path.expanduser(path)
+        real = (os.path.normpath(os.path.abspath(expanded)) if read is not None
+                else os.path.realpath(expanded))
         if real in seen:
             # Its examples would get two numbers, and write-back keeps only the last.
             raise ValueError(f"{path}: given twice (also as {seen[real]})")
