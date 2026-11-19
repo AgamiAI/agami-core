@@ -503,3 +503,9 @@ def test_allow_refuses_a_column_groups_edit(model, tmp_path, capsys):
     assert _yaml(model) == before
     _, body = _agent("agami-enricher")
     assert "column groups you would make go in `notes`" in body
+
+
+def test_a_result_naming_another_chunk_is_given_up():
+    # The hook lets a subagent write any `agami-*.json` in scratch, so one could plant a sibling's.
+    assert "names exactly the `area` and `tables` you launched it with" in PARALLEL
+    assert "another area's or another chunk's" in PARALLEL

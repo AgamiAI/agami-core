@@ -63,9 +63,11 @@ Each Agent call returns when its subagent is done, so there is nothing to poll. 
 have returned, post one line (*"✓ Described Sales 1 and 2, Billing 1"*), then for each subagent:
 
 - **Read its result file** with the Read tool (an enricher's `<result_stem>.json`, written last; a
-  writer's `result_path`). Present, valid JSON, the shape its agent file names and this run's area:
-  apply it (below).
-- **Missing, not JSON, the wrong shape, another area's, or the call came back without finishing**
+  writer's `result_path`). Present, valid JSON, the shape its agent file names and this run's area,
+  and an enricher's `.json` names exactly the `area` and `tables` you launched it with: apply it
+  (below). A subagent may write any `agami-` file in the folder, so this is what keeps one chunk's
+  from standing in for another's.
+- **Missing, not JSON, the wrong shape, another area's or another chunk's, or the call came back without finishing**
   (it says the agent was launched or is still running): give it up in one line and do that piece
   yourself, inline, as the phase describes it. Never wait on it, and never use a file it writes later.
 
