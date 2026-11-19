@@ -152,8 +152,14 @@ def serve() -> int:
     return 0
 
 
-if __name__ == "__main__":
+def main() -> int:
+    """Console-script entry (`agami-core`), so a registry client can launch the server with
+    `uvx --from "agami-core[model]" agami-core` instead of locating an interpreter first."""
     try:
-        sys.exit(serve())
+        return serve()
     except KeyboardInterrupt:
-        sys.exit(0)
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
