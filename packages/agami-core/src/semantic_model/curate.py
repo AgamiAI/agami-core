@@ -37,7 +37,14 @@ import yaml
 from . import pii
 from . import validator as V
 from .loader import _read_yaml as _load
-from .loader import load_datasource
+from .loader import (
+    _referenced,
+    _visible_columns,
+    check_contained,
+    check_one_name,
+    list_prompt_examples,
+    load_datasource,
+)
 from .models import (
     Ambiguity,
     CrossSubjectAreaRelationship,
@@ -45,10 +52,13 @@ from .models import (
     Entity,
     Metric,
     Relationship,
+    SubjectArea,
+    Table,
+    bare_name,
     example_metrics,
     metric_tag_key,
 )
-from .plain_names import column_label, distinct_labels, join_label, plain_words
+from .plain_names import column_label, display_name, distinct_labels, join_label, plain_words
 
 # Process-lived incremental-validation cache (ACE-046). Every curation write re-validates the whole
 # model; keyed by (area content + table registry) so an enrichment run — which edits one area at a
@@ -445,6 +455,142 @@ def _entity_item(area: Optional[str], ent) -> dict:
             "signals": [{"ok": True, "text": why}],
             "inferred": ", ".join(maps), "origin": "llm_suggested",
             "maps_to": maps, **_trust(ent)}
+
+
+def _signed_at(obj) -> Optional[float]:
+    raw = getattr(obj, "signed_off_at", None)
+    try:
+        when = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def signoff_counts(org: Datasource, since: Optional[float] = None) -> dict[str, int]:
+    """What the sign-off card counts: metrics (named filters included) and entities awaiting review
+    (`metrics`, `entities`, summed in `waiting`), exactly what `sm review-items --scope preseed`
+    lists, and those a person approved (`signed`). The step list and the closing summary both read
+    this, so neither can show a different number from the card. Joins are not on the card (one line
+    each, no card), so they are never in `waiting` or `signed`; `joins` alone says how many inferred
+    joins wait to be confirmed, for the build step's "N to confirm".
+
+    With `since` (the onboarding run's start), `signed` is only what a person signed off from then
+    on; one signed off before it (the sample's ready-made definitions, an earlier session's) is
+    `earlier`. A live sample run read "9 of 9 signed" though the person signed nothing. `by_agami` is
+    what was approved with a system sign-off rather than by a person (the sample's silent build)."""
+    out = {"metrics": 0, "entities": 0, "joins": 0, "waiting": 0, "signed": 0, "earlier": 0,
+           "by_agami": 0}
+    kinds = {"metric": "metrics", "entity": "entities"}
+    groups = [(sa.metrics, "metric") for sa in org.subject_areas]
+    groups += [(sa.entities, "entity") for sa in org.subject_areas]
+    groups += [(org.cross_subject_area_metrics, "metric")]
+    for objs, kind in groups:
+        for obj in objs:
+            tab = _tab(obj)
+            if tab == "review":
+                out[kinds[kind]] += 1
+                out["waiting"] += 1
+            elif tab == "manual":
+                # Only an approval is a sign-off: `not_applicable` is a person's answer, not a signature.
+                if getattr(obj, "review_state", None) != "approved":
+                    continue
+                at = _signed_at(obj)
+                # Given the run's start, an approval counts as this run's only when it is dated at or
+                # after it: one with no time can't be shown to be, so it is not claimed as signed.
+                out["signed" if since is None or (at is not None and at >= since) else "earlier"] += 1
+            elif tab == "auto" and getattr(obj, "review_state", None) == "approved":
+                out["by_agami"] += 1
+    rels = [r for sa in org.subject_areas for r in sa.relationships]
+    out["joins"] = sum(1 for r in rels + list(org.cross_subject_area_relationships)
+                       if _tab(r) == "review")
+    return out
+
+
+def hidden_personal_columns(org: Datasource) -> int:
+    """How many columns flagged personal (`sensitive`) are hidden from queries, on tables still in
+    the model: what "hide personal data" did."""
+    return sum(1 for sa in org.subject_areas for t in sa.tables_defined
+               if getattr(t, "review_state", "approved") != "rejected"
+               for c in t.columns if c.sensitive and getattr(c, "review_state", "approved") == "rejected")
+
+
+def model_signoff_counts(root: str | Path, since: Optional[float] = None) -> dict[str, int]:
+    """`signoff_counts` of the model at `root`, loaded as `sm review-queue` loads it (hidden tables
+    and what hangs off them left out), so the step list and the summary say the queue's own total."""
+    return signoff_counts(load_datasource(root), since)
+
+
+def _live(objs: list) -> list:
+    return [o for o in objs if getattr(o, "review_state", "approved") != "rejected"]
+
+
+def _referenced_here(org: Datasource, sa: SubjectArea) -> list[tuple[Table, list]]:
+    """(table, the columns `sa` exposes of it) for each live table `sa` references but another area
+    defines, resolved the way a reply to `sa` resolves it (a table the area defines itself wins, the
+    ref's schema picks among same-named ones, `expose_column_groups` narrows the columns)."""
+    own = {bare_name(t.name) for t in sa.tables_defined}
+    found: list[tuple[Table, list]] = []
+    seen: set[int] = set()
+    for ref in sa.tables:
+        bare = bare_name(ref.table)
+        if bare in own:
+            continue
+        elsewhere = [t for other in org.subject_areas if other is not sa
+                     for t in other.tables_defined if bare_name(t.name) == bare]
+        for t in _referenced(elsewhere, [ref]):
+            if id(t) in seen or getattr(t, "review_state", "approved") == "rejected":
+                continue
+            seen.add(id(t))
+            found.append((t, [c for c in _visible_columns(t, ref.expose_column_groups)
+                              if getattr(c, "review_state", "approved") != "rejected"]))
+    return found
+
+
+def overview(org: Datasource, root: str | Path) -> dict[str, Any]:
+    """The numbers an overview card shows, per subject area and in total, so a card relays them
+    rather than adding them up from three commands' output (where a wrong total creeps in).
+
+    Hidden (rejected) tables, columns, metrics and joins are left out, as the runtime leaves them
+    out. `needs_signoff` is the metrics and named filters still unsigned (Rule 1: an answer using
+    one carries a warning); `can_wait` is the joins and entities that self-approve as queried."""
+    described: dict[str, list[int]] = {}
+    for t in column_coverage(org)["tables"]:
+        cols = described.setdefault(t["area"], [0, 0])
+        cols[0] += t["described"]
+        cols[1] += t["columns"]
+    areas = []
+    own: dict[str, tuple[int, int]] = {}
+    for sa in org.subject_areas:
+        done, total = described.get(sa.name, [0, 0])
+        metrics, joins = _live(sa.metrics), _live(sa.relationships)
+        own_tables = len(_live(sa.tables_defined))
+        # An area also shows the tables it references from another area; the totals below count only
+        # what each area defines, so a shared table is not counted once per area that lists it.
+        shared = _referenced_here(org, sa)
+        shown_cols = total + sum(len(cols) for _, cols in shared)
+        shown_done = done + sum(1 for _, cols in shared for c in cols
+                                if (getattr(c, "description", "") or "").strip())
+        own[sa.name] = (own_tables, total)
+        areas.append({
+            "area": sa.name, "plain_name": plain_words(display_name(sa.name)),
+            "tables": own_tables + len(shared), "columns": shown_cols,
+            "described_pct": round(100 * shown_done / shown_cols) if shown_cols else 0,
+            "metrics": len(metrics), "metrics_waiting": sum(_needs_review(m) for m in metrics),
+            "joins": len(joins), "joins_waiting": sum(_needs_review(r) for r in joins),
+            "examples": len(list_prompt_examples(root, sa.name)),
+        })
+    counts = review_queue(org)["counts"]
+    totals = {k: sum(a[k] for a in areas) for k in ("metrics", "joins", "examples")}
+    totals["tables"] = sum(t for t, _ in own.values())
+    totals["columns"] = sum(c for _, c in own.values())
+    totals["metrics"] += len(_live(org.cross_subject_area_metrics))
+    totals["joins"] += len(_live(org.cross_subject_area_relationships))
+    all_cols = totals["columns"]
+    totals["described_pct"] = (round(100 * sum(d for d, _ in described.values()) / all_cols)
+                               if all_cols else 0)
+    totals["needs_signoff"] = counts["rule_1"]
+    totals["can_wait"] = counts["rule_2"]
+    return {"areas": distinct_labels(areas, "plain_name"), "totals": totals}
 
 
 def model_tree(org: Datasource) -> dict[str, Any]:
@@ -2652,7 +2798,10 @@ def _read_log_lines(root: Path) -> list[Optional[dict]]:
     """Each line of the curation log, parsed; None for a line that isn't a JSON object."""
     try:
         # bytes, so one undecodable line is that line's problem, not the whole log's
-        lines = (root / CURATION_LOG).read_bytes().splitlines()
+        check_contained(root / CURATION_LOG)
+        with (root / CURATION_LOG).open("rb") as fh:
+            check_one_name(fh.fileno(), root / CURATION_LOG)
+            lines = fh.read().splitlines()
     except OSError:
         return []
     out: list[Optional[dict]] = []

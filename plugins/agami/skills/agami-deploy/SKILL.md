@@ -38,8 +38,7 @@ Automatically** mode (Shift+Tab) and re-invoke me."* **DO NOT** write a plan fil
 
 ## Phase 0: Preflight
 1. **Resolve the environment** — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_resolve.py` prints JSON;
-   read `data.artifacts_dir` (the local model dir) and `data.interpreter.python3` (call it `$PY` — the
-   interpreter that has the agami-core package; use it for `deploy_preflight`). An `env_profile_has_no_model`
+   read `data.artifacts_dir` (the local model dir). An `env_profile_has_no_model`
    anomaly means `AGAMI_PROFILE` names a database with no model: say its `detail` in one line and stop.
 2. **Model present** — `<artifacts_dir>/<active_profile>/datasource.yaml` must exist. If there's no model yet,
    stop and invoke `/agami-connect` first — the deployed server has nothing to serve without one.
@@ -115,7 +114,7 @@ credentials — the user types them by hand; you never see them, they stay in th
 End the turn here. The user fills the secrets and re-invokes (or says "continue").
 
 ## Phase 3: Finalize + deploy
-1. **Validate + generate the signing secret:** `$PY -m deploy_preflight ~/agami-deploy/agami.env`. If it
+1. **Validate + generate the signing secret:** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -m deploy_preflight ~/agami-deploy/agami.env`. If it
    reports missing inputs (e.g. the password still blank, or a non-https URL), relay them and stop. On
    success it has written `AGAMI_SIGNING_SECRET` + derived `AGAMI_PUBLIC_HOST` into the file.
 2. **Bring it up:**

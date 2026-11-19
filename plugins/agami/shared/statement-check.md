@@ -15,12 +15,12 @@ Work in the row's directory, `<artifacts_dir>/local/reconcile/<ts>/rows/<n>/`. W
 `statement.sql` first, verbatim, with the Write tool. Then check the row, once:
 
 ```bash
-"$PY" "<plugin_root>/scripts/check_statement.py" --profile <profile> --area <area> \
+bash "<plugin_root>/scripts/py" check_statement.py --profile <profile> --area <area> \
   --row-dir "<artifacts_dir>/local/reconcile/<ts>/rows/<n>"
 ```
 
-`$PY` is the interpreter `sm` resolves ([`connection-reference.md`](connection-reference.md)); it
-has agami-core and the database driver. `<area>` is the subject area the scope gates check against,
+The `py` launcher runs it with the interpreter `sm` resolves, the one with agami-core and the
+database driver. `<area>` is the subject area the scope gates check against,
 taken from the profile's subject areas. Stdout is one JSON line: the statement's outcome and how
 many probes ran. It never carries SQL.
 
@@ -33,10 +33,10 @@ one's.
   Phase 3b stops it, and tell the person the `remediation` in `run.json`. `run.json` names the
   cause: a failure `kind` (`auth`, `dsn`, `network`, `permission` or `driver_missing`), or the
   refusal `rule` `engine_mismatch`, which means the semantic model declares an engine its
-  credentials do not connect to. `driver_missing` means `$PY` lacks the Python driver for this
-  database; the sentence names what to install.
+  credentials do not connect to. `driver_missing` means that interpreter lacks the Python driver for
+  this database; the sentence names what to install.
 - **Exit `2`**: it could not start. Either `statement.sql` is missing, or the interpreter lacks
-  agami-core; run `bash "<plugin_root>/scripts/sm" install` and call it with `"$PY"`.
+  agami-core; run `bash "<plugin_root>/scripts/sm" install` and make the same call again.
 - **Any other exit**: the script crashed. Stop the run and tell the person. Never run the statement
   or a probe yourself instead.
 
