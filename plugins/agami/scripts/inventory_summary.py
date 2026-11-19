@@ -295,15 +295,20 @@ def _read(path: str, errors: str = "strict") -> str:
 _FILE_CHOICES = ("names:", "page:", "pick:")
 
 
+def guard_inventory(path: str) -> None:
+    """Under the guard, `--inventory` is a scratch JSON file or the build's own
+    `<artifacts_dir>/<profile>/.introspect/inventory.json` (`_scratch_out.Refused` otherwise)."""
+    try:
+        _scratch_out.scratch_file(path, ("json",))
+    except _scratch_out.Refused:
+        _scratch_out.model_file(path, "<profile>", ".introspect", "inventory.json", profile_at=0)
+
+
 def _guard_inputs(args: argparse.Namespace) -> None:
     """Under the guard, every file the call reads is a scratch file, and `--inventory` a scratch
     file or the build's own `<artifacts_dir>/<profile>/.introspect/inventory.json`: a call steered
     by text nobody vetted could otherwise have `--check-columns` echo the lines of any file."""
-    try:
-        _scratch_out.scratch_file(args.inventory, ("json",))
-    except _scratch_out.Refused:
-        _scratch_out.model_file(args.inventory, "<profile>", ".introspect", "inventory.json",
-                                profile_at=0)
+    guard_inventory(args.inventory)
     named = [args.check_columns, *args.used_by]
     if args.keep and args.keep.startswith(_FILE_CHOICES):
         named.append(args.keep.split(":", 1)[1])

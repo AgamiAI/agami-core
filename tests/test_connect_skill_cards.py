@@ -420,7 +420,7 @@ def test_6_shows_a_table_of_seeds_then_the_four_option_card():
     assert "15 rows" in s
     # #674: "ran" proves the SQL executes, not that it is right, so the page is recommended and
     # keeping them all comes last, in this order.
-    card = s[s.index("(header `Examples`)"):]
+    card = s[s.index('Reply "page" (recommended)'):]
     card = card[: card.index("\n\n**Add my own**")]
     labels = re.findall(r"^- \*\*([^*]+)\*\*", card, re.M)
     assert labels == ["Mark them on a page (Recommended)", "Review one by one", "Add my own", "Keep all"]
@@ -614,9 +614,9 @@ def test_6a_asks_its_fix_on_a_card():
         assert label in s
 
 
-def test_review_from_phase_7_returns_to_the_starter_questions():
-    s = _between("## Phase 7:", "## Phase 8:")
-    line = next(ln for ln in s.splitlines() if "Review what needs sign-off" in ln)
+def test_review_from_the_closing_message_returns_to_the_starter_questions():
+    s = _between("## Phase 8:", "## Phase 8.5:")
+    line = next(ln for ln in s.splitlines() if ln.startswith('| "review"'))
     assert "Phase 8" in line
 
 
@@ -740,8 +740,8 @@ def test_review_cards_offer_the_full_view_as_an_option():
     assert "and **Mark them on a page** (the page below, on every question of the card" in six  # item cards
     assert "| Review on a page |" in four and "| Mark them on a page |" in six
     assert "first question only" not in four + six
-    phase_7 = _phase("## Phase 7", "## Phase 8")
-    assert "`Show the full view`" in phase_7
+    phase_8 = _phase("## Phase 8:", "## Phase 8.5")
+    assert '| "full view" |' in phase_8
 
 
 def test_currency_and_flag_rate_asks_name_columns_in_words():
@@ -767,9 +767,27 @@ def test_join_candidates_are_listed_in_the_chat_before_the_card():
 
 def test_join_candidate_group_options_preview_the_joins_they_add():
     s = _join_candidates()
-    assert "each option's `preview` lists every join that option adds" in s
+    # the table above is where every join is named, and it ends its turn on a reply line
+    assert "**The table ends the turn** with the reply line" in s
+    assert 'Reply "add the <k> recommended", "review each" or "add none".' in s
     assert "Never offer a numbered range" in s
-    assert "Add all remaining" in s and "Add none" in s
+    assert "Add the remaining recommended" in s and "Add none" in s
+    assert "Add all remaining" not in s   # it would add the chance matches the cards left out
+
+
+def test_join_cards_put_the_engines_recommendation_first():
+    # A card drawn with no "(Recommended)" took the first answer, "Add it", and added chance joins.
+    # The engine names the answer per candidate (`recommend`); the card follows it.
+    s = _join_candidates()
+    one = s[s.index("- **Review each:**"):s.index("- **Add none**")]
+    assert "`recommend`" in one
+    assert "**Leave it out (Recommended)**" in one and "**Add it (Recommended)**" in one
+    assert "first" in one
+    assert "never the model's own guess" in one
+    assert "its name does not read as a reference to the table" in one
+    many = s[s.index("**The table ends the turn**"):s.index("- **Review each:**")]
+    assert "`recommend: add`" in many and "**add none (recommended)** comes first" in many
+    assert "full matches (Recommended)" not in many
 
 
 # --- 2g: ask what the data can't settle (issues 3 and 9 of the question-cards test log, #486) ---
@@ -947,7 +965,7 @@ def _section_16p() -> str:
 
 def _tables_card() -> list[str]:
     s = _section_16()
-    i = s.index("Then call AskUserQuestion, one question (header `Tables`)")
+    i = s.index("(the choices of one question, header `Tables`)")
     lines = s[i:].splitlines()[2:]
     return [ln for ln in lines[: next(n for n, ln in enumerate(lines) if not ln.startswith("- **"))]]
 
@@ -964,9 +982,10 @@ def test_1_6_offers_pick_from_a_list_within_four_options():
 
 def test_1_6_takes_typed_names_in_the_question_not_as_an_option():
     s = _section_16()
-    card = s[s.index("(header `Tables`)"):]
-    assert card.splitlines()[0].endswith('Or type table names or patterns in Other, like orders, customers or all crm_*."*:')
-    assert "--keep pick:" in s and "there is no option for it" in s
+    card = s[s.index("(the choices of one question, header `Tables`)"):]
+    assert 'or type table names or patterns, like orders, customers or all crm_*' in card.splitlines()[0]
+    assert card.splitlines()[0].endswith("Handle the reply as the choices below; words that mean one of them count as it:")
+    assert "--keep pick:" in s and "there is no choice for it" in s
 
 
 def test_1_6p_serves_the_picker_with_the_saving_helper_and_writes_through_keep():

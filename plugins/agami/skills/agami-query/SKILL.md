@@ -14,8 +14,8 @@ This skill orchestrates:
 1. **Setup** (once per session) — resolve the profile + the semantic model at `<artifacts_dir>/<profile>/`, verify the configured database tool still works.
 2. **Generate SQL** — examples-first traversal: pick the subject area → match curated examples → (cold start) resolve entities/metrics + identify opaque literals → compound `get_table_context` → produce one SQL statement → safety checks.
 3. **Execute** — run via the chosen tool; the Python tier runs the fan/chasm pre-flight and the scope/PII gates; auto-retry on classified errors; risk-assess large-table queries.
-4. **Present** — the answer as a markdown table, "How this was answered" from the receipt, then the log line (`<artifacts_dir>/local/query_log.jsonl`, written right after 4d.1 and before the card; its shape is in Phase 5), then one card (Looks right / Something's off / Show as a chart / Sign off the definitions used); CSV via `--csv` or "export this"; on "Show as a chart", `--chart` or "make that a chart", a text bar chart in the chat (`text_chart.py`), with the Chart.js report as the full view on request, served from localhost.
-5. **Post-install GitHub-star ask** — after the answer card, ask the user (once, after first successful query) to star us on GitHub; once they answer, point them to `/agami-serve` (wire the model into Claude Desktop — the experience their business users get).
+4. **Present** — the answer as a markdown table, "How this was answered" from the receipt, then the log line (`<artifacts_dir>/local/query_log.jsonl`, written right after 4d.1 and before the answer is posted; its shape is in Phase 5), then the 5 follow-ups and one reply line that ends the turn ("looks right" / what's off / "chart" / "sign off"; no card follows an answer); CSV via `--csv` or "export this"; on "Show as a chart", `--chart` or "make that a chart", a text bar chart in the chat (`text_chart.py`), with the Chart.js report as the full view on request, served from localhost.
+5. **Post-install GitHub-star ask** — after the person has replied to the answer, ask the user (once, after first successful query) to star us on GitHub; once they answer, point them to `/agami-serve` (wire the model into Claude Desktop — the experience their business users get).
 
 For the model format: [`semantic_model/__init__.py`](../../../../packages/agami-core/src/semantic_model/__init__.py) (layout) + `packages/agami-core/src/semantic_model/models.py`.
 For SQL safety: [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md).
@@ -39,7 +39,7 @@ For chat replies, **prefer natural language over slash commands** — it reads b
 ## Conversation style
 
 - **One question per turn unless they're truly bundled.**
-- **A decision is a card** ([`shared/question-cards.md`](../../shared/question-cards.md)): the answer card after every answer (Phase 4d.2), large-table HIGH-risk approval, the post-install GitHub-star ask. **Do NOT use AskUserQuestion for follow-up suggestions** — those are 5 plain numbered bullets per Phase 4f.
+- **A decision is a card** ([`shared/question-cards.md`](../../shared/question-cards.md)): every answer ends its turn on a typed-reply line, never a card (Phase 4d.2); large-table HIGH-risk approval, the post-install GitHub-star ask. **Do NOT use AskUserQuestion for follow-up suggestions** — those are 5 plain numbered bullets per Phase 4f.
 - **No page opens by default.** The chart page is the answer's full view: rendered only when the person asks for a chart (Phase 4e), and served from localhost, never opened as a `file://` page.
 - **Insights, not narration** — lead with the answer ("Carol Chen has the highest spend at $148.95"), not the SQL or the process.
 - **Round numbers in prose**, exact in the table.
@@ -111,7 +111,7 @@ You don't build hand-rolled indexes — the loader returns structured objects. T
 - **Subject areas** — the primary scoping unit (replaces "load every table"). Each has a description, a table list, entities, metrics, and an intra-area relationship graph (each edge carries join **cardinality** + a trust block).
 - **`get_table_context(area, tables)`** — columns (scoped by `expose_column_groups`), `default_filters`, relationships, `caveats`, `value_transforms`, metrics — in one call.
 - **Entities** — the vocabulary users say (name/plural/other_names → `maps_to` table.column, with a `value_pattern` for opaque IDs). Use `resolve_entities` / `identify_entity`.
-- **Metrics** — reusable aggregations with prose `calculation` + per-dialect `bindings`. **Use the binding SQL VERBATIM** when the user asks for a metric by name or synonym; don't hand-roll the aggregate.
+- **Metrics** — reusable aggregations with prose `calculation` + per-dialect `bindings`. **Use the binding SQL VERBATIM** when the user asks for a metric by name or synonym; don't hand-roll the aggregate. A metric with `joins` says how its tables join: bring each named table in with that kind (`left` → `LEFT JOIN`, `inner` → `JOIN`) on the declared relationship's key, or the receipt cannot credit the metric.
 - **Cross-subject-area relationships** (org level) — for joins that span two areas.
 
 ### 1d — load the examples library
@@ -494,9 +494,9 @@ If row count == 0:
 
 The chat reply follows this **strict order**, with NO other content interleaved (no SQL, no Bash output, no "let me know if…" filler):
 
-  4a Approach → 4b Fetching → 4c Insight → 4d Table → 4d.1 How this was answered → (log the query, Phase 5, silently) → 4d.2 Answer card → (4e.5 star ask, once) → 4f Numbered follow-ups → (optional 4g CSV path)
+  4a Approach → 4b Fetching → 4c Insight → 4d Table → 4d.1 How this was answered → (log the query, Phase 5, silently) → 4f Numbered follow-ups → the reply line (4d.2), always the last line, all in the turn's last message, which ends the turn (4d.2: no card after an answer) → (optional 4g CSV path); the person's reply to the answer, then (4e.5 star ask, once)
 
-Each step is short. The whole reply should fit in a typical chat viewport without scrolling. **No page is rendered or opened on this path:** the chart page (4e) runs only when the person picks **Show as a chart** on the answer card, passes `--chart`, or asks for a chart ("make that a chart"). Cards follow [`shared/question-cards.md`](../../shared/question-cards.md).
+Each step is short. The whole reply should fit in a typical chat viewport without scrolling. **No page is rendered or opened on this path:** the chart page (4e) runs only when the person replies **Show as a chart** to the answer (4d.2), passes `--chart`, or asks for a chart ("make that a chart"). Cards follow [`shared/question-cards.md`](../../shared/question-cards.md).
 
 ### 4a — Approach (one sentence, plain English)
 
@@ -597,7 +597,7 @@ Keep it to about four lines; a multi-section answer gets one block for all secti
 
 #### 4d.1a — Assumption nudge
 
-**Assumption nudge (only when `assumptions.items` is non-empty).** If the receipt's `assumptions.items[]` has entries, add ONE short line at the end of "How this was answered" (before the answer card) so a wrong/unknown meaning is caught in context. Phrase by `source`:
+**Assumption nudge (only when `assumptions.items` is non-empty).** If the receipt's `assumptions.items[]` has entries, add ONE short line at the end of "How this was answered" (before the reply line) so a wrong/unknown meaning is caught in context. Phrase by `source`:
 - `ai_unvalidated` (a guess) → *"read `net_margin` as '(revenue − cost) ÷ revenue'"*.
 - `ai_unknown` (no description) → *"used `xyz`, which I don't have a description for — is that the right column?"* (lead with these; they're riskier).
 
@@ -611,7 +611,7 @@ Keep it to the columns in `assumptions.items[]` (≤3), one clause each, plain E
 
 When the user responds to that nudge:
 
-- **Confirms** (**Looks right** on the answer card, or "yes", "confirmed") → mark those descriptions validated so they never resurface. Build one curate ops array — one `edit` per confirmed column setting `description_source` to `ai_validated` — write it to `<artifacts_dir>/local/tmp/agami-confirm-desc.json` (Write tool), and apply:
+- **Confirms** (**Looks right**, a reply to the answer (4d.2), or "yes", "confirmed") → mark those descriptions validated so they never resurface. Build one curate ops array — one `edit` per confirmed column setting `description_source` to `ai_validated` — write it to `<artifacts_dir>/local/tmp/agami-confirm-desc.json` (Write tool), and apply:
   ```bash
   bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-confirm-desc.json"
   ```
@@ -619,33 +619,34 @@ When the user responds to that nudge:
 - **Corrects one, or describes an unknown** (**Something's off** with "net_margin is actually …" or "xyz means customer lifetime value" in "Other", or the same typed) → route to **agami-save-correction**: it writes the column `description` with `"source":"human"` (which flips `description_source` to `human`) AND saves the (question, SQL) example. This is the path for both a wrong `ai_unvalidated` guess and a filled-in `ai_unknown` blank — either way the column now has a trusted, human description. Don't hand-edit here — let save-correction classify + write.
 - **Ignores it / asks something else** → do nothing. An `ai_unvalidated` stays a guess; an `ai_unknown` stays unknown. Either may resurface if a later query uses that column in a load-bearing way. Never auto-confirm on silence — that's the rubber-stamp we're avoiding. (Note: you can't "confirm" an `ai_unknown` — there's nothing to confirm; it needs a description, so only a correction clears it.)
 
-### 4d.2 — The answer card
+### 4d.2 — The answer ends the turn; the person replies to it
 
-**Log the query first.** Append this answer's `query_log.jsonl` line (Phase 5) before the card is asked, silently. Every card answer reads that line: agami-save-correction takes the last ok entry for its question and SQL, and Looks right / Something's off set `feedback` on it. Asked before the line exists, a correction would attach to the previous query.
+**Log the query first.** Append this answer's `query_log.jsonl` line (Phase 5) before the answer is posted, silently. Every reply reads that line: agami-save-correction takes the last ok entry for its question and SQL, and Looks right / Something's off set `feedback` on it. Without it, a correction would attach to the previous query.
 
-After "How this was answered" and the log line, call AskUserQuestion:
+**Never call AskUserQuestion after an answer in the same turn.** Every call the answer needs (the log line, the first-question mark and the sample footer's marker in 4f) comes first; then the turn's last message is the answer itself: approach and fetching, the table, the insight, "How this was answered", the follow-ups (4f), then this line, **always the answer's last line**:
 
-- **Looks right**: save it as a test question, so later changes to the model are checked against this answer.
-- **Something's off**: say what in "Other"; I'll fix it and save the correction.
-- **Show as a chart**: a bar chart drawn here in the chat (4e). Left out for a 1×1 scalar, and when the chart was already shown because the person asked for one.
-- **Sign off the definitions used**: shown only when the receipt names an unsigned metric (a model metric in `columns.items` whose `review_state` isn't `approved`); signs those off.
+```
+Does this look right? Reply "looks right" to keep it as a test question, say what's off and I'll fix it, say "chart" for a bar chart, or reply with a number above to ask it next.
+```
 
-One question, header `Answer`, *"How does this answer look?"*, single pick, no `(Recommended)` (only the person can say whether it's right). With the chart and sign-off options left out the card still has two. Where AskUserQuestion is unavailable, ask the same as a short numbered list (question-cards rule 7).
+Leave "chart" out for a 1×1 scalar and when the chart was already shown, and the number clause when there is no list; when the receipt names an unsigned metric (a model metric in `columns.items` whose `review_state` isn't `approved`), add *or "sign off" to sign off the definitions it used*. Why: long text written before a card does not reach the person in Claude apps (they get a one-sentence summary of it); a turn's last message is the one thing every host shows ([long-text.md](../../shared/long-text.md)).
+
+The person's next message, read for what it says (the four replies keep the old card's names):
 
 | Answer | Do |
 |---|---|
 | Looks right | Set `feedback: "good"` on this answer's `query_log.jsonl` entry (written before the card) and confirm the assumption descriptions (4d.1b). Then, when the question names a window relative to today ("last 30 days", "this month", "YTD") and the SQL that ran is pinned to fixed dates, ask agami-reconcile's window card before handing anything on: header `Window`, *"'The last 30 days' was 2–31 August 2026 when this ran. Save it as '…in August 2026'?"*, options **Name the window: <dates>** / **Don't save**; "Other" takes the question in the person's words. **Name the window** saves with the question rewritten to name those dates; **Don't save** writes no test (the feedback above stands). Never re-anchor the SQL to the current date: the answer key would then move with the calendar and fail against a band nobody moved. Then hand to **agami-save-golden**'s save door (its Phase 3) with the question (rewritten, if it was), the SQL that ran and the result; how it was checked is that the person pressed Looks right on this answer. |
-| Something's off | Set `feedback: "bad"` on this answer's `query_log.jsonl` entry and hand **agami-save-correction** three things by name: the "Other" text as the correction, this answer's question, and the SQL that ran for it (the same `question` and `sql` the log line carries), which fixes the answer, routes the learning and asks before any shared-model edit (the same tree as 4h). Picked with nothing typed in "Other": say *"Type what looks off in Other."* and ask the same card again. |
-| Show as a chart | Phase 4e: draw the chart in the chat (4e.iii, then 4e.iii-b). The HTML report (4e.iv–vi) only when the person then asks for the full view. |
-| Sign off the definitions used | The identity card first if `reviewer_email` / `reviewer_role` aren't in `<artifacts_dir>/local/.config` (the one in [agami-model Phase 0](../agami-model/SKILL.md#phase-0-preflight)); its **Don't sign anything yet** signs nothing here and goes on to the star ask (4e.5) and the follow-ups (4f), since there is no overview card in this skill. Otherwise one batch, `{"op":"approve","kind":"metric","area":"<area>","name":"<name>"}` per unsigned model metric in the receipt, written with the Write tool and applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. A `stale` one: say what changed in the line before, from its `changes_since_approval` in `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope rule1`. An ad-hoc metric isn't in the model, so it can't be signed off; offer to save it as a metric through agami-save-correction. |
+| Something's off | Set `feedback: "bad"` on this answer's `query_log.jsonl` entry and hand **agami-save-correction** three things by name: the person's words as the correction, this answer's question, and the SQL that ran for it (the same `question` and `sql` the log line carries), which fixes the answer, routes the learning and asks before any shared-model edit (the same tree as 4h). A reply that says something is off without saying what: ask in one line what looks off. |
+| Show as a chart | Phase 4e: a bar chart drawn here in the chat (4e.iii, then 4e.iii-b). The HTML report (4e.iv–vi) only when the person then asks for the full view. |
+| Sign off the definitions used | The identity card first if `reviewer_email` / `reviewer_role` aren't in `<artifacts_dir>/local/.config` (the one in [agami-model Phase 0](../agami-model/SKILL.md#phase-0-preflight)); its **Don't sign anything yet** signs nothing here and goes on to the star ask (4e.5), since there is no overview card in this skill. Otherwise one batch, `{"op":"approve","kind":"metric","area":"<area>","name":"<name>"}` per unsigned model metric in the receipt, written with the Write tool and applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. A `stale` one: say what changed in the line before, from its `changes_since_approval` in `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope rule1`. An ad-hoc metric isn't in the model, so it can't be signed off; offer to save it as a metric through agami-save-correction. |
 
-**"Other" with no option picked** is read for what it says: a description of what's wrong is **Something's off**; a new data question is answered as one (Phase 2), the card left behind. A question about this answer ("show me the SQL", "why these tables?") is answered, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). Anything else you can't place is said back in one line and the same card asked again; never guess.
+**The star ask comes first.** When one of the four replies above arrives and 4e.5's gate says to ask, ask the star card first at the start of the next turn, then handle the reply. A number or a new question never triggers it.
 
-After the card is handled: the one-time star ask (4e.5), then the 5 follow-ups (4f).
+**Any other reply:** a new data question is answered as one (Phase 2). A question about this answer ("show me the SQL", "why these tables?") is answered first, as [question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again) says, ending on the same reply line again. Anything else you can't place is said back in one line, asking what they meant; never guess. After one of the four replies is handled: the one-time star ask (4e.5); never right after a new question's answer.
 
 ### 4e — Show as a chart: drawn in the chat; the HTML report is the full view
 
-This runs only when the person picks **Show as a chart** on the answer card, passes `--chart`, or asks for a chart ("make that a chart", "show me a chart"); in the last two cases the answer card leaves its chart option out. Never by default.
+This runs only when the person replies **Show as a chart** (4d.2), passes `--chart`, or asks for a chart ("make that a chart", "show me a chart"); in the last two cases the reply line leaves "chart" out. Never by default.
 
 **The chart goes in the chat.** The chat shows no image or page, so the chart is bars drawn in text: build the sections file (4e.i–iii), then draw it with `text_chart.py` (4e.iii-b) and post what it prints. That is the whole default path. Then say in one line that the full view (an HTML page with an interactive chart, the table, the SQL and the receipt) is there if they want it; render and serve it (4e.iv–vi) only when they ask.
 
@@ -785,20 +786,20 @@ Chart: http://localhost:<port>/<name> (open for 30 minutes)
 
 For a multi-section report: `Report (N sections): http://localhost:<port>/<name>`. Set `chart_path` on this answer's `query_log.jsonl` entry to the file's absolute path (Phase 5), so "reopen the chart" can serve it again later.
 
-The page is read-only (`--read-only`): the answer card is where the person says it looks right or something is off. A block pasted from an older, editable page is still accepted (4h).
+The page is read-only (`--read-only`): the reply to the answer (4d.2) is where the person says it looks right or something is off. A block pasted from an older, editable page is still accepted (4h).
 
-### 4e.5 — GitHub-star ask (one-time, gates Phase 4f)
+### 4e.5 — GitHub-star ask (one-time, after the reply to an answer)
 
-**This step is required after the answer card (4d.2) is handled and before 4f.** Do not emit the 5 follow-up bullets in 4f without first running this check.
+**This step is required when the person's reply to an answer (4d.2) arrives, asked before that reply is handled and never in the same turn as the answer.** An answer's turn ends on its reply line; the star ask is a card, and a card never follows an answer.
 
 ```bash
 test -f <artifacts_dir>/local/.optins
 ```
 
-**Sample-profile exception (check first):** if `active_profile` is `agami-example`, **skip this star modal entirely** — don't prompt someone to star off the throwaway sample dataset. The sample's one-time orientation footer (4f) carries a single-line star mention instead. Continue to 4f.
+**Sample-profile exception (check first):** if `active_profile` is `agami-example`, **skip this star modal entirely** — don't prompt someone to star off the throwaway sample dataset. The sample's one-time orientation footer (4f) carries a single-line star mention instead.
 
-- **Exit 0** (`.optins` exists) — skip this step. Continue to 4f.
-- **Exit 1** (`.optins` missing) AND the query just completed successfully — surface the GitHub-star ask via `AskUserQuestion`. Its answer comes back in the same turn; handle it and the `/agami-serve` pointer before Phase 4f, never 4f first. Full ask + handling in [Phase 6 below](#phase-6-post-install-github-star-ask-full-spec--triggered-from-phase-4e5); the trigger lives here (not only in Phase 6) so it fires before Phase 4f. **Read Phase 6's two HARD RULES (verbatim prose, literal URL `https://github.com/AgamiAI/agami-core`) before emitting.**
+- **Exit 0** (`.optins` exists) — skip this step.
+- **Exit 1** (`.optins` missing) AND the person's reply to the answer (4d.2) has just arrived, one of the four replies, never a number or a new question — surface the GitHub-star ask via `AskUserQuestion`: ask the star card first at the start of the next turn, then handle the reply (never in the turn that posted the answer, whose last message is the reply line). A number or a new question never triggers it. Its answer comes back in the same turn as the ask; handle it and the `/agami-serve` pointer, then carry on with what the reply asked for. Full ask + handling in [Phase 6 below](#phase-6-post-install-github-star-ask-full-spec--triggered-from-phase-4e5); the trigger lives here (not only in Phase 6) so it fires once that reply arrives. **Read Phase 6's two HARD RULES (verbatim prose, literal URL `https://github.com/AgamiAI/agami-core`) before emitting.**
 
 The `.optins` file is the never-re-prompt gate. Once it's written (with any of the three response values), this check skips for every future query. If the user reports they never see the ask, they probably had `.optins` from an earlier install — `ls -la <artifacts_dir>/local/.optins` will show whether the file exists, and `rm <artifacts_dir>/local/.optins` re-arms the prompt for the next query.
 
@@ -817,7 +818,7 @@ Liked it? A GitHub star helps a lot — github.com/AgamiAI/agami-core
 
 Why here, not in agami-connect: when the user asks their first sample question, agami-query owns the turn — a footer placed in agami-connect's Phase 0s never executes. This is the reliable home. (For non-sample profiles this block is skipped; the generic star/serve in 4e.5 + Phase 6 covers them.)
 
-End every successful answer with **exactly 5 numbered follow-up questions**, formatted as a plain markdown ordered list, after the answer card (and the one-time star ask) has been handled. Always — even for narrow questions, even if some feel slightly broader. **Do not use AskUserQuestion for follow-ups** — that surfaces a modal picker and feels intrusive. The numbered list lets the user glance, ignore, type a number, or type a fresh question.
+End every successful answer with **exactly 5 numbered follow-up questions**, formatted as a plain markdown ordered list, inside the answer's last message, just above the reply line (4d.2). Always — even for narrow questions, even if some feel slightly broader. **Do not use AskUserQuestion for follow-ups** — that surfaces a modal picker and feels intrusive. The numbered list lets the user glance, ignore, type a number, or type a fresh question.
 
 Format exactly:
 
@@ -829,7 +830,7 @@ What next?
 4. <follow-up question 4>
 5. <follow-up question 5>
 
-Reply with a number, or ask anything else.
+Does this look right? Reply "looks right" … or reply with a number above to ask it next.
 ```
 
 **Picking the 5 questions** — aim for distinct angles, not 5 variations of the same question:
@@ -875,7 +876,7 @@ Surface the path(s) inline. For the auto-export case, the path is already in the
 
 This is the **live-query twin of the onboarding seed-validation flow** (`edit N` to fix an example's SQL / attach `notes[]`). When the user's reply to an answer is a *correction*, handle it **in this turn** — don't bounce them to `/agami-save-correction`. Two shapes:
 
-The correction can arrive three ways: the answer card's **Something's off** with its "Other" text (Phase 4d.2, which hands it to agami-save-correction), the user **types** it, or they paste the block from the chart page's **"Send feedback to Claude"** button (Phase 4e — each section has a *"✎ Fix the SQL or add a note"* editor + a footer button that packages every edit/note into a paste-ready block beginning *"Save this as a correction…"*). Either way, route it here.
+The correction can arrive three ways: the reply **Something's off** to an answer (Phase 4d.2, which hands it to agami-save-correction), the user **types** it, or they paste the block from the chart page's **"Send feedback to Claude"** button (Phase 4e — each section has a *"✎ Fix the SQL or add a note"* editor + a footer button that packages every edit/note into a paste-ready block beginning *"Save this as a correction…"*). Either way, route it here.
 
 - **Fix the SQL** — "that join is wrong, use `customer_id`", "exclude cancelled rows", or a pasted corrected query. Build the corrected SQL (write it from their words if they described the fix), **re-run it via Phase 3** to confirm it executes, and re-render the answer (4c–4f).
 - **Add a note** — "TOTAL can be negative for refunds", "amounts are in INR", "always exclude test users". A durable fact; no SQL change needed.
@@ -891,13 +892,13 @@ The correction can arrive three ways: the answer card's **Something's off** with
 
 **Make the routing visible** — name where each piece landed: *"Saved the corrected SQL as an example for `sales`, and (with your OK) set `ORDERS.TOTAL` unit → INR."* Never silent. Then set `feedback: "bad"` on this answer's `query_log.jsonl` entry, the one written right after 4d.1 and before the answer card (its shape is in Phase 5). `$ROOT` and `<area>` come from the model already loaded in Phase 1b; the original SQL is in this turn (and `query_log.jsonl`).
 
-**Positive confirmation ("This looks good").** The answer card's **Looks right** hands the answer to agami-save-golden (Phase 4d.2). The chart page (the full view, 4e) also has a **👍 This looks good** button (and the user may just say so) — a paste-back beginning *"This agami answer looked correct."* This is the inverse: set `feedback: "good"` on the log entry, and **consider** saving the question + SQL as a **confirmed** prompt example (`sm add-example`, `status: confirmed`) — **your discretion, not reflexively.** Add it when it's a genuinely reusable, non-trivial pattern (a real join, a metric definition exercised, a non-obvious filter); **skip** trivial one-offs (`SELECT COUNT(*)`), near-duplicates of an existing example, or throwaway exploration. Say what you did — *"Good to hear — saved it as an example so the next similar question reuses this SQL"* or *"Glad it's right (didn't add an example — it's close to one already in the library)."* A confirmed-good example is a strong few-shot, but the library's value is precision, not volume — don't dilute it.
+**Positive confirmation ("This looks good").** The reply **Looks right** hands the answer to agami-save-golden (Phase 4d.2). The chart page (the full view, 4e) also has a **👍 This looks good** button (and the user may just say so) — a paste-back beginning *"This agami answer looked correct."* This is the inverse: set `feedback: "good"` on the log entry, and **consider** saving the question + SQL as a **confirmed** prompt example (`sm add-example`, `status: confirmed`) — **your discretion, not reflexively.** Add it when it's a genuinely reusable, non-trivial pattern (a real join, a metric definition exercised, a non-obvious filter); **skip** trivial one-offs (`SELECT COUNT(*)`), near-duplicates of an existing example, or throwaway exploration. Say what you did — *"Good to hear — saved it as an example so the next similar question reuses this SQL"* or *"Glad it's right (didn't add an example — it's close to one already in the library)."* A confirmed-good example is a strong few-shot, but the library's value is precision, not volume — don't dilute it.
 
 ---
 
 ## Phase 5: Log
 
-**When:** once per answer, right after 4d.1 and before the answer card (4d.2), never again at the end of the turn: by the time Phase 5 is reached in reading order, the line is already written. Later steps only update that line (`feedback`, `chart_path`).
+**When:** once per answer, right after 4d.1 and before the answer is posted (4d.2), never again at the end of the turn: by the time Phase 5 is reached in reading order, the line is already written. Later steps only update that line (`feedback`, `chart_path`).
 
 Append one line to `<artifacts_dir>/local/query_log.jsonl`:
 
@@ -932,7 +933,7 @@ If the user takes a positive follow-up action — picking one of the 5 numbered 
 
 ## Phase 6: Post-install GitHub-star ask (full spec — triggered from Phase 4e.5)
 
-**This is the full spec for the GitHub-star ask. The trigger lives in Phase 4e.5 above** (after the answer card, before 4f) — the textual order of phases here is misleading because the ask must run *between* the answer card and 4f, not after Phase 5. If you read straight through 4f → Phase 5 (whose log line was already written right after 4d.1, before the answer card) → Phase 6, the ask never fires; that's why the trigger is duplicated up in 4e.5 with a pointer down here for the details.
+**This is the full spec for the GitHub-star ask. The trigger lives in Phase 4e.5 above** (at the start of the turn after the answer, before its reply is handled, never in the answer's own turn) — the textual order of phases here is misleading because the ask runs when that reply arrives, not after Phase 5. If you read straight through 4f → Phase 5 (whose log line was already written right after 4d.1, before the answer is posted) → Phase 6, the ask never fires; that's why the trigger is duplicated up in 4e.5 with a pointer down here for the details.
 
 **HARD RULES — read before emitting the ask (the LLM has hallucinated both of these):**
 
@@ -941,12 +942,12 @@ If the user takes a positive follow-up action — picking one of the 5 numbered 
 
 **Never narrate the plumbing.** Writing `query_log.jsonl` and checking/writing `local/.optins` are silent internal steps — do NOT announce them ("Now logging the query and checking the one-time opt-in gate" is exactly the kind of line that must never appear). The user sees the answer, then either the star ask or the follow-ups — never the bookkeeping behind them.
 
-A one-time, low-friction ask after the user's first successful query: "if this was useful, give us a star on GitHub". No email collection, no list. **The order matters:** the answer has to be readable, the ask has to feel like a discrete decision, and the 5 follow-up bullets must come AFTER the user has answered — not before. Otherwise the user reads "What next? 1. … 2. …" and then sees a modal pop up, loses context, and the follow-ups feel like clutter.
+A one-time, low-friction ask after the user's first successful query: "if this was useful, give us a star on GitHub". No email collection, no list. **The order matters:** the answer has to be readable first, so the ask never follows it in the same turn (4d.2), and the ask has to feel like a discrete decision.
 
 Sequence:
 
-1. Render the answer (Phase 4a–4d.2: approach, fetching, insight, table, how this was answered, and the answer card, handled).
-2. If `<artifacts_dir>/local/.optins` does not exist AND the query just succeeded: **surface the GitHub-star ask NOW**, before Phase 4f's follow-up bullets. Use `AskUserQuestion`:
+1. The answer (approach, fetching, insight, table, how this was answered, the follow-ups) ends its turn (Phase 4a–4f); the person replies to it.
+2. If `<artifacts_dir>/local/.optins` does not exist AND the query succeeded: **surface the GitHub-star ask NOW**: ask the star card first at the start of the next turn, then handle the reply (only when it is one of the four replies; a number or a new question never triggers it). Use `AskUserQuestion`:
 
    > Quick one — first query worked. **If this was useful, would you star us on GitHub?**
    >
@@ -956,8 +957,8 @@ Sequence:
    - `Yes — open GitHub now` — runs `bash "${CLAUDE_PLUGIN_ROOT}/scripts/open_in_browser" https://github.com/AgamiAI/agami-core` and surfaces a one-line "Thanks — opening GitHub. Star is in the top-right when you get there." (Failure-tolerant: if the open command fails, fall through with the URL printed in chat.)
    - `Maybe later` — write `.optins` so we don't ask again, surface "No problem. The link is github.com/AgamiAI/agami-core if you change your mind." (No `(Recommended)` marker — we'd genuinely prefer "Yes" if the user found it useful, but no marker on any of the three options keeps the ask non-pushy.)
    - `Already starred` — surface "Thanks for the early support." and write `.optins`.
-3. **Wait for the answer to the card.** It comes back in the same turn. Do NOT emit the 5 follow-up bullets before it.
-4. In the same turn, once the card is answered: process the decision (write `<artifacts_dir>/local/.optins`). Then — **whatever they answered** — surface the one-time **`/agami-serve` pointer** (below). After it, show the 5 follow-up bullets per Phase 4f, with a tiny acknowledgment line ("Now, where next?") before the numbered list.
+3. **Wait for the answer to the card.** It comes back in the same turn.
+4. In the same turn, once the card is answered: process the decision (write `<artifacts_dir>/local/.optins`). Then — **whatever they answered** — surface the one-time **`/agami-serve` pointer** (below), then handle the reply to the answer (4d.2), which waited for the star card.
 
 **The `/agami-serve` pointer (one-time, right after the star answer).** Plain prose — NOT an `AskUserQuestion`, NOT one of the numbered follow-ups. Surface it once, here, regardless of which of the three star responses they gave:
 
@@ -965,7 +966,7 @@ Sequence:
 
 Keep it to ~2 sentences; don't oversell, don't repeat it in the follow-up bullets. Because it lives in the same turn that writes `.optins`, it fires exactly once — every later query takes the `.optins`-exists path below and skips both the star ask and this pointer.
 
-If `<artifacts_dir>/local/.optins` already exists, skip the ask **and the `/agami-serve` pointer** entirely, and emit the 5 follow-ups in the same turn as the answer (Phase 4f as today).
+If `<artifacts_dir>/local/.optins` already exists, skip the ask **and the `/agami-serve` pointer** entirely.
 
 `<artifacts_dir>/local/.optins` shape (chmod 600):
 

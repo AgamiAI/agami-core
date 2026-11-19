@@ -1758,3 +1758,147 @@ def test_an_approved_verb_never_reaches_the_installer_after_its_guard(art, tmp_p
     runs = ran.read_text()
     assert "from semantic_model import cli" in runs
     assert f" {verb} {art / 'acme'}" in runs
+
+
+# --- #699: links to a UNC share ------------------------------------------------------------------------
+# A path the call names may be local by its text and still reach a share through a link (a symlink, or
+# on Windows a junction) on the way. Every check reads each link's target as text before anything
+# follows it, so a link to `\\host\share` is refused before `realpath`, `exists` or `stat` can open it.
+
+
+def _nothing_follows_into_unc(monkeypatch) -> list:
+    """The filesystem calls that follow links, made to note any whose argument leads to the probe
+    share once links are followed (judged with the real `realpath`, which on macOS and Linux reads
+    `//uncprobe` as a local folder)."""
+    real_realpath = os.path.realpath
+    touched: list = []
+
+    def leads_there(p) -> bool:
+        try:
+            return "uncprobe" in str(p) or "uncprobe" in real_realpath(p)
+        except (OSError, ValueError, TypeError):
+            return False
+
+    for mod, name in (
+        (os.path, "realpath"),
+        (os.path, "exists"),
+        (os.path, "isfile"),
+        (os.path, "isdir"),
+        (os, "stat"),
+    ):
+        real = getattr(mod, name)
+
+        def spy(p, *a, _real=real, **k):
+            if leads_there(p):
+                touched.append(p)
+            return _real(p, *a, **k)
+
+        monkeypatch.setattr(mod, name, spy)
+    return touched
+
+
+UNC_TARGET = "//uncprobe/share"
+
+
+@SYMLINKS
+@pytest.mark.parametrize("where", ["scratch_file", "scratch_folder", "local", "model_root", "artifacts"])
+def test_a_link_to_a_unc_share_is_refused_before_anything_follows_it(art, tmp_path, monkeypatch, where):
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    scratch = art / "local" / "tmp" / "agami-x.json"
+    root = art / "acme"
+    if where == "scratch_file":
+        scratch.symlink_to(UNC_TARGET + "/agami-x.json")
+    elif where == "scratch_folder":
+        (art / "local" / "tmp").rmdir()
+        (art / "local" / "tmp").symlink_to(UNC_TARGET)
+    elif where == "local":
+        shutil.rmtree(art / "local")
+        (art / "local").symlink_to(UNC_TARGET)
+    elif where == "model_root":
+        root.rmdir()
+        root.symlink_to(UNC_TARGET + "/acme")
+    else:
+        linked = tmp_path / "artlink"
+        linked.symlink_to(UNC_TARGET)
+        monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(linked))
+        scratch = linked / "local" / "tmp" / "agami-x.json"
+        root = linked / "acme"
+    touched = _nothing_follows_into_unc(monkeypatch)
+    assert HOOK_MOD.scratch_file(str(scratch)) is (where == "model_root")
+    if where in ("model_root", "artifacts", "local"):
+        assert HOOK_MOD.model_root(str(root)) is (where == "local")
+    assert touched == []
+
+
+@SYMLINKS
+def test_a_link_whose_target_climbs_through_a_unc_link_is_refused_before_anything_follows_it(
+    art, tmp_path, monkeypatch
+):
+    """`artlink -> pivot/../artifacts`, `pivot -> //uncprobe/share`: normalized as text, the target
+    loses `pivot` and looks local, but the OS follows `pivot` first. A link target with a parent
+    segment is never approved, so nothing reaches the share."""
+    (tmp_path / "pivot").symlink_to(UNC_TARGET)
+    linked = tmp_path / "artlink"
+    linked.symlink_to(os.path.join("pivot", "..", "artifacts"))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(linked))
+    touched = _nothing_follows_into_unc(monkeypatch)
+    assert HOOK_MOD.scratch_file(str(art / "local" / "tmp" / "agami-x.json")) is False
+    assert HOOK_MOD.model_root(str(art / "acme")) is False
+    assert HOOK_MOD._no_network_link(str(linked / "acme")) is False
+    assert touched == []
+
+
+@SYMLINKS
+def test_a_parent_segment_in_any_link_target_says_nothing(art, tmp_path, monkeypatch):
+    """Even a local one: telling a harmless `..` from one that climbs through a link would mean
+    following links the check has not read yet."""
+    (tmp_path / "plain").mkdir()
+    linked = tmp_path / "artlink"
+    linked.symlink_to(os.path.join("plain", "..", "artifacts"))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(linked))
+    assert HOOK_MOD.scratch_file(str(art / "local" / "tmp" / "agami-x.json")) is False
+    # ... and a relative link without one is followed as before
+    linked.unlink()
+    linked.symlink_to("artifacts")
+    assert HOOK_MOD.scratch_file(str(art / "local" / "tmp" / "agami-x.json")) is True
+    assert HOOK_MOD.model_root(str(art / "acme")) is True
+
+
+@SYMLINKS
+def test_a_plugin_link_to_a_unc_share_is_refused_before_anything_follows_it(art, monkeypatch):
+    link = PLUGIN / "shared" / "zz-test-unc-link.md"
+    link.symlink_to(UNC_TARGET + "/x.md")
+    try:
+        touched = _nothing_follows_into_unc(monkeypatch)
+        assert HOOK_MOD.plugin_file(str(link)) is False
+        assert touched == []
+    finally:
+        link.unlink()
+
+
+@SYMLINKS
+def test_a_chain_of_local_links_to_a_local_scratch_file_is_still_followed(art, tmp_path, monkeypatch):
+    """The text check refuses only a network or device target: a scratch folder reached through a
+    plain local link on the way to the artifacts folder still works as before."""
+    linked = tmp_path / "artlink"
+    linked.symlink_to(art)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(linked))
+    assert HOOK_MOD.scratch_file(str(art / "local" / "tmp" / "agami-x.json")) is True
+    assert HOOK_MOD.model_root(str(art / "acme")) is True
+
+
+@pytest.mark.skipif(not hasattr(os, "link"), reason="hard links")
+def test_a_hard_linked_file_inside_the_plugin_says_nothing(art):
+    """A file in the plugin tree that shares its contents with another name (which could be anywhere)
+    is not approved for Read, as the scratch and contained-model readers already refuse one."""
+    first = PLUGIN / "shared" / "zz-test-hard-a.md"
+    second = PLUGIN / "shared" / "zz-test-hard-b.md"
+    first.write_text("x")
+    try:
+        assert _decision(_file("Read", str(first)), art) == "allow"
+        os.link(first, second)
+        assert _decision(_file("Read", str(first)), art) is None
+        assert _decision(_file("Read", str(second)), art) is None
+    finally:
+        first.unlink()
+        second.unlink(missing_ok=True)

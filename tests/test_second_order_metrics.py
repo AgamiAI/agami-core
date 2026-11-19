@@ -138,10 +138,11 @@ def _rel(from_table, from_column, to_table, to_column, card="many_to_one", **kw)
 
 
 def _two_table_org(*, rels=None, base_primary=None, grain=("placed_at",), stype="PostgreSQL",
-                   items_table="OrderItems", cross_rels=None):
+                   items_table="OrderItems", cross_rels=None, base_joins=()):
     """A line-item base metric (on a mixed-case table) joined to orders for its grain."""
     units = m.Metric(name="daily_units", calculation="c", bindings={stype: "SUM(quantity)"},
-                     source_tables=[items_table, "orders"], primary_table=base_primary)
+                     source_tables=[items_table, "orders"], primary_table=base_primary,
+                     joins=[{"table": t, "kind": k} for t, k in base_joins])
     avg = m.Metric(name="avg_daily_units", calculation="c",
                    bindings={stype: "AVG({daily_units})"}, base_metrics=["daily_units"],
                    inner_grain=list(grain), source_tables=[items_table, "orders"])
@@ -417,3 +418,59 @@ def test_a_dotted_grain_outside_the_source_tables_is_refused(grain):
 ])
 def test_a_reserved_name_on_an_upper_folding_engine_is_quoted_upper_case(name, stype, expected):
     assert D._table_ref(name, stype) == expected
+
+
+# --- a base metric's declared join kind (`Metric.joins`) ---
+#
+# Synthesis once joined every table INNER whatever the base declared, so a base that keeps line
+# items with no order (`orders` joined `left`) lost them before the per-day totals were taken.
+
+PLAIN_JOIN = (
+    '(SELECT AVG(daily_units) FROM (SELECT orders.placed_at, SUM(quantity) AS daily_units '
+    'FROM "OrderItems" INNER JOIN orders ON "OrderItems".order_id = orders.id '
+    'GROUP BY orders.placed_at) _inner)'
+)
+
+
+@pytest.mark.parametrize("joins", [(), (("orders", "inner"),)], ids=["undeclared", "inner"])
+def test_a_base_without_a_left_join_synthesizes_exactly_as_before(joins):
+    org, avg = _two_table_org(base_joins=joins)
+    assert _sql(org, avg) == PLAIN_JOIN
+
+
+def test_a_base_declaring_a_left_join_is_synthesized_with_it():
+    org, avg = _two_table_org(base_joins=(("orders", "left"),))
+    assert _sql(org, avg) == PLAIN_JOIN.replace("INNER JOIN", "LEFT JOIN")
+
+
+def test_a_base_declaring_its_measured_table_optional_is_refused():
+    # `OrderItems` joined `left` keeps orders with no line item: the measured table on the
+    # optional side, which joining from it cannot express.
+    org, avg = _two_table_org(base_joins=(("OrderItems", "left"),))
+    with pytest.raises(D.DerivedError, match="'daily_units' declares a left join") as err:
+        _sql(org, avg)
+    assert "'OrderItems'" in str(err.value) and "can't be composed yet" in str(err.value)
+
+
+def test_the_declared_left_join_keeps_its_rows_on_a_real_engine():
+    duckdb = pytest.importorskip("duckdb")
+    con = duckdb.connect()
+    con.execute('CREATE TABLE "OrderItems" (id INTEGER, order_id INTEGER, quantity INTEGER)')
+    con.execute("CREATE TABLE orders (id INTEGER, placed_at DATE)")
+    con.execute("INSERT INTO orders VALUES (1, '2026-01-01'), (2, '2026-01-01'), "
+                "(3, '2026-01-02')")
+    # Item 5 has no order: the declared left join keeps it, an inner join drops it.
+    con.execute('INSERT INTO "OrderItems" VALUES (1, 1, 2), (2, 2, 4), (3, 3, 3), (4, 3, 1), '
+                '(5, 99, 8)')
+    # The base as declared, written out by hand: per-day totals 6, 4 and 8 (no day).
+    days = con.execute(
+        'SELECT orders.placed_at, SUM(quantity) FROM "OrderItems" '
+        'LEFT JOIN orders ON "OrderItems".order_id = orders.id GROUP BY orders.placed_at'
+    ).fetchall()
+    assert sorted(t for _, t in days) == [4, 6, 8]
+    left, _ = _two_table_org(base_joins=(("orders", "left"),), stype="DuckDB")
+    plain, _ = _two_table_org(stype="DuckDB")
+    avg_left = _sql(left, left.subject_areas[0].metrics[1], "DuckDB")
+    avg_plain = _sql(plain, plain.subject_areas[0].metrics[1], "DuckDB")
+    assert con.execute(f"SELECT {avg_left}").fetchone()[0] == 6
+    assert con.execute(f"SELECT {avg_plain}").fetchone()[0] == 5

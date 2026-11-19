@@ -59,8 +59,26 @@ def _plain(path: str) -> Path:
     return Path(os.path.abspath(path))
 
 
-def _real_dir(folder: Path) -> bool:
-    return folder.is_dir() and os.path.realpath(folder) == str(folder)
+def _is_link(st: os.stat_result) -> bool:
+    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & _REPARSE_POINT)
+
+
+def _first_link(art: Path, folder: Path) -> Path | None:
+    """The first component of `folder` below `art` that is a link, looked at outside in with `lstat`,
+    which never follows one; None when there is none. `exists()` and `realpath()` follow links, so on
+    Windows a link to a UNC share would be opened (sending the person's credentials) before it was
+    refused, and a dangling link read as a missing folder. Nothing below a missing folder can exist,
+    so the walk stops there. `art` itself comes resolved from `agami_paths`."""
+    here = art
+    for part in folder.relative_to(art).parts:
+        here = here / part
+        try:
+            st = os.lstat(here)
+        except FileNotFoundError:
+            return None
+        if _is_link(st):
+            return here
+    return None
 
 
 def _not_a_link(p: Path) -> None:
@@ -80,8 +98,9 @@ def _not_a_link(p: Path) -> None:
 
 
 def scratch_dir() -> Path:
-    tmp = artifacts_dir() / "local" / "tmp"
-    if not _real_dir(tmp):
+    art = artifacts_dir()
+    tmp = art / "local" / "tmp"
+    if _first_link(art, tmp) is not None or not tmp.is_dir():
         raise Refused(f"agami's scratch folder {tmp} is missing or is a link")
     return tmp
 
@@ -118,13 +137,11 @@ def model_file(path: str, *rel: str, profile_at: int | None = None) -> Path:
     want = art.joinpath(*parts)
     if p != want:
         raise Refused(f"{path} is not where this script writes ({art}/{'/'.join(rel)})")
-    folder = want.parent
-    # A missing folder does not end the walk: a link above it would still carry the write (and the
-    # mkdir in save()) outside the artifacts folder.
-    while folder != art.parent:
-        if folder.exists() and os.path.realpath(folder) != str(folder):
-            raise Refused(f"{folder} is a link; agami writes only inside its own folders")
-        folder = folder.parent
+    # A link anywhere above the file, a dangling one too, would carry the write (and the mkdir in
+    # save()) outside the artifacts folder.
+    link = _first_link(art, want.parent)
+    if link is not None:
+        raise Refused(f"{link} is a link; agami writes only inside its own folders")
     _not_a_link(p)
     return p
 

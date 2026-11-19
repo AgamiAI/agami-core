@@ -777,16 +777,16 @@ def test_distinct_on_is_row_order_not_de_duplication(org):
 def test_steps_that_fan_out_stay_linear(org):
     """Each step joining the one before twice used to be walked 2^n times. A step body is entered
     once; the second reference makes the number undetermined at once."""
-    import time
-
     ctes = ["c0 AS (SELECT id, total_amount FROM orders)"] + [
         f"c{i} AS (SELECT a.id, a.total_amount FROM c{i - 1} a JOIN c{i - 1} b ON b.id = a.id)"
         for i in range(1, 40)
     ]
     sql = "WITH " + ", ".join(ctes) + " SELECT SUM(total_amount) AS n FROM c39"
-    started = time.perf_counter()
+    # Relative to a parse-and-walk of the same statement on this machine (tests/timing_bound.py).
+    # Measured 8.2x idle and at most 10.2x with 8 CPU burners running; 100x leaves 10x headroom,
+    # and a 2^n walk is astronomically past it. The backstop catches a hang.
+    assert_assembly_within(lambda: _one(org, sql, "n"), sql, "postgres", repeats=3, ratio=100)
     item = _one(org, sql, "n")
-    assert time.perf_counter() - started < 1.0
     assert item["status"] == rt.UNDETERMINED
 
 

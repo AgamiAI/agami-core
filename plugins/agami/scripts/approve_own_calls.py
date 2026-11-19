@@ -18,7 +18,7 @@ permission flow applies (a skill's `allowed-tools` still cover its own turn). It
   B. Write / Edit / Read of a file directly inside `<artifacts_dir>/local/tmp/` named
      `agami-*.json|txt|tsv|md` (case-sensitive), symlinks resolved, not a hard link. Edit gets
      exactly Write's checks: it can do nothing to such a file that Write could not.
-  C. Read of a file under this plugin's root.
+  C. Read of a file under this plugin's root, not a hard link.
 
 The plugin root is where this file is, never anything the call names. Every check fails closed:
 any doubt (an input it can't parse, a path it can't resolve, an exception) prints nothing. It
@@ -93,6 +93,52 @@ def _plain_path(value: str) -> bool:
     return not any(p in (".", "..") for p in re.split(r"[\\/]", value))
 
 
+# More links than this on one path is a loop, or a path built to stall the check.
+MAX_LINKS = 40
+
+
+def _network_text(value: str) -> bool:
+    lead = value[:2].replace("/", "\\")
+    return lead == "\\\\" or ntpath.splitdrive(ntpath.normpath(value))[0].startswith("\\\\")
+
+
+def _no_network_link(path: str) -> bool:
+    """False when the target of any link on the way to `path` is a UNC or device path, judged by its
+    text before anything follows it. A path that is local by its text can still reach a share through
+    a symlink or junction, and `realpath`, `exists` or `stat` would open it. Each component's target
+    is read with `readlink` (which does not follow it), outside in, and the walk restarts on the
+    substituted path, the way the OS follows a chain. A `..` segment, in the path or a link's
+    target, is False too: normalizing it away as text would skip the component before it, and the
+    OS follows that one first (`a -> pivot/../x` with `pivot` a link to a share). Mirrors
+    `semantic_model.loader._refuse_network_links`; mirrored, not imported, like `artifacts_dir`."""
+    todo, hops = path, 0
+    while True:
+        if _network_text(todo) or ".." in re.split(r"[\\/]", todo):
+            return False
+        todo = os.path.normpath(todo)  # with no `..`, drops only `.` and repeated separators
+        prefixes, cur = [], todo
+        while True:  # `todo` and each folder above it, up to the root
+            head, tail = os.path.split(cur)
+            if not tail:
+                break
+            prefixes.append(cur)
+            cur = head
+        for here in reversed(prefixes):  # outside in
+            try:
+                target = os.readlink(here)
+            except (OSError, ValueError):  # not a link, or not there: nothing to follow
+                continue
+            hops += 1
+            if _network_text(target) or hops > MAX_LINKS:
+                return False
+            # every folder above `here` is a real folder, so its parent is exact
+            rest = todo[len(here) :].lstrip("\\/")
+            todo = os.path.join(os.path.dirname(here), target, *([rest] if rest else []))
+            break
+        else:
+            return True
+
+
 def artifacts_dir() -> str:
     """`<artifacts_dir>` resolved as `agami_paths.artifacts_dir()` and the launchers do it:
     `$AGAMI_ARTIFACTS_DIR`, then the first line of `~/.config/agami/path`, then `~/agami-artifacts`.
@@ -109,6 +155,8 @@ def artifacts_dir() -> str:
     art = os.path.expanduser(art or os.path.join("~", "agami-artifacts"))
     if not os.path.isabs(art):
         raise Doubt("relative artifacts folder")
+    if not _no_network_link(art):
+        raise Doubt("artifacts folder links to a network or device path")
     real = os.path.realpath(art)
     if not os.path.isdir(real):
         raise Doubt("no artifacts folder")
@@ -118,6 +166,8 @@ def artifacts_dir() -> str:
 def scratch_dir() -> str:
     """`<artifacts_dir>/local/tmp`, resolved, when `local` and `tmp` are real folders, not links."""
     tmp = os.path.join(artifacts_dir(), "local", "tmp")
+    if not _no_network_link(tmp):
+        raise Doubt("scratch folder links to a network or device path")
     real = os.path.realpath(tmp)
     if _norm(real) != _norm(tmp) or not os.path.isdir(real):
         raise Doubt("scratch folder missing or a link")
@@ -135,6 +185,8 @@ def scratch_file(file_path: Any) -> bool:
     try:
         tmp = scratch_dir()
     except Doubt:
+        return False
+    if not _no_network_link(file_path):
         return False
     real = os.path.realpath(file_path)
     if _norm(os.path.dirname(real)) != _norm(tmp) or not TMP_NAME.fullmatch(os.path.basename(real)):
@@ -164,6 +216,8 @@ def model_root(value: str) -> bool:
         art = artifacts_dir()
     except Doubt:
         return False
+    if not _no_network_link(value):
+        return False
     real = os.path.realpath(value)
     name = os.path.basename(real)
     if _norm(os.path.dirname(real)) != _norm(art) or not ROOT_NAME.fullmatch(name):
@@ -178,13 +232,23 @@ def model_root(value: str) -> bool:
 def plugin_file(file_path: Any) -> bool:
     if not isinstance(file_path, str) or not _plain_path(file_path):
         return False
+    if not _no_network_link(file_path):
+        return False
     root = _norm(os.path.realpath(PLUGIN_ROOT))
     real = _norm(os.path.realpath(file_path))
     try:
         inside = os.path.commonpath([root, real]) == root
     except ValueError:  # different drives on Windows
         return False
-    return inside and real != root and os.path.isfile(real)
+    if not inside or real == root:
+        return False
+    # A hard link's other name could be any file the person owns, so one name only, as the scratch
+    # and contained-model readers require.
+    try:
+        st = os.stat(real)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_nlink == 1
 
 
 # --- the verb table ---------------------------------------------------------------------------------

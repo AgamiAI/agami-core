@@ -68,7 +68,7 @@ def test_no_two_questions_in_a_skill_share_a_header():
 
 def test_rule_3a_puts_detail_in_the_option_preview():
     text = (PLUGIN / "shared" / "question-cards.md").read_text()
-    assert "## 3a. Detail goes in an option's preview, not the question" in text
+    assert "## 3a. The question and the descriptions carry what decides; a preview only expands it" in text
 
 
 # A page rendered `--read-only` has no Generate button and no paste-back dialog (rule 6), so the
@@ -165,8 +165,8 @@ def test_rule_4_group_options_show_their_items() -> None:
     """A live run's join card offered "add all 16" and "only 1-8" without the joins themselves."""
     text = (PLUGIN / "shared" / "question-cards.md").read_text(encoding="utf-8")
     rule_4 = text[text.index("## 4. "):text.index("## 5. ")]
-    assert "A group option's `preview` lists every item the option" in rule_4
-    assert "chat table above" in rule_4
+    assert "A group option's description names the items it" in " ".join(rule_4.split())
+    assert "never above the card in its own message" in " ".join(rule_4.split())
 
 
 def test_rule_6a_back_to_the_cards_reads_the_helper_before_stopping_it() -> None:

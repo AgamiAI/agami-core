@@ -32,7 +32,7 @@ def _section(text: str, start: str, end: str) -> str:
 
 def test_the_examples_card_offers_add_my_own_every_time():
     six = _section(CONNECT, "## Phase 6:", "## Phase 7:")
-    assert "**Add my own** is on this card every time" in six
+    assert "**Add my own** is in the reply line every time" in six
     assert "| Add my own |" in six and LINK in six
     # with four options already (#674's order), dropping the failures is what gives way, and
     # typing still reaches it

@@ -73,13 +73,16 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"
 - `model-tree` is `{datasource, subject_areas:[{area, description, tables:[{table, review_state, columns:[…]}]}]}`. Per subject area, count its tables, and the hidden ones (`review_state: rejected`) apart.
 - `sensitive` gives `count` (personal-data columns still queryable) and `suspected_count`.
 
-Where the host can draw a visual in the chat, draw the overview card first ([`shared/overview-card.md`](../../shared/overview-card.md): one tile per area from `sm overview`, a click carries on here). Then post the overview, in this order:
+Where the host can draw a visual in the chat, draw the overview card first ([`shared/overview-card.md`](../../shared/overview-card.md): one tile per area from `sm overview`, a click carries on here). Then post the overview as the turn's last message, in this order:
 
 1. One sentence on sign-off, from the counts: *"4 metrics, 2 entities and 3 guessed joins need sign-off; 1 of them changed since it was approved."* or *"Nothing needs sign-off."*
 2. A table of the subject areas, `Subject area | Tables | Hidden`, largest first, at most 15 rows, then *"Showing 15 of <A> subject areas; <A−15> more."* when there are more.
 3. When `count` or `suspected_count` > 0, one line: *"<n> columns look like personal data and are still queryable."*
+4. The reply line: *Reply "review" to sign off what's waiting, "hide" to keep tables or columns out of queries, "look up <name>", or "full view".* Leave "review" out when nothing needs sign-off.
 
-Then call AskUserQuestion, one question (header `Model`), *"What would you like to do with the model?"*:
+No card follows the overview: it ends the turn ([long-text.md](../../shared/long-text.md)). Handle the reply as the four choices below; words that mean one of them count as it.
+
+**The overview card** (AskUserQuestion, header `Model`), asked after each action (below) with one line before it, *"What would you like to do with the model?"*:
 
 - **Review what needs sign-off**: approve or reject the definitions waiting (Phase 2). Mark it **(Recommended)** and put it first when anything needs sign-off; leave it out when nothing does.
 - **Hide tables or columns**: keep them out of every query (Phase 3).
@@ -88,7 +91,7 @@ Then call AskUserQuestion, one question (header `Model`), *"What would you like 
 
 "Other" takes a request in the person's words: a name to look up ("orders"), something to hide ("hide sales.stg_leads"), an edit ("add a metric: refund rate = refunds / captured payments", "describe orders.status as …"), an example to add ("add an example", "add my own examples": [`shared/own-examples.md`](../../shared/own-examples.md) from its step 1, then this card again), or "done". Route it to the phase it asks for; an edit becomes `sm curate` edit ops, or `sm add --kind metric` for a new metric, applied as Phase 6 says, then shown back in one line; "done" goes to Phase 7. A question ("show me the SQL", "why?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). Anything else you can't place is re-asked, never guessed.
 
-**After each action** (Phases 2–4), post one line on what changed and ask this card again, with the counts recomputed. Dismissing the card, or "done" in "Other", ends the session (Phase 7).
+**After each action** (Phases 2–4), post one line on what changed and ask the overview card, with the counts recomputed. Dismissing the card, or "done" in "Other", ends the session (Phase 7).
 
 ---
 
@@ -101,21 +104,21 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope rule1
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope rule2
 ```
 
-(Only `--scope preseed` or `--scope rule1` when `$ARGUMENTS` asked for it. The two calls' items are one list.) Keep the items whose `tab` is `review`. A metric's meaning is its `extra_lines` entry labelled `Definition`; an entity's is its `maps_to` (and `source_signal` when set); a guessed join's is its `title` and `cardinality`. An item with `changes_since_approval` was signed off before and has changed since: say so on its row, with what changed. Show a markdown table, `Kind | Name | What it means | SQL`, one short line per item taken from those fields (never a meaning you made up), at most 15 rows, then *"Showing 15 of <P>; <P−15> more."* when there are more. The **SQL** column is what the item maps to, so the person checks the formula and not only the words: a metric's binding for this database's engine from `bindings`, with its `source_tables`; a join's condition; an entity's `maps_to` column. Show it in backticks, cut at about 80 characters with `…` (the whole of it is answered on request, question-cards rule 5a).
+(Only `--scope preseed` or `--scope rule1` when `$ARGUMENTS` asked for it. The two calls' items are one list.) Keep the items whose `tab` is `review`. A metric's meaning is its `extra_lines` entry labelled `Definition`; an entity's is its `maps_to` (and `source_signal` when set); a guessed join's is its `title` and `cardinality`. An item with `changes_since_approval` was signed off before and has changed since: say so on its row, with what changed. **The list ends the turn**: one line, *"<P> definitions wait for your sign-off:"*, a markdown table, `Kind | Name | What it means | SQL`, one short line per item taken from those fields (never a meaning you made up), at most 15 rows, then *"Showing 15 of <P>; <P−15> more."* when there are more, and the reply line below. The **SQL** column is what the item maps to, so the person checks the formula and not only the words: a metric's binding for this database's engine from `bindings`, with its `source_tables`; a join's condition; an entity's `maps_to` column. Show it in backticks, cut at about 80 characters with `…` (the whole of it is answered on request, question-cards rule 5a). No card follows the list: a list before a card in the same message does not reach the person ([long-text.md](../../shared/long-text.md)).
 
-Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do with the <P> definitions waiting for sign-off?"*:
+The reply line: *Reply "approve all", "review each" or "later", or "page" to decide them on the model explorer.* Handle the reply as the choices below; words that mean one of them count as it:
 
-- **Approve all**: sign off every item as listed. Mark it **(Recommended)** and put it first only when the list is short and confident: every item fits in the table above (15 or fewer), none has `changes_since_approval`, and every metric has a `Definition`. Otherwise put **Review one by one** first and mark that one (Recommended).
+- **Approve all**: sign off every item as listed. Put **approve all** first in the reply line, with "(recommended)" after it, only when the list is short and confident: every item fits in the table above (15 or fewer), none has `changes_since_approval`, and every metric has a `Definition`; otherwise put **review each** first with "(recommended)".
 - **Review one by one**: up to 4 items per card (below).
 - **Skip for now**: nothing is signed; they still work, and answers that use one carry a warning until it is signed off.
-- **Review on a page**: the model explorer's Review tab, where the whole list is decided at once and saved from the page (Phase 5); then this card again with what is left.
+- **Review on a page**: the model explorer's Review tab, where the whole list is decided at once and saved from the page (Phase 5); then the list again with what is left, ending on the same reply line.
 
 | Answer | Do |
 |---|---|
-| Approve all | The identity card first if needed (Phase 0). With more than 15 items, list the ones the table above didn't show first and confirm ([question-cards rule 4](../../shared/question-cards.md#4-lists-longer-than-a-card-holds-are-summarised)). Then one batch: `{"op":"approve","kind":"<kind>","area":"<area>","name":"<name>","bulk":true}` per item (leave `area` out when the item's `area` is null, a cross-area metric or join), applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. |
+| Approve all | The identity card first if needed (Phase 0). With more than 15 items, list the ones the table above didn't show first, ending its turn on rule 4's reply line, and sign nothing until the reply ([question-cards rule 4](../../shared/question-cards.md#4-lists-longer-than-a-card-holds-are-summarised)). Then one batch: `{"op":"approve","kind":"<kind>","area":"<area>","name":"<name>","bulk":true}` per item (leave `area` out when the item's `area` is null, a cross-area metric or join), applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. |
 | Review one by one | The one-by-one cards below. |
 | Skip for now | Nothing is written. Back to the overview card. |
-| Review on a page | Phase 5 with `initial_tab=review`, then this card again, recounted. |
+| Review on a page | Phase 5 with `initial_tab=review`, then the list again, recounted, ending its turn on the reply line. |
 
 **Rule 1 guard.** A metric with an empty `Definition` can't be approved as it stands: on its card, ask for the definition in "Other" and apply it as an edit first.
 
@@ -161,7 +164,7 @@ From the `model-tree` output, build the groups that apply, skipping anything alr
 - **Personal-data columns**: `sm sensitive`'s `columns` and `suspected` together.
 - **Tables by subject area**: every visible table, grouped by its subject area.
 
-Show a table of the groups, `Group | Count | First few`, the first 5 names in each and *"and N more"*. Then call AskUserQuestion, one multiSelect question (header `Hide`), *"Which of these should queries never read?"*, at most 4 options, the groups that apply in the order above:
+No table goes above the card (long text before a card does not reach the person; [long-text.md](../../shared/long-text.md)): each option's description names the first 5 items in its group and *"and N more"*. Call AskUserQuestion, one multiSelect question (header `Hide`), *"Which of these should queries never read?"*, at most 4 options, the groups that apply in the order above:
 
 - **Staging and backup tables (<n>)**: hides every table in the group.
 - **Personal-data columns (<n>)**: asks the Phase 2 "Hide these from queries" question next, so the person picks which.

@@ -790,6 +790,18 @@ class Entity(_Base):
 # ---------------------------------------------------------------------------
 
 
+MetricJoinKind = Literal["left", "inner"]
+
+
+class MetricJoin(_Base):
+    """How one of a metric's tables joins the others (`Metric.joins`). `table` is the side a
+    `left` join keeps the other tables' rows without: a ticket never handed off still counts when
+    `handoffs` is joined `left`. The key is a declared relationship's, never restated here."""
+
+    table: str
+    kind: MetricJoinKind
+
+
 class Metric(_Base):
     name: str
     description: str = ""
@@ -826,6 +838,12 @@ class Metric(_Base):
     # `inner_grain`, then apply the outer aggregate) — illegal AVG(SUM(...)) is never emitted.
     # Empty for first-order / case-(a) metrics.
     inner_grain: list[str] = Field(default_factory=list)
+    # How the metric's tables join, when the binding reads more than one: the binding names
+    # columns, not joins, and an outer join's null-extended rows can change the figure, so without
+    # this a receipt cannot credit a statement that joined them (#42). Each entry names one of
+    # `source_tables` and the kind of join that brings it in; the key is the declared
+    # relationship's. Empty = not said, and an outer join over the binding stays unconfirmed.
+    joins: list[MetricJoin] = Field(default_factory=list)
     business_question: Optional[str] = None
     # what the formula does not cover ("gives no value when the start date is missing"), kept out
     # of description/calculation so it is served as a warning rather than read as the definition
@@ -854,13 +872,31 @@ class Metric(_Base):
         return v
 
     @model_serializer(mode="wrap")
-    def _omit_empty_caveats(self, handler: Any) -> Any:
-        # A metric without caveats dumps as before the field existed, so the file still loads on an
+    def _omit_empty_optional_lists(self, handler: Any) -> Any:
+        # A metric without caveats or joins dumps as before those fields existed, so the file still loads on an
         # older agami-core, which forbids unknown keys.
         data = handler(self)
-        if isinstance(data, dict) and not data.get("caveats"):
-            data.pop("caveats", None)
+        if isinstance(data, dict):
+            for key in ("caveats", "joins"):
+                if not data.get(key):
+                    data.pop(key, None)
         return data
+
+    @model_validator(mode="after")
+    def _joins_name_own_tables(self) -> "Metric":
+        # A join kind for a table the metric does not read says nothing about its figure, and two
+        # kinds for one table cannot both hold.
+        own = {t.lower() for t in self.source_tables}
+        seen: set = set()
+        for j in self.joins:
+            key = j.table.lower()
+            if key not in own:
+                raise ValueError(f"metric {self.name!r}: joins names {j.table!r}, which is not "
+                                 f"one of its source_tables {self.source_tables}")
+            if key in seen:
+                raise ValueError(f"metric {self.name!r}: joins may name {j.table!r} only once")
+            seen.add(key)
+        return self
 
     @model_validator(mode="after")
     def _semi_additive_coherent(self) -> "Metric":
@@ -1458,6 +1494,8 @@ __all__ = [
     "EntityMapping",
     "Entity",
     "Metric",
+    "MetricJoin",
+    "MetricJoinKind",
     "Relationship",
     "CrossSubjectAreaRelationship",
     "CrossDatasourceRelationship",

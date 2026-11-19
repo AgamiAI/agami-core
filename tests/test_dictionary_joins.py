@@ -178,6 +178,7 @@ def test_a_stated_reference_is_a_candidate_even_when_the_scan_cap_is_spent(
     assert [c["id"] for c in res["candidates"]] == [_REF] and res["probes"] == 1
     [cand] = [c for c in _file(out)["candidates"] if c["id"] == _REF]
     assert cand["evidence"]["found_by"] == "dictionary"
+    assert cand["recommend"] == "add"   # the dictionary states it and the data bears it out
     assert cand["evidence"]["dictionary"] == "TEXT. FK -> parent.pkey"
     assert (cand["evidence"]["matched"], cand["evidence"]["sampled"]) == (3, 3)
     assert cand["op"]["relationship"] == "many_to_one" and cand["op"]["to_column"] == "pkey"

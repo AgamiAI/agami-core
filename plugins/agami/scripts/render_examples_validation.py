@@ -148,7 +148,12 @@ def _read_files(args: list[str], read=None) -> list[tuple[str, object, list]]:
     files, seen = [], {}
     for arg in args:
         area, path = _split_label(arg)
-        real = os.path.realpath(os.path.expanduser(path))
+        # Under the guard (`read` given) the key is lexical: resolving links here would follow a
+        # file swapped for a network-share link before the no-follow reader could refuse it. Case
+        # is folded where the filesystem folds it, so `a.json` and `A.json` stay one file.
+        expanded = os.path.expanduser(path)
+        real = (os.path.normcase(os.path.normpath(os.path.abspath(expanded))) if read is not None
+                else os.path.realpath(expanded))
         if real in seen:
             # Its examples would get two numbers, and write-back keeps only the last.
             raise ValueError(f"{path}: given twice (also as {seen[real]})")
@@ -201,7 +206,10 @@ def main() -> int:
             return _scratch_out.refuse("render_examples_validation.py", e)
 
     try:
-        files = _read_files(args.items_file)
+        # Under the guard each file is read link-safe (a link swapped in since its check is refused),
+        # as the decisions parser reads it.
+        files = _read_files(args.items_file,
+                            _scratch_out.read_scratch_text if _scratch_out.guarded() else None)
     except ValueError as e:
         sys.stderr.write(f"--items-file {e}\n")
         return 1

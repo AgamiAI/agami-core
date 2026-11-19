@@ -4,6 +4,7 @@ exactly what it printed before."""
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
@@ -392,3 +393,40 @@ def test_remove_example_reports_an_already_rejected_example_never_silently(tmp_p
     assert rc == 0 and d["totals"] == {"areas": 2, "rejected": 1, "skipped": 1}
     assert d["skipped"] == [{"item": "how many rows?",
                              "reason": "already rejected in area 'ops'; nothing changed"}]
+
+
+def test_seed_examples_with_no_area_works_under_the_scratch_guard(tmp_path, monkeypatch):
+    """#699: under AGAMI_SCRATCH_ONLY the every-area form passed each area its seeds through a temp
+    file outside scratch; the guard refused it inside the captured run, so the call exited 2 with
+    no output at all. Each area now gets its seeds directly."""
+    art = tmp_path / "art"
+    (art / "local" / "tmp").mkdir(parents=True)
+    root = art / "acme"
+    root.mkdir()
+    _model(root)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    monkeypatch.setenv("AGAMI_SCRATCH_ONLY", "1")
+    monkeypatch.setattr(introspect, "make_execute_sql_runner", lambda profile: (lambda sql: []))
+    seeds = art / "local" / "tmp" / "agami-seeds.json"
+    seeds.write_text(json.dumps([
+        {"area": "sales", "question": "orders?", "sql": "SELECT COUNT(*) FROM orders"},
+        {"area": "ops", "question": "shipments?", "sql": "SELECT COUNT(*) FROM shipments"}]))
+    try:
+        rc, out = _run(["seed-examples", str(root), "--profile", "p", "--file", str(seeds)])
+    except SystemExit as e:
+        pytest.fail(f"exited {e.code} with no output")
+    d = json.loads(out)
+    assert rc == 0 and d["added"] == ["example sales/orders?", "example ops/shipments?"]
+    assert [e["question"] for e in list_prompt_examples(root, "ops")] == ["shipments?"]
+
+
+def test_an_exit_inside_one_area_still_prints_what_it_said(tmp_path, monkeypatch, capsys):
+    """A single-area command that stops with SystemExit inside the combined run keeps its JSON error:
+    it was captured and dropped, so the call said nothing."""
+    def stops(_args):
+        print(json.dumps({"error": "MARKER-STOPPED"}))
+        raise SystemExit(2)
+
+    with pytest.raises(SystemExit):
+        cli._run_one_area(stops, argparse.Namespace(area=None), "sales")
+    assert json.loads(capsys.readouterr().out) == {"error": "MARKER-STOPPED"}

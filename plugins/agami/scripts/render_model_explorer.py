@@ -338,8 +338,9 @@ def main() -> int:
                            "(serve_page.py --decisions); approvals are signed as the saved identity")
     args = p.parse_args()
 
-    out_path = Path(os.path.expanduser(args.out)).resolve()
-    mpath = Path(os.path.expanduser(args.manifest_out)).resolve() if args.manifest_out else None
+    # Under the guard the paths are checked before anything resolves them: resolving a UNC path on
+    # Windows contacts the share (and sends the person's credentials) even if it is then refused.
+    mpath = None
     if _scratch_out.guarded():
         try:
             out_path = _scratch_out.scratch_file(args.out, _scratch_out.PAGE)
@@ -347,6 +348,10 @@ def main() -> int:
                 mpath = _scratch_out.scratch_file(args.manifest_out, ("json",))
         except _scratch_out.Refused as e:
             return _scratch_out.refuse("render_model_explorer.py", e)
+    else:
+        out_path = Path(os.path.expanduser(args.out)).resolve()
+        if args.manifest_out:
+            mpath = Path(os.path.expanduser(args.manifest_out)).resolve()
     artifacts_dir = Path(os.path.expanduser(args.artifacts_dir)).resolve()
     profile_dir = artifacts_dir / args.profile
     if not profile_dir.is_dir():

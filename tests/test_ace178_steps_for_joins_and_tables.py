@@ -31,6 +31,7 @@ from semantic_model import runtime as rt  # noqa: E402
 from receipt_trick_queries import STEP_JOIN_TRICKS  # noqa: E402
 from test_ace178_metrics_traced_through_steps import _related  # noqa: E402
 from test_semantic_model_runtime import _sales_org  # noqa: E402
+from timing_bound import assert_assembly_within  # noqa: E402
 
 FAN_EDGE = "orders (1) <- order_items (N)"
 
@@ -428,17 +429,6 @@ def _untraced() -> None:
         pass
 
 
-def _best_of(sql: str, runs: int = 2) -> float:
-    import time
-
-    best = float("inf")
-    for _ in range(runs):
-        started = time.perf_counter()
-        rt.assemble_receipt(_sales_org(), sql)
-        best = min(best, time.perf_counter() - started)
-    return best
-
-
 def _long_chain_read_by_many_arms() -> str:
     steps = ["s0 AS (SELECT o.id FROM orders o JOIN customers k ON k.id = o.customer_id)"]
     steps += [f"s{i} AS (SELECT id FROM s{i - 1})" for i in range(1, 700)]
@@ -474,16 +464,18 @@ def test_each_step_is_read_once_however_many_arms_reach_it(monkeypatch):
 
 @pytest.mark.parametrize(
     "build,bound",
-    [(_long_chain_read_by_many_arms, 2.0), (_resolvable_chain_joined_in_many_arms, 3.5)],
+    [(_long_chain_read_by_many_arms, 25), (_resolvable_chain_joined_in_many_arms, 20)],
     ids=["700 steps x 400 arms", "63 steps x 500 joined arms"],
 )
 def test_steps_read_by_many_arms_stay_inside_the_bound(build, bound):
-    """Measured before the fix on the part 1 head and on this branch: 1.33 s and 7.32 s for the
-    first, 2.31 s and 2.72 s for the second. Untraced pass only, best of two."""
+    """Relative to a parse-and-walk of the same statement on this machine (tests/timing_bound.py),
+    so a loaded runner slows both sides. Locally ~8x and ~6.5x that; the bound is ~3x each. Before
+    the fix the first took 5.5x its present time, well past 25x. Untraced pass only, best of three."""
     _untraced()
     sql = build()
     assert len(sql) <= 50_000
-    assert _best_of(sql) < bound
+    assert_assembly_within(lambda: rt.assemble_receipt(_sales_org(), sql), sql, None,
+                           repeats=3, ratio=bound)
 
 
 def test_past_the_reach_budget_every_arm_is_fed(monkeypatch):

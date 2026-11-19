@@ -322,3 +322,292 @@ def test_examples_go_flat_into_scratch_so_add_example_can_read_them(art):
 def test_without_the_guard_nothing_changes(tmp_path, monkeypatch):
     monkeypatch.delenv("AGAMI_SCRATCH_ONLY", raising=False)
     assert not _scratch_out.guarded()
+
+
+# --- #699: links are inspected outside in, before anything follows them --------------------------------
+
+
+def _follows_into(monkeypatch, probe: str) -> list:
+    """The calls that follow links, made to note any whose argument leads to `probe` once followed
+    (judged with the real `realpath`; on macOS and Linux `//uncprobe` is just a local name)."""
+    real_realpath = os.path.realpath
+    touched: list = []
+
+    def leads_there(p) -> bool:
+        try:
+            return probe in str(p) or probe in real_realpath(p)
+        except (OSError, ValueError, TypeError):
+            return False
+
+    for mod, name in ((os.path, "realpath"), (os.path, "exists"), (os.path, "isdir"), (os, "stat")):
+        real = getattr(mod, name)
+
+        def spy(p, *a, _real=real, **k):
+            if leads_there(p):
+                touched.append(p)
+            return _real(p, *a, **k)
+
+        monkeypatch.setattr(mod, name, spy)
+    return touched
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_a_scratch_folder_linked_to_a_unc_share_is_refused_before_it_is_followed(art, monkeypatch):
+    (art / "local" / "tmp").rmdir()
+    (art / "local" / "tmp").symlink_to("//uncprobe/share")
+    touched = _follows_into(monkeypatch, "uncprobe")
+    with pytest.raises(_scratch_out.Refused, match="is a link"):
+        _scratch_out.scratch_file(str(art / "local" / "tmp" / "agami-x.json"))
+    assert touched == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_a_model_spec_folder_linked_to_a_unc_share_is_refused_before_it_is_followed(art, monkeypatch):
+    (art / "local" / "model-spec").symlink_to("//uncprobe/share")
+    touched = _follows_into(monkeypatch, "uncprobe")
+    path = str(art / "local" / "model-spec" / "acme" / "spec.json")
+    with pytest.raises(_scratch_out.Refused, match="is a link"):
+        _scratch_out.model_file(path, "local", "model-spec", "<profile>", "spec.json", profile_at=2)
+    assert touched == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_the_core_scratch_folder_linked_to_a_unc_share_is_refused_before_it_is_followed(art, monkeypatch):
+    sys.path.insert(0, str(PLUGIN.parent.parent / "packages" / "agami-core" / "src"))
+    from semantic_model import scratch
+
+    (art / "local" / "tmp").rmdir()
+    (art / "local" / "tmp").symlink_to("//uncprobe/share")
+    touched = _follows_into(monkeypatch, "uncprobe")
+    with pytest.raises(scratch.NotScratch, match="is a link"):
+        scratch.in_scratch(str(art / "local" / "tmp" / "agami-x.json"))
+    assert touched == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_a_dangling_link_at_samples_is_refused_and_nothing_is_made_where_it_points(art, tmp_path):
+    # `exists()` is false for a link whose target is missing, so the old walk took it for a missing
+    # folder; save() would then have made the target and written store.db outside the folder.
+    target = tmp_path / "elsewhere" / "samples"
+    (art / "local" / "samples").symlink_to(target)
+    with pytest.raises(_scratch_out.Refused, match="is a link"):
+        _scratch_out.model_file(
+            str(art / "local" / "samples" / "store.db"), "local", "samples", "store.db"
+        )
+    assert not target.exists() and not target.parent.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_a_dangling_link_at_the_samples_folder_stops_the_sample_build(art, tmp_path):
+    target = tmp_path / "elsewhere" / "samples"
+    (art / "local" / "samples").symlink_to(target)
+    proc = _run(
+        PLUGIN / "samples" / "store" / "build_sample.py",
+        "--out",
+        str(art / "local" / "samples" / "store.db"),
+    )
+    assert proc.returncode == 2 and _guard_said_no(proc), (proc.stdout, proc.stderr)
+    assert not target.exists()
+
+
+# --- #699: what a guarded renderer reads ------------------------------------------------------------------
+
+MARKER = "MARKER-NEVER-PRINTED"
+
+
+def _main(module: str, argv: list[str], monkeypatch) -> int:
+    import importlib
+
+    mod = importlib.import_module(module)
+    monkeypatch.setattr(sys, "argv", [module, *argv])
+    try:
+        rc = mod.main()
+    except SystemExit as e:  # argparse
+        rc = e.code
+    return rc
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_an_items_file_swapped_for_a_link_after_its_check_is_not_read(art, tmp_path, monkeypatch, capsys):
+    """The examples dashboard checks each items file's name, then reads it. A link swapped in between
+    must not be followed: the read itself refuses a link."""
+    outside = tmp_path / "home" / "outside.json"
+    outside.parent.mkdir()
+    outside.write_text(json.dumps([{"n": 1, "question": MARKER, "sql": "SELECT 1"}]))
+    items = art / "local" / "tmp" / "agami-items.json"
+    items.write_text("[]")
+    out = art / "local" / "tmp" / "agami-page.html"
+    real_check = _scratch_out.scratch_file
+    swapped = []
+
+    def check_then_swap(path, exts=_scratch_out.TEXT):
+        p = real_check(path, exts)
+        if p == items and not swapped:
+            items.unlink()
+            items.symlink_to(outside)
+            swapped.append(p)
+        return p
+
+    monkeypatch.setattr(_scratch_out, "scratch_file", check_then_swap)
+    rc = _main(
+        "render_examples_validation",
+        ["--title", "t", "--profile", "acme", "--items-file", str(items), "--out", str(out)],
+        monkeypatch,
+    )
+    said = capsys.readouterr()
+    assert swapped and rc != 0
+    assert MARKER not in said.out + said.err
+    assert not out.exists() or MARKER not in out.read_text()
+
+
+def _no_resolve_of(monkeypatch, probe: str) -> list:
+    touched: list = []
+    real_resolve, real_realpath = Path.resolve, os.path.realpath
+
+    def resolve(self, *a, **k):
+        if probe in str(self):
+            touched.append(str(self))
+        return real_resolve(self, *a, **k)
+
+    def realpath(p, *a, **k):
+        if probe in str(p):
+            touched.append(str(p))
+        return real_realpath(p, *a, **k)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    monkeypatch.setattr(os.path, "realpath", realpath)
+    return touched
+
+
+def test_a_guarded_examples_page_never_resolves_an_items_file_before_reading_it(art, monkeypatch):
+    """Copilot on #703: the dedupe key used `realpath`, which would follow a file swapped for a
+    network-share link before the no-follow reader refused it. Under the guard it is lexical."""
+    items = art / "local" / "tmp" / "agami-itemsprobe.json"
+    items.write_text("[]")
+    out = art / "local" / "tmp" / "agami-page.html"
+    touched = _no_resolve_of(monkeypatch, "itemsprobe")
+    _main(
+        "render_examples_validation",
+        ["--title", "t", "--profile", "acme", "--items-file", str(items), "--out", str(out)],
+        monkeypatch,
+    )
+    assert touched == []
+
+
+def test_a_guarded_examples_page_refuses_an_items_file_given_twice_in_another_case(
+    art, monkeypatch, capsys
+):
+    """Copilot on #703: the lexical key must still fold case where the filesystem does, or one
+    file named twice in two cases gets two sets of numbers. Windows' `normcase`, simulated."""
+    tmp = art / "local" / "tmp"
+    (tmp / "agami-items.json").write_text("[]")
+    out = tmp / "agami-page.html"
+    monkeypatch.setattr(os.path, "normcase", lambda p: os.fspath(p).lower())
+    rc = _main(
+        "render_examples_validation",
+        ["--title", "t", "--profile", "acme", "--items-file", str(tmp / "agami-items.json"),
+         "--items-file", str(tmp / "agami-ITEMS.json"), "--out", str(out)],
+        monkeypatch,
+    )
+    assert rc != 0 and "given twice" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("which", ["--out", "--manifest-out"])
+def test_a_guarded_explorer_refuses_a_unc_output_before_resolving_it(art, monkeypatch, capsys, which):
+    unc = "//uncprobe/share/agami-x." + ("html" if which == "--out" else "json")
+    argv = ["--profile", "acme", "--artifacts-dir", str(art), "--out",
+            str(art / "local" / "tmp" / "agami-x.html")]
+    if which == "--out":
+        argv[-1] = unc
+    else:
+        argv += ["--manifest-out", unc]
+    touched = _no_resolve_of(monkeypatch, "uncprobe")
+    rc = _main("render_model_explorer", argv, monkeypatch)
+    assert rc == 2 and "refused" in capsys.readouterr().err
+    assert touched == []
+
+
+def _signed(art: Path) -> None:
+    (art / "local" / ".config").write_text(
+        json.dumps({"reviewer_email": "you@example.com", "reviewer_role": "analyst"})
+    )
+
+
+def test_a_guarded_open_questions_page_reads_its_items_only_from_scratch(art, victim, capsys, monkeypatch):
+    _signed(art)
+    victim.write_text(json.dumps({"questions": [{"id": "q1", "question": MARKER}]}))
+    out = art / "local" / "tmp" / "agami-oq.html"
+    rc = _main(
+        "render_open_questions_page",
+        ["--items-file", str(victim), "--profile", "acme", "--artifacts-dir", str(art),
+         "--save-to-helper", "--out", str(out)],
+        monkeypatch,
+    )
+    said = capsys.readouterr()
+    assert rc == 2 and "refused" in said.err, said
+    assert MARKER not in said.out + said.err and not out.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_a_guarded_open_questions_page_does_not_follow_a_linked_items_file(art, victim, capsys, monkeypatch):
+    _signed(art)
+    victim.write_text(json.dumps({"questions": [{"id": "q1", "question": MARKER}]}))
+    link = art / "local" / "tmp" / "agami-oq.json"
+    link.symlink_to(victim)
+    out = art / "local" / "tmp" / "agami-oq.html"
+    rc = _main(
+        "render_open_questions_page",
+        ["--items-file", str(link), "--profile", "acme", "--artifacts-dir", str(art),
+         "--save-to-helper", "--out", str(out)],
+        monkeypatch,
+    )
+    said = capsys.readouterr()
+    assert rc == 2 and MARKER not in said.out + said.err and not out.exists()
+
+
+def _inventory_doc() -> str:
+    return json.dumps(
+        {"profile": "acme", "schemas": ["s"],
+         "tables": [{"schema": "s", "table": MARKER, "columns": [{"name": "id", "type": "int"}]}]}
+    )
+
+
+def test_a_guarded_table_picker_reads_its_inventory_only_from_scratch_or_the_build(art, victim, capsys, monkeypatch):
+    victim.write_text(_inventory_doc())
+    out = art / "local" / "tmp" / "agami-picker.html"
+    rc = _main(
+        "render_table_picker",
+        ["--inventory", str(victim), "--save-to-helper", "--out", str(out)],
+        monkeypatch,
+    )
+    said = capsys.readouterr()
+    assert rc == 2 and "refused" in said.err, said
+    assert MARKER not in said.out + said.err and not out.exists()
+
+
+def test_a_guarded_table_picker_takes_the_builds_own_inventory(art, capsys, monkeypatch):
+    inv = art / "acme" / ".introspect" / "inventory.json"
+    inv.write_text(_inventory_doc())
+    out = art / "local" / "tmp" / "agami-picker.html"
+    rc = _main(
+        "render_table_picker",
+        ["--inventory", str(inv), "--save-to-helper", "--out", str(out)],
+        monkeypatch,
+    )
+    assert rc == 0, capsys.readouterr()
+    assert MARKER in out.read_text()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_a_guarded_table_picker_does_not_follow_a_linked_inventory(art, victim, capsys, monkeypatch):
+    victim.write_text(_inventory_doc())
+    inv = art / "acme" / ".introspect" / "inventory.json"
+    inv.symlink_to(victim)
+    out = art / "local" / "tmp" / "agami-picker.html"
+    rc = _main(
+        "render_table_picker",
+        ["--inventory", str(inv), "--save-to-helper", "--out", str(out)],
+        monkeypatch,
+    )
+    said = capsys.readouterr()
+    assert rc == 2 and MARKER not in said.out + said.err and not out.exists()

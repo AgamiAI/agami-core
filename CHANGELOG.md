@@ -12,6 +12,75 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.26] — 2026-11-19
+
+### Fixed
+
+- **Link and UNC hardening after 0.9.25** (#699). The permission hook reads every link on a model,
+  scratch or plugin path as text before following it, so a link to a network share is refused
+  without being opened, and it no longer approves a Read of a hard-linked plugin file. Under
+  `AGAMI_SCRATCH_ONLY`, folders are checked outside in without following links (a dangling link
+  at `local/samples` is refused instead of the sample being written where it points), the examples
+  dashboard reads its items files link-safe, the model explorer checks its output paths before
+  resolving them, and the open-questions page and table picker take their inputs only from scratch
+  (or, for the inventory, the profile's own `.introspect/inventory.json`). `connect_helper` refuses
+  a linked `local/` or credentials file before writing. When `local/` can't be kept private, the
+  refusal names a folder change that works. The hook also approves nothing on a path, or through a
+  link target, with a `..` segment, which it once normalized away before reading the link in front
+  of it. `sm seed-examples` with no `--area` now runs every area under the guard instead of exiting
+  2 with no output.
+
+### Added
+
+- **A metric over two tables can say how they join, and a query that joins them that way is
+  credited** (#42 on the running list). A metric takes an optional `joins: [{table, kind}]`, each
+  `table` one of its `source_tables` and `kind` `left` or `inner`; the key is the declared
+  relationship's. A figure written as the binding over that join (same tables, a declared
+  relationship's key, the same kind, the declared table on a LEFT join's optional side) is now
+  `matched`, and the declared LEFT join is not listed as a restriction. Another kind, a different
+  key, a FULL join or a window stays `undetermined` with `unconfirmed`, as before. The model
+  rejects an unknown kind, a table outside `source_tables` and a table named twice; the validator
+  warns (`metric_join_unrelated`) when no relationship links the table to the metric's others.
+  `sm curate` edits the field (an edit sends an approved metric back to review; clearing it removes
+  the key), and the schema reply serves it beside the binding. A declared `inner` join is credited
+  only on exactly the declared key, like a `left` one: another key or an extra ON condition stays
+  `undetermined` with `unconfirmed`. A second-order metric over a base that declares a `left` join
+  is synthesized with that LEFT JOIN, and refused when the declared optional side is the table the
+  base measures; a base with no `joins` synthesizes as before.
+
+- **A model of more than 12 tables is described in parallel** (#662). agami-connect hands
+  describing the tables to one `agami-enricher` subagent per chunk of at most 12 tables, and
+  drafting example questions to one `agami-example-writer` per subject area, when the session has an
+  Agent tool. The subagents run no commands and ask nothing: they read files the main chat prepared
+  with agami's own commands (`sm bundle --out`, and the new `sm profile --out`) and write `agami-`
+  result files in the scratch folder, which the main chat applies one at a time through existing
+  verbs. An enricher's edits go through the new `sm curate --allow <fields> --area <area> --tables
+  <t1,t2>`, which refuses the whole batch if one op does anything but edit a description, a value
+  list or a wide table's column groups on the chunk's own tables. At 12 tables or fewer, or with no
+  Agent tool, the phases run inline as before.
+
+### Changed
+
+- **Each join candidate says which answer its card recommends** (ported from #662). Every entry
+  in `join_candidates.json` carries `recommend`: `add` only when the data clears the match bar and
+  either the column's name reads as a reference to the table (named for the key, or the table's word
+  with at most one of `id`/`ref`/`key`/`no`/`num`/`fk`, or `code` against a code key) or the
+  dictionary states the join (a dictionary-stated join the data does not bear out is never
+  recommended); `leave_out` for anything else (`store_visits`, `seats_taken`, a type-only match, a near
+  miss). The join cards put that answer first with "(Recommended)", and the one-by-one cards add
+  only the remaining recommended joins, so the first answer is no longer the chance match.
+
+- **Long text ends its turn** (from #662). In Claude apps, prose over about 200 characters written
+  before a card or another tool call reached the person only as a one-sentence summary, so tables
+  and summaries went missing. The rule is now one shared file (`long-text.md`) and each skill's last
+  message follows it: onboarding ends on one closing message (the summary and the starter
+  questions, with typed replies for review, the model and the full view) and no card; an answer ends
+  on a typed-reply line ("looks right", what is off, "chart", "sign off") with no card after it, and
+  the one-time star ask is asked first, at the start of the next turn, before that reply is
+  handled; in agami-connect the credentials hand-off, the schema summary, the join list, the sign-off
+  list and the seed results each end on a typed-reply line ("approve all", "review each" or "later"
+  for sign-off); and nothing a person needs to answer a card lives only in an option's preview.
+
 ## [0.9.25] — 2026-11-18
 
 ### Added

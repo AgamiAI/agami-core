@@ -1161,3 +1161,77 @@ def test_an_older_installed_agami_paths_still_gets_a_private_local_dir(
     assert _creds(art).exists()
     if os.name == "posix":
         assert local.stat().st_mode & 0o777 == 0o700
+
+
+# --- #699: a linked local/ or credentials file is refused before anything is written ---
+
+LINKS = pytest.mark.skipif(not hasattr(os, "symlink") or os.name != "posix", reason="symlinks")
+
+
+def _sso_line(tmp_path: Path, **kw: object) -> dict:
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path, auth="sso"), out, expires_in=1, **kw)
+    return json.loads(out.lines[0])
+
+
+@LINKS
+def test_a_linked_local_folder_is_refused_and_nothing_written_through_it(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (art / "local").symlink_to(elsewhere)
+    line = _sso_line(tmp_path)
+    assert line["status"] == "refused" and line["reason"] == "linked_credentials", line
+    assert list(elsewhere.iterdir()) == []
+
+
+@LINKS
+def test_a_linked_credentials_file_is_refused_and_left_alone(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    outside = tmp_path / "outside.ini"
+    outside.write_text("[acme]\ntype = sqlite\npath = /tmp/acme.db\n", encoding="utf-8")
+    before = outside.read_text(encoding="utf-8")
+    _creds(art).parent.mkdir(parents=True)
+    _creds(art).symlink_to(outside)
+    line = _sso_line(tmp_path)
+    assert line["status"] == "refused" and line["reason"] == "linked_credentials", line
+    assert outside.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.skipif(not hasattr(os, "link"), reason="hard links")
+def test_a_hard_linked_credentials_file_is_refused(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    outside = tmp_path / "outside.ini"
+    outside.write_text("[acme]\ntype = sqlite\npath = /tmp/acme.db\n", encoding="utf-8")
+    _creds(art).parent.mkdir(parents=True)
+    os.link(outside, _creds(art))
+    line = _sso_line(tmp_path)
+    assert line["status"] == "refused" and line["reason"] == "linked_credentials", line
+    assert "[demo]" not in outside.read_text(encoding="utf-8")
+
+
+@LINKS
+def test_replace_refuses_a_linked_credentials_file(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    text = _keyring_profile(art, tmp_path, backend)
+    outside = tmp_path / "outside.ini"
+    _creds(art).rename(outside)
+    _creds(art).symlink_to(outside)
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path), out, expires_in=1, replace=True)
+    line = json.loads(out.lines[0])
+    assert line["status"] == "refused" and line["reason"] == "linked_credentials", line
+    assert outside.read_text(encoding="utf-8") == text
+    assert backend.data == {("agami", "demo"): "not-a-real-old-password"}
+
+
+@LINKS
+def test_a_credentials_file_linked_while_the_page_was_open_is_refused(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    t, out = _start(_spec(tmp_path))
+    url = out.wait(1)[0]["url"]
+    outside = tmp_path / "outside.ini"
+    outside.write_text("[acme]\ntype = sqlite\npath = /tmp/acme.db\n", encoding="utf-8")
+    _creds(art).parent.mkdir(parents=True)
+    _creds(art).symlink_to(outside)
+    assert _post(url, SECRET) == 200
+    t.join(10)
+    final = out.wait(2)[1]
+    assert final["status"] == "refused" and final["reason"] == "linked_credentials", final
+    assert "[demo]" not in outside.read_text(encoding="utf-8")
+    assert backend.data == {}

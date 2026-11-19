@@ -1,4 +1,4 @@
-"""agami-query answers in the chat, says how the answer was reached, and asks on a card.
+"""agami-query answers in the chat, says how the answer was reached, and ends on a typed-reply line.
 
 The HTML report is rendered only when the person asks for a chart, and it is served from localhost.
 """
@@ -37,6 +37,7 @@ def _how_answered() -> str:
 
 
 def _answer_card() -> str:
+    """4d.2: the reply line an answer ends on, and what each reply does (no card follows an answer)."""
     return _between("### 4d.2 ", "### 4e ")
 
 
@@ -54,12 +55,12 @@ def test_skill_links_the_card_conventions():
     assert "shared/question-cards.md" in _text()
 
 
-def test_order_puts_the_receipt_and_the_card_before_the_follow_ups():
+def test_order_puts_the_receipt_and_the_follow_ups_before_the_reply_line():
     p4 = _phase_4()
     order = next(line for line in p4.splitlines() if "4a Approach" in line)
-    for step in ("4d Table", "4d.1 How this was answered", "4d.2 Answer card", "4f"):
+    for step in ("4d Table", "4d.1 How this was answered", "4f", "the reply line (4d.2)"):
         assert step in order, step
-    assert order.index("4d.2") < order.index("4f")
+    assert order.index("4f") < order.index("the reply line (4d.2)")
     assert "HTML report path" not in order
 
 
@@ -72,34 +73,37 @@ def test_how_this_was_answered_comes_from_sm_receipt():
     assert "undetermined" in s
 
 
-def test_answer_card_has_the_four_options():
+def test_the_reply_line_offers_the_four_replies():
     s = _answer_card()
-    assert "AskUserQuestion" in s
+    assert "Never call AskUserQuestion after an answer in the same turn." in s
     for label in ("Looks right", "Something's off", "Show as a chart", "Sign off the definitions used"):
         assert label in s, label
+    for word in ('"looks right"', '"chart"', '"sign off"'):
+        assert word in s, word
 
 
 def test_sign_off_option_shows_only_when_a_metric_is_unsigned():
     s = _answer_card()
-    row = next(line for line in s.splitlines() if "**Sign off the definitions used**" in line)
+    row = next(line for line in s.splitlines() if line.startswith("| Sign off the definitions used"))
     # The condition itself: the receipt names a metric whose review_state is not approved.
+    prose = _answer_card()
     assert re.search(
-        r"shown only when the receipt names an unsigned metric \(a model metric in `columns\.items` "
-        r"whose `review_state` isn't `approved`\)",
-        row,
+        r"when the receipt names an unsigned metric \(a model metric in `columns\.items` "
+        r"whose `review_state` isn't `approved`\), add \*or \"sign off\"",
+        prose,
     ), row
 
 
-def test_the_query_is_logged_before_the_answer_card_is_asked():
-    """agami-save-correction reads the last ok log line for its question and SQL; asked first, the card
+def test_the_query_is_logged_before_the_answer_is_posted():
+    """agami-save-correction reads the last ok log line for its question and SQL; posted first, the answer
     would hand a correction to the previous query."""
     p4 = _phase_4()
     order = next(line for line in p4.splitlines() if "4a Approach" in line)
-    assert order.index("log the query") < order.index("4d.2 Answer card")
+    assert order.index("log the query") < order.index("the reply line (4d.2)")
     card = _answer_card()
-    assert card.index("**Log the query first.**") < card.index("call AskUserQuestion")
+    assert card.index("**Log the query first.**") < card.index("**Never call AskUserQuestion")
     phase_5 = _between("## Phase 5:", "## Phase 6:")
-    assert "before the answer card (4d.2)" in phase_5
+    assert "before the answer is posted (4d.2)" in phase_5
     assert "never again at the end of the turn" in phase_5
 
 
@@ -108,10 +112,10 @@ def test_something_off_names_the_question_and_the_sql():
     assert "this answer's question" in off and "the SQL that ran for it" in off
 
 
-def test_dont_sign_anything_yet_continues_to_the_star_ask_and_follow_ups():
+def test_dont_sign_anything_yet_continues_to_the_star_ask():
     sign = next(line for line in _answer_card().splitlines() if line.startswith("| Sign off the definitions used"))
     assert "Don't sign anything yet" in sign
-    assert "4e.5" in sign and "4f" in sign
+    assert "4e.5" in sign
 
 
 def test_card_answers_hand_to_the_right_skill():
@@ -119,17 +123,17 @@ def test_card_answers_hand_to_the_right_skill():
     looks = next(line for line in s.splitlines() if line.startswith("| Looks right"))
     assert "agami-save-golden" in looks
     off = next(line for line in s.splitlines() if line.startswith("| Something's off"))
-    assert "agami-save-correction" in off and "Other" in off
+    assert "agami-save-correction" in off
     chart = next(line for line in s.splitlines() if line.startswith("| Show as a chart"))
     assert "4e" in chart
     sign = next(line for line in s.splitlines() if line.startswith("| Sign off the definitions used"))
     assert 'sm" curate' in sign and "--signer" in sign
 
 
-def test_unparseable_other_is_reasked_never_guessed():
+def test_an_unplaceable_reply_is_asked_about_never_guessed():
     s = _answer_card()
     assert "never guess" in s.lower()
-    assert "same card again" in s.lower()
+    assert "asking what they meant" in s.lower()
 
 
 def test_default_path_renders_no_report_and_opens_no_page():
@@ -167,11 +171,11 @@ def test_receipt_file_is_still_mandatory_for_the_chart():
     assert "--receipt-file" in s and "MANDATORY" in s
 
 
-def test_five_numbered_follow_ups_stay_as_text_after_the_card():
+def test_five_numbered_follow_ups_stay_as_text_above_the_reply_line():
     s = _between("### 4f ", "### 4g ")
     assert "exactly 5 numbered follow-up" in s
     assert "Do not use AskUserQuestion for follow-ups" in s
-    assert "after the answer card" in s.lower()
+    assert "just above the reply line" in s
 
 
 def test_star_ask_and_sample_footer_are_kept():
@@ -180,7 +184,7 @@ def test_star_ask_and_sample_footer_are_kept():
     assert "### 4e.5 " in text and ".optins" in text
     assert ".agami-example-intro" in text
     star = _between("### 4e.5 ", "### 4f ")
-    assert "answer card" in star.lower()
+    assert "reply to an answer" in star.lower()
 
 
 def test_chat_table_preview_is_at_most_fifteen_rows():
@@ -227,12 +231,24 @@ def _option_lists(text: str) -> list[list[str]]:
             j += 1
         if bullets:
             lists.append(bullets)
+    # an "Options:" line followed by (indented) bullets is a card too: the star ask is written so
+    for i, line in enumerate(lines):
+        if line.strip() == "Options:":
+            bullets, j = [], i + 1
+            while j < len(lines) and lines[j].lstrip().startswith("- "):
+                bullets.append(lines[j])
+                j += 1
+            if bullets:
+                lists.append(bullets)
     return lists
 
 
 def test_no_card_lists_more_than_four_options():
+    # The answer is a reply line now, so this skill may hold no bulleted card at all; the guard stays
+    # for any card added later.
     lists = _option_lists(_text())
-    assert lists
+    # not vacuous: the star ask is a bulleted card, so the parser must find it
+    assert any(any("Maybe later" in b for b in opts) for opts in lists), lists
     too_many = [opts for opts in lists if len(opts) > 4]
     assert not too_many, too_many
 

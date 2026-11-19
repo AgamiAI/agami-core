@@ -325,14 +325,25 @@ def _sample_org():
 
 
 def test_a_long_metric_names_list_is_bounded_and_resolved_in_linear_time():
-    import time
-
     from semantic_model.models import MAX_METRIC_NAMES, MetricTag, metric_tags
 
+    from timing_bound import BACKSTOP_SECONDS, _best_of
+
     names = [f"m{i}" for i in range(40_000)] + ["M1 ", "m1"]   # repeats fold to one name
-    start = time.perf_counter()
-    tags = metric_tags(names, _sample_org())
-    assert time.perf_counter() - start < 1.0   # was ~10 s: a list membership test per name
+    org = _sample_org()
+
+    def linear_reference() -> None:
+        # The least an honest pass must do: normalise each name and drop repeats with a set.
+        seen: set[str] = set()
+        for name in names:
+            seen.add(" ".join(name.split()).lower())
+
+    # Relative to that on this machine, so a loaded runner slows both; was ~10 s when it did a list
+    # membership test per name (~1000x the reference); locally the work is ~0.01x it, as the list is cut off early.
+    work = _best_of(lambda: metric_tags(names, org), 3)
+    reference = _best_of(linear_reference, 3)
+    assert work < BACKSTOP_SECONDS and work < 5 * reference
+    tags = metric_tags(names, org)
     assert len(tags) == MAX_METRIC_NAMES
     assert tags[0] == MetricTag("m0") and tags[1] == MetricTag("m1")
 
