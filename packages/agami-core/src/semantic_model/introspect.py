@@ -3180,6 +3180,28 @@ def _name_hint(col: str, target: Table) -> bool:
     return len(word) >= 3 and target.name.lower().startswith(word)
 
 
+# What may follow the table's word in a column that references it: `store_ref`, `cust_no`.
+_REFERENCE_SUFFIXES = ("id", "ref", "key", "no", "num", "fk")
+
+
+def _reference_like(col: str, target: Table, key: str) -> bool:
+    """The column reads as a reference to `target`: its first word starts the table's name (as
+    `_name_hint`) and is the whole name, or is followed by one reference word (`store`, `store_ref`,
+    `cust_no`). `store_visits` and `seats_taken` are counts that start with the table's word.
+
+    `<word>_code` counts only when the key is itself a code (`region_code` against `regions.code`):
+    a code column matching an integer id (`status_code` against `statuses.id`) is a small number
+    that matches by chance as often as a count does, so it is left out."""
+    words = col.lower().split("_")
+    if not _name_hint(col, target) or len(words) > 2:
+        return False
+    if len(words) == 1:
+        return True
+    if words[1] == "code":
+        return "code" in key.lower()
+    return words[1] in _REFERENCE_SUFFIXES
+
+
 _UNSERVED = ("rejected", "stale")   # review states the loader never serves
 
 
@@ -3282,9 +3304,17 @@ def _qualified_column(t: Table, column: str) -> str:
 
 
 def _candidate(t: Table, c: Column, u: Table, k: str, check: PF.JoinCheck, found_by: str) -> dict:
-    """One candidate as the report and join_candidates.json carry it: a ready `add` op and its evidence.
+    """One candidate as the report and join_candidates.json carry it: a ready `add` op, its evidence,
+    and `recommend`, the answer its join card marks "(Recommended)" ("add" or "leave_out").
     The op's description says only how it was found: the counts change with every load, so they stay
-    in the evidence and out of the model."""
+    in the evidence and out of the model.
+
+    The engine decides the recommendation, not the model: cards drawn without it took the first
+    answer ("Add it") and joined a seat count to another table's ids. Adding is recommended only
+    when the data clears the match bar and the column's name says it is a reference: named for the
+    key, or the table's word plus at most one reference word (`_reference_like`). A match on the
+    type alone, or a name that merely starts with the table's word (`store_visits`), is what small
+    whole numbers do by chance. A join the dictionary states and the data bears out is recommended."""
     op = {"op": "add", "kind": "relationship", "from_table": t.name, "from_column": c.name,
           "to_table": u.name, "to_column": k,
           "relationship": build.infer_cardinality(t, u, [c.name], [k])}
@@ -3296,8 +3326,9 @@ def _candidate(t: Table, c: Column, u: Table, k: str, check: PF.JoinCheck, found
     evidence = {"found_by": found_by, **check.evidence()}
     if check.rate is not None:   # rows, like the rate: on a whole read `values` counts the distinct keys
         evidence.update(matched=check.rows_matched, sampled=check.rows_keyed)
+    named = found_by in ("name", "dictionary") or (found_by == "type" and _reference_like(c.name, u, k))
     return {"id": f"{_qualified_column(t, c.name)}->{_qualified_column(u, k)}", "op": op,
-            "evidence": evidence}
+            "evidence": evidence, "recommend": "add" if check.borne_out and named else "leave_out"}
 
 
 def _scan_join_candidates(dialect: D.Dialect, runner: Runner, rels: list[Relationship],
