@@ -25,8 +25,10 @@ below corresponds to one such version.
   resolving them, and the open-questions page and table picker take their inputs only from scratch
   (or, for the inventory, the profile's own `.introspect/inventory.json`). `connect_helper` refuses
   a linked `local/` or credentials file before writing. When `local/` can't be kept private, the
-  refusal names a folder change that works. `sm seed-examples` with no `--area` now runs every
-  area under the guard instead of exiting 2 with no output.
+  refusal names a folder change that works. The hook also approves nothing on a path, or through a
+  link target, with a `..` segment, which it once normalized away before reading the link in front
+  of it. `sm seed-examples` with no `--area` now runs every area under the guard instead of exiting
+  2 with no output.
 
 ### Added
 
@@ -40,7 +42,11 @@ below corresponds to one such version.
   rejects an unknown kind, a table outside `source_tables` and a table named twice; the validator
   warns (`metric_join_unrelated`) when no relationship links the table to the metric's others.
   `sm curate` edits the field (an edit sends an approved metric back to review; clearing it removes
-  the key), and the schema reply serves it beside the binding.
+  the key), and the schema reply serves it beside the binding. A declared `inner` join is credited
+  only on exactly the declared key, like a `left` one: another key or an extra ON condition stays
+  `undetermined` with `unconfirmed`. A second-order metric over a base that declares a `left` join
+  is synthesized with that LEFT JOIN, and refused when the declared optional side is the table the
+  base measures; a base with no `joins` synthesizes as before.
 
 - **A model of more than 12 tables is described in parallel** (#662). agami-connect hands
   describing the tables to one `agami-enricher` subagent per chunk of at most 12 tables, and
