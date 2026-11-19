@@ -201,7 +201,10 @@ def main() -> int:
             return _scratch_out.refuse("render_examples_validation.py", e)
 
     try:
-        files = _read_files(args.items_file)
+        # Under the guard each file is read link-safe (a link swapped in since its check is refused),
+        # as the decisions parser reads it.
+        files = _read_files(args.items_file,
+                            _scratch_out.read_scratch_text if _scratch_out.guarded() else None)
     except ValueError as e:
         sys.stderr.write(f"--items-file {e}\n")
         return 1

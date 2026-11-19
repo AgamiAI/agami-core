@@ -408,3 +408,53 @@ def test_a_dangling_link_at_the_samples_folder_stops_the_sample_build(art, tmp_p
     )
     assert proc.returncode == 2 and _guard_said_no(proc), (proc.stdout, proc.stderr)
     assert not target.exists()
+
+
+# --- #699: what a guarded renderer reads ------------------------------------------------------------------
+
+MARKER = "MARKER-NEVER-PRINTED"
+
+
+def _main(module: str, argv: list[str], monkeypatch) -> int:
+    import importlib
+
+    mod = importlib.import_module(module)
+    monkeypatch.setattr(sys, "argv", [module, *argv])
+    try:
+        rc = mod.main()
+    except SystemExit as e:  # argparse
+        rc = e.code
+    return rc
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_an_items_file_swapped_for_a_link_after_its_check_is_not_read(art, tmp_path, monkeypatch, capsys):
+    """The examples dashboard checks each items file's name, then reads it. A link swapped in between
+    must not be followed: the read itself refuses a link."""
+    outside = tmp_path / "home" / "outside.json"
+    outside.parent.mkdir()
+    outside.write_text(json.dumps([{"n": 1, "question": MARKER, "sql": "SELECT 1"}]))
+    items = art / "local" / "tmp" / "agami-items.json"
+    items.write_text("[]")
+    out = art / "local" / "tmp" / "agami-page.html"
+    real_check = _scratch_out.scratch_file
+    swapped = []
+
+    def check_then_swap(path, exts=_scratch_out.TEXT):
+        p = real_check(path, exts)
+        if p == items and not swapped:
+            items.unlink()
+            items.symlink_to(outside)
+            swapped.append(p)
+        return p
+
+    monkeypatch.setattr(_scratch_out, "scratch_file", check_then_swap)
+    rc = _main(
+        "render_examples_validation",
+        ["--title", "t", "--profile", "acme", "--items-file", str(items), "--out", str(out)],
+        monkeypatch,
+    )
+    said = capsys.readouterr()
+    assert swapped and rc != 0
+    assert MARKER not in said.out + said.err
+    assert not out.exists() or MARKER not in out.read_text()
