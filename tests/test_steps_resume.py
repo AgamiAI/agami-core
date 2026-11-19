@@ -59,6 +59,14 @@ def _build(out: dict) -> str:
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_now(monkeypatch):
+    """`sm steps` reads the real clock (a 30-minute staleness rule), so NOW must be taken when
+    each test starts. Fixed at import, it aged with the rest of the suite: under load a run that
+    reached this file 30+ minutes after collection read every "a minute ago" mark as abandoned."""
+    monkeypatch.setitem(globals(), "NOW", datetime.now(timezone.utc).replace(microsecond=0))
+
+
 def test_a_model_written_after_the_mark_says_go_to_the_join_cards(tmp_path, capsys):
     root = tmp_path / "acme"
     _model_written(root, NOW - timedelta(minutes=2))
