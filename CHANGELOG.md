@@ -12,6 +12,19 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **A model of more than 12 tables is described in parallel** (#662). agami-connect hands
+  describing the tables to one `agami-enricher` subagent per chunk of at most 12 tables, and
+  drafting example questions to one `agami-example-writer` per subject area, when the session has an
+  Agent tool. The subagents run no commands and ask nothing: they read files the main chat prepared
+  with agami's own commands (`sm bundle --out`, and the new `sm profile --out`) and write `agami-`
+  result files in the scratch folder, which the main chat applies one at a time through existing
+  verbs. An enricher's edits go through the new `sm curate --allow <fields> --area <area> --tables
+  <t1,t2>`, which refuses the whole batch if one op does anything but edit a description, a value
+  list or a wide table's column groups on the chunk's own tables. At 12 tables or fewer, or with no
+  Agent tool, the phases run inline as before.
+
 ## [0.9.25] — 2026-11-18
 
 ### Added
