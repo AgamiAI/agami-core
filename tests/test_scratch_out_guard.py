@@ -494,6 +494,24 @@ def test_a_guarded_examples_page_never_resolves_an_items_file_before_reading_it(
     assert touched == []
 
 
+def test_a_guarded_examples_page_refuses_an_items_file_given_twice_in_another_case(
+    art, monkeypatch, capsys
+):
+    """Copilot on #703: the lexical key must still fold case where the filesystem does, or one
+    file named twice in two cases gets two sets of numbers. Windows' `normcase`, simulated."""
+    tmp = art / "local" / "tmp"
+    (tmp / "agami-items.json").write_text("[]")
+    out = tmp / "agami-page.html"
+    monkeypatch.setattr(os.path, "normcase", lambda p: os.fspath(p).lower())
+    rc = _main(
+        "render_examples_validation",
+        ["--title", "t", "--profile", "acme", "--items-file", str(tmp / "agami-items.json"),
+         "--items-file", str(tmp / "agami-ITEMS.json"), "--out", str(out)],
+        monkeypatch,
+    )
+    assert rc != 0 and "given twice" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("which", ["--out", "--manifest-out"])
 def test_a_guarded_explorer_refuses_a_unc_output_before_resolving_it(art, monkeypatch, capsys, which):
     unc = "//uncprobe/share/agami-x." + ("html" if which == "--out" else "json")

@@ -149,9 +149,10 @@ def _read_files(args: list[str], read=None) -> list[tuple[str, object, list]]:
     for arg in args:
         area, path = _split_label(arg)
         # Under the guard (`read` given) the key is lexical: resolving links here would follow a
-        # file swapped for a network-share link before the no-follow reader could refuse it.
+        # file swapped for a network-share link before the no-follow reader could refuse it. Case
+        # is folded where the filesystem folds it, so `a.json` and `A.json` stay one file.
         expanded = os.path.expanduser(path)
-        real = (os.path.normpath(os.path.abspath(expanded)) if read is not None
+        real = (os.path.normcase(os.path.normpath(os.path.abspath(expanded))) if read is not None
                 else os.path.realpath(expanded))
         if real in seen:
             # Its examples would get two numbers, and write-back keeps only the last.
