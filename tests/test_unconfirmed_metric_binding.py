@@ -5,7 +5,7 @@ A common shape: a metric over two tables, its binding written unqualified, and a
 statement that used the binding verbatim with the two tables' aliases, LEFT JOINing the many side
 with an extra condition in the ON. The binding does not say how its tables are joined, and under a
 LEFT JOIN the rows with no match still count (`handoffs = 0` needs no event), so the number can
-differ from the metric's: it stays `undetermined` (ACE-177 item 8). What changes is that the item
+differ from the metric's: it stays `undetermined`. What changes is that the item
 says WHICH metric it is written as (`unconfirmed`), so a reader can say the figure could not be
 confirmed as that measure instead of leaving it nameless. Never a match.
 """
