@@ -6,8 +6,8 @@ The transport's discovery metadata points here; this module is the actual provid
 the issued JWT is what the transport will trust once a follow-up change wires the token validator in.
 
 Security invariants enforced here: authorization codes are single-use + short-lived; PKCE (S256) is
-required; redirect URIs are allow-listed (the claude.ai callback, the public base URL, or a URI the
-client registered) so a code can't be sent to an attacker; the signing secret and tokens are never
+required; redirect URIs are allow-listed (see `_redirect_uri_acceptable`) at registration AND at every
+use, so a code can't be sent to an attacker; the signing secret and tokens are never
 logged or echoed in an error body. This module makes NO network call — it only mints/validates
 locally and tells the browser where to redirect.
 """
@@ -18,10 +18,11 @@ import base64
 import hashlib
 import hmac
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import SplitResult, parse_qs, urlencode, urlsplit
 from uuid import uuid4
 
 import jwt
@@ -90,6 +91,23 @@ _CLAUDE_CALLBACKS = (
     "https://claude.ai/api/mcp/auth_callback",
     "https://claude.com/api/mcp/auth_callback",
 )
+
+# ChatGPT's connector callbacks (OpenAI Apps SDK, "Authentication"). It uses the stable URI only for an
+# authorization server that returns RFC 9207's `iss` in every authorization response; this one does
+# not, so today ChatGPT sends the per-connection form `/connector/oauth/{callback_id}`. The id is one
+# opaque path segment, held to URL-safe characters so nothing can ride along after it.
+_CHATGPT_CALLBACK = "https://chatgpt.com/connector_platform_oauth_redirect"
+_CHATGPT_CALLBACK_ID = re.compile(r"https://chatgpt\.com/connector/oauth/[A-Za-z0-9_-]+")
+
+# RFC 8252 §7.3: a native app (Cursor, VS Code, a desktop MCP client) listens on a loopback port it
+# picks at run time, so any port is allowed. Only plain http: loopback traffic never leaves the
+# machine, and there is no certificate for these names. Any other http host is refused.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+# An operator's extra redirects: exact URIs, or https origins (`https://host[:port]`, which admit any
+# path on that origin). Separated by commas and/or whitespace. No wildcards — an entry containing `*`
+# is ignored rather than guessed at.
+_EXTRA_REDIRECTS_ENV = "AGAMI_OAUTH_REDIRECT_URIS"
 
 
 def _now() -> datetime:
@@ -194,12 +212,78 @@ def _same_origin(a: str, b: str) -> bool:
     return bool(pa.scheme) and pa.scheme == pb.scheme and pa.netloc == pb.netloc
 
 
-def _redirect_allowed(redirect_uri: str, registered: str | None) -> bool:
-    """Allow only the claude.ai callback, a same-origin URI under PUBLIC_BASE_URL, or one the client
-    registered (exact match) — so an authorization code can never be redirected to an attacker host."""
+def _extra_redirect_entries() -> list[str]:
+    raw = os.environ.get(_EXTRA_REDIRECTS_ENV, "")
+    return [e for e in re.split(r"[\s,]+", raw) if e and "*" not in e]
+
+
+def _is_https_origin(entry: str) -> bool:
+    parts = urlsplit(entry)
+    return (
+        parts.scheme == "https"
+        and bool(parts.hostname)
+        and "@" not in parts.netloc
+        and parts.path in ("", "/")
+        and not parts.query
+        and not parts.fragment
+        and "?" not in entry
+        and "#" not in entry
+    )
+
+
+def _operator_allows(redirect_uri: str) -> bool:
+    for entry in _extra_redirect_entries():
+        if redirect_uri == entry:
+            return True
+        if _is_https_origin(entry) and _same_origin(redirect_uri, entry):
+            return True
+    return False
+
+
+def _is_loopback(parts: SplitResult) -> bool:
+    return parts.scheme == "http" and parts.hostname in _LOOPBACK_HOSTS
+
+
+def _redirect_uri_acceptable(redirect_uri: str) -> bool:
+    """The one allow-list for where an authorization code may be sent. `/oauth/register` is
+    unauthenticated, so the fact that a client registered a URI says nothing about who owns it: both
+    registration and every use of a registered URI must pass this.
+
+    Accepted: Claude's callbacks; ChatGPT's connector callbacks; a URI on PUBLIC_BASE_URL's origin; an
+    http loopback URI on any port (RFC 8252 §7.3); and the operator's `AGAMI_OAUTH_REDIRECT_URIS`.
+    Always refused: a fragment (RFC 6749 §3.1.2), userinfo (`https://trusted@evil/` reads as trusted),
+    whitespace (the stored list is space-separated), and anything that does not parse."""
     from mcp_http import public_base_url
 
-    if not redirect_uri:
+    if not redirect_uri or "#" in redirect_uri or any(c.isspace() for c in redirect_uri):
+        return False
+    try:
+        parts = urlsplit(redirect_uri)
+        parts.port  # noqa: B018 — raises on a malformed port, which must refuse, not 500
+    except ValueError:
+        return False
+    if "@" in parts.netloc:
+        return False
+    if redirect_uri in _CLAUDE_CALLBACKS or redirect_uri == _CHATGPT_CALLBACK:
+        return True
+    if _CHATGPT_CALLBACK_ID.fullmatch(redirect_uri):
+        return True
+    if _is_loopback(parts):
+        return True
+    if _same_origin(redirect_uri, public_base_url()):
+        return True
+    return _operator_allows(redirect_uri)
+
+
+def _redirect_allowed(redirect_uri: str, registered: str | None) -> bool:
+    """May an authorization code for this client go to `redirect_uri`? Claude's callback and a
+    same-origin URI under PUBLIC_BASE_URL need no registration; anything else must be one the client
+    registered (exact match). Either way it must pass `_redirect_uri_acceptable` — a registered URI is
+    never trusted on its own, so a client registered with an attacker's URI before the allow-list
+    existed stops working here instead of receiving codes."""
+    from mcp_http import public_base_url
+
+    if not _redirect_uri_acceptable(redirect_uri):
         return False
     if redirect_uri in _CLAUDE_CALLBACKS:
         return True
@@ -239,6 +323,14 @@ async def register(request: Request) -> Response:
             isinstance(u, str) for u in redirect_uris
         ):
             return _oauth_error("invalid_request", "redirect_uris must be a list of strings")
+        # RFC 7591 §2: the authorization code is the only flow served here, so a client must name
+        # where its codes go — one with none could never be sent a code.
+        if not redirect_uris:
+            return _oauth_error("invalid_redirect_uri", "at least one redirect_uri is required")
+        if not all(_redirect_uri_acceptable(u) for u in redirect_uris):
+            # Refuse the whole registration (RFC 7591 §3.2.2) rather than silently drop a URI the
+            # client will later try to use. The description never echoes the submitted value.
+            return _oauth_error("invalid_redirect_uri", "a redirect_uri is not on the allow-list")
         client_id = uuid4().hex
         store.execute(
             "INSERT INTO oauth_client (client_id, redirect_uris, created) VALUES (?, ?, ?)",

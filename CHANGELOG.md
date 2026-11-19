@@ -12,6 +12,18 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Security
+
+- **OAuth redirect URIs are allow-listed at registration and at every use.** `/oauth/register` is
+  unauthenticated, and it used to store any redirect URI it was sent; the authorize step then
+  trusted it. Anyone could register their own page and send a person a real sign-in link that
+  delivered the sign-in code to that page. Registration now refuses (`400 invalid_redirect_uri`) a
+  URI that is not Claude's or ChatGPT's connector callback, on `PUBLIC_BASE_URL`'s origin, an
+  `http://127.0.0.1` / `[::1]` / `localhost` loopback URI on any port (RFC 8252), or listed in the new
+  optional `AGAMI_OAUTH_REDIRECT_URIS` (exact URIs or https origins, no wildcards). A registration
+  with no redirect URI is refused too. A client registered earlier with any other URI is refused at
+  sign-in, so it never receives a code.
+
 ## [0.9.26] — 2026-11-19
 
 ### Fixed
