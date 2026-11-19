@@ -38,6 +38,7 @@ from oss_adapters import (
     SingleTenantOrgResolver,
 )
 from ports import Adapters, AuthProvider, Org, OrgResolver
+from security_headers import SecurityHeaders
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -815,7 +816,10 @@ def create_app(
         Mount("/mcp", app=handle_mcp),
     ]
     middleware = [
-        # Outermost: normalize the bare `/mcp` → `/mcp/` before routing so Starlette's Mount doesn't
+        # Outermost of all, so the 401 the auth layer answers with carries the headers too, as does
+        # any route added later. See `security_headers` for what each header is for.
+        Middleware(SecurityHeaders, https=base.startswith("https://")),
+        # Next: normalize the bare `/mcp` → `/mcp/` before routing so Starlette's Mount doesn't
         # 307-redirect it (claude.ai posts `{base}/mcp` and won't follow the redirect). See _NormalizeMcpSlash.
         Middleware(_NormalizeMcpSlash),
         Middleware(_AuthMiddleware, resolver=adapters.org_resolver, auth=auth_provider),
