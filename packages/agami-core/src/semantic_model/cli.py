@@ -1023,7 +1023,25 @@ def _ops_outside(ops: Any, fields: set[str], area: Optional[str],
             out.append(f"op {i}: {op.get('kind')} {op.get('name')!r} is not one of the named tables")
         elif bad := _path_keys(op):
             out.append(f"op {i}: {', '.join(bad)} is not a plain name: {json.dumps(op)[:120]}")
+        elif why := _not_generated(op):
+            out.append(f"op {i}: {why}")
     return out
+
+
+def _not_generated(op: dict) -> Optional[str]:
+    """Why a description edit under `--allow` isn't marked as generated, else None. The field names
+    alone would let a subagent stamp its text `human` or `metadata`, laundering it as a person's or the
+    dictionary's, and an unmarked edit skips the guard that keeps a person's description (curate fires
+    it on `source: ai` only). So text goes in as `ai`, and the only provenance it may set is
+    "looked, couldn't tell", also as `ai` so the same guard holds it off a person's description."""
+    field = op.get("field")
+    if field not in ("description", "description_source"):
+        return None
+    if op.get("source") != "ai":
+        return f"a {field} edit must carry source 'ai', not {op.get('source')!r}"
+    if field == "description_source" and op.get("value") != "ai_unknown":
+        return f"description_source may only be set to 'ai_unknown', not {op.get('value')!r}"
+    return None
 
 
 # The kinds whose `name` curate puts into a file path as-is (subject_areas/<area>/tables/<name>.yaml).

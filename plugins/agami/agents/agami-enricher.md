@@ -70,7 +70,8 @@ Three files, each one JSON value and nothing else:
      "field": "choice_field", "value": {"1": "Open", "2": "Closed"}}]
    ```
    Only these fields: a table's or column's `description` (always with `"source": "ai"`), a column's
-   `description_source: "ai_unknown"` (looked, couldn't tell: never a guessed description), a coded
+   `description_source: "ai_unknown"` (looked, couldn't tell: never a guessed description; also with
+   `"source": "ai"`, and never any other value), a coded
    column's `choice_field` labels, and a wide table's `column_groups` and `column_group_descriptions`.
    No other op and no other field: the main chat's apply refuses the whole file if one is there. Leave
    out self-evident columns (`id`, `created_at`, a clear `name`) and any column that already has a

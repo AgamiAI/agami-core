@@ -293,3 +293,109 @@ def test_the_enricher_writes_entities_in_the_canonical_shape_and_a_skip_is_redra
     assert "`<plugin_root>/shared/metric-entity-shape.md`" in body
     assert (PLUGIN / "shared" / "metric-entity-shape.md").is_file()
     assert "is not fixed in the file: draft it\n  yourself as 2b says" in PARALLEL
+
+
+# --- --allow holds the VALUES a subagent sets, not only the field names ---
+
+
+def _column_edit(field: str, value, **extra) -> dict:
+    return {
+        "op": "edit",
+        "kind": "table",
+        "area": "agami-example",
+        "name": "orders",
+        "column": "status",
+        "field": field,
+        "value": value,
+        **extra,
+    }
+
+
+def _allow(model, tmp_path, capsys, ops):
+    return _curate(
+        model,
+        tmp_path,
+        ops,
+        capsys,
+        "--allow",
+        ENRICH_FIELDS,
+        "--area",
+        "agami-example",
+        "--tables",
+        "orders",
+    )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {**_edit(), "source": "human"},
+        {**_edit(), "source": "metadata"},
+        {k: v for k, v in _edit().items() if k != "source"},
+        _column_edit("description", "Injected text.", source="human"),
+        _column_edit("description_source", "metadata", source="ai"),
+        _column_edit("description_source", "human", source="ai"),
+        _column_edit("description_source", "ai_validated", source="ai"),
+        _column_edit("description_source", "ai_unknown"),
+    ],
+    ids=[
+        "table-desc-as-human",
+        "table-desc-as-metadata",
+        "table-desc-no-source",
+        "column-desc-as-human",
+        "source-metadata",
+        "source-human",
+        "source-validated",
+        "unknown-without-ai-source",
+    ],
+)
+def test_allow_refuses_a_description_not_marked_as_generated(model, tmp_path, capsys, bad):
+    before = _yaml(model)
+    rc, out = _allow(model, tmp_path, capsys, [_edit(), bad])
+    assert rc == 1 and out["applied"] == 0 and len(out["refused"]) == 1, out
+    assert _yaml(model) == before
+
+
+def _mark_orders_human(model: Path) -> None:
+    path = model / "subject_areas" / "agami-example" / "tables" / "orders.yaml"
+    doc = yaml.safe_load(path.read_text())
+    doc["description"] = "Written by a person."
+    doc["description_source"] = "human"
+    for col in doc["columns"]:
+        if col["name"] == "status":
+            col["description"] = "Written by a person."
+            col["description_source"] = "human"
+    path.write_text(yaml.safe_dump(doc, sort_keys=False))
+
+
+@pytest.mark.parametrize(
+    "op",
+    [_edit(), _column_edit("description_source", "ai_unknown", source="ai")],
+    ids=["generated-description", "looked-couldnt-tell"],
+)
+def test_allow_never_overwrites_a_persons_description(model, tmp_path, capsys, op):
+    _mark_orders_human(model)
+    before = _yaml(model)
+    _, out = _allow(model, tmp_path, capsys, [op])
+    # the keep-a-person's-description guard skips the op, so nothing is written
+    assert not out["applied"] and out["skipped"], out
+    assert _yaml(model) == before
+
+
+def test_allow_applies_generated_descriptions_and_the_couldnt_tell_mark(model, tmp_path, capsys):
+    rc, out = _allow(
+        model,
+        tmp_path,
+        capsys,
+        [
+            _edit(),
+            _column_edit("description", "Where the order is.", source="ai"),
+            _column_edit("description_source", "ai_unknown", source="ai", column="customer_id"),
+        ],
+    )
+    assert rc == 0 and out["validated"] is True, out
+    doc = yaml.safe_load((model / "subject_areas" / "agami-example" / "tables" / "orders.yaml").read_text())
+    assert doc["description_source"] == "ai_unvalidated"
+    cols = {c["name"]: c for c in doc["columns"]}
+    assert cols["status"]["description_source"] == "ai_unvalidated"
+    assert cols["customer_id"]["description_source"] == "ai_unknown"

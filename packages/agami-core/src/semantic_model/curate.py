@@ -2144,7 +2144,8 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
         before = doc.get(fld)
         # A generated description never replaces one a person wrote or the database's own dictionary
         # supplied — enrichment describes what is undescribed. A person can still overwrite either.
-        if (fld == "description" and desc_source and op.get("source") == "ai"
+        # The same holds for a generated "looked, couldn't tell" mark: it would relabel their text.
+        if (fld in ("description", "description_source") and desc_source and op.get("source") == "ai"
                 and doc.get("description_source") in ("human", "metadata")
                 and (doc.get("description") or "").strip()):
             raise ValueError(f"kept the existing {doc['description_source']} description "
