@@ -113,7 +113,8 @@ _UNMATCHED = {"aggregate": False, "area": None, "confidence": None, "definition_
               "expression": None, "kind": "output", "name": None, "origin": None,
               "review_state": None, "scope": "main", "source_tables": None, "status": "unmatched",
               "built_from": None, "joins_not_declared": None, "missing_conditions": None,
-              "missing_tables": None, "reason": None, "restrictions": None, "result_filters": None}
+              "missing_tables": None, "reason": None, "restrictions": None, "result_filters": None,
+              "unconfirmed": None}
 _OK_RECEIPT = {
     "agami_core_version": guardrail.core_version(),
     "aggregates": {"items": [], "undetermined": None},

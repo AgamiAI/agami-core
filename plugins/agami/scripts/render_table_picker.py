@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import _scratch_out  # noqa: E402
 import inventory_summary  # noqa: E402
 
 _SHARED = Path(__file__).resolve().parent.parent / "shared"
@@ -78,13 +79,17 @@ def main(argv: list[str] | None = None) -> int:
         help="the page posts its pick to `serve_page.py --decisions` (the only mode)",
     )
     args = ap.parse_args(argv)
+    out = Path(args.out).expanduser()
+    if _scratch_out.guarded():
+        try:
+            out = _scratch_out.scratch_file(args.out, _scratch_out.PAGE)
+        except _scratch_out.Refused as e:
+            return _scratch_out.refuse("render_table_picker.py", e)
     inventory = json.loads(Path(args.inventory).expanduser().read_text(encoding="utf-8"))
     if not inventory.get("tables"):
         print(json.dumps({"error": "the inventory lists no tables"}))
         return 1
-    out = Path(args.out).expanduser()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render(inventory), encoding="utf-8")
+    _scratch_out.save(out, render(inventory))
     data = page_data(inventory)
     flagged = sum(1 for r in data["tables"] if r["why"])
     print(

@@ -7,13 +7,19 @@
 #
 # Usage:  bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_resolve.py --db-type postgres
 #         bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -c 'import yaml'
-# A bare `<name>.py` is the plugin's own script of that name; any other argument passes through.
+# A bare `<name>.py` is the plugin's own script of that name, and one the plugin doesn't have is
+# refused rather than looked up in the current folder (which would run whatever file is there).
+# Only the first argument selects what runs: once Python has a script path, every argument after it
+# is that script's argv, so `py connect_resolve.py -c '…'` or `… -m pip` never reaches the
+# interpreter (tests/test_py_launcher.py). Any other first argument passes through as given.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export AGAMI_PLUGIN_ROOT="${AGAMI_PLUGIN_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 . "$SCRIPT_DIR/_python.sh"
-agami_scratch_dir >/dev/null   # the skills write scratch files there; make sure it exists
+# the skills write scratch files there; make sure it exists (a `local/` that can't be kept private
+# is refused, and it says why)
+agami_scratch_dir >/dev/null || exit 2
 
 PY="$(resolve_python)"
 if [ -z "$PY" ]; then
@@ -26,6 +32,12 @@ fi
 export AGAMI_LIBRARY_VERSION_CHECKED=1
 case "${1:-}" in
   */*|-*|"") ;;                                         # a path, an option, or nothing: as given
-  *.py) [ -f "$SCRIPT_DIR/$1" ] && set -- "$SCRIPT_DIR/$1" "${@:2}" ;;
+  *.py)
+    if [ -f "$SCRIPT_DIR/$1" ]; then
+      set -- "$SCRIPT_DIR/$1" "${@:2}"
+    else
+      echo "agami: $1 is not one of the plugin's scripts (in $SCRIPT_DIR)" >&2
+      exit 2
+    fi ;;
 esac
 exec "$PY" -X utf8 "$@"

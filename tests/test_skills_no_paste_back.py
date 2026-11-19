@@ -207,9 +207,14 @@ def test_every_serve_page_call_runs_in_the_background():
     found = [
         f"{f.relative_to(REPO_ROOT)}: {p[:120]!r}"
         for f in files
-        for p in serve_page_without_background(f.read_text(encoding="utf-8"))
+        for p in serve_page_without_background(_without_frontmatter(f.read_text(encoding="utf-8")))
     ]
     assert not found, found
+
+
+def _without_frontmatter(text: str) -> str:
+    """The body: a skill's frontmatter lists permission rules (`py serve_page.py *`), not calls."""
+    return text.split("\n---\n", 1)[1] if text.startswith("---\n") else text
 
 
 def test_the_background_guard_catches_a_bare_call_and_joins_a_fence_to_its_prose():

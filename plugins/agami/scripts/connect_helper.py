@@ -16,7 +16,7 @@ section to `<artifacts_dir>/local/credentials` with `password = keyring:agami/<p
                new password does not connect, the old section and password are put back.
 
 Stdout is JSON lines, nothing else:
-    {"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 300}       once listening
+    {"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 300, "pid": <this process>}  once listening
     {"status": "connected" | "connect_failed", "profile": ..., "detail": "<one line>"}
     {"status": "refused", "reason": <REASONS>, "profile": ..., "detail": "<one line>"}
     {"status": "missing_driver", "package": "<pip package(s)>", "profile": ..., "detail": "<one line>"}
@@ -235,10 +235,29 @@ def _section_text(spec: dict[str, Any], password_ref: str | None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _ensure_local_dir(art: Path) -> Path:
+    """`agami_paths.ensure_local_dir`, or the plugin's bundled copy when the installed library predates it
+    (before 0.9.25). The privacy check is never skipped: both raise NotPrivate rather than use a `local/`
+    that can't be made 0700."""
+    fn = getattr(agami_paths, "ensure_local_dir", None)
+    if fn is None:
+        import importlib.util
+
+        bundled = Path(__file__).resolve().parent.parent / "lib" / "agami_paths.py"
+        spec = importlib.util.spec_from_file_location("_agami_paths_bundled", bundled)
+        mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        fn = mod.ensure_local_dir
+    return fn(art)
+
+
 def _write_section(creds: Path, section: str) -> str:
     """Create the credentials file at 0600, or append to it and put it back to 0600. Returns the exact
     text added, so `_remove_section` can take it out again."""
-    creds.parent.mkdir(parents=True, exist_ok=True)
+    if creds.parent.name == agami_paths.LOCAL_SUBDIR:
+        _ensure_local_dir(creds.parent.parent)  # private, whoever made it first
+    else:
+        creds.parent.mkdir(parents=True, exist_ok=True)
     if not creds.exists():
         fd = os.open(creds, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
@@ -647,7 +666,8 @@ def run(spec: Any, out: TextIO, *, expires_in: float = EXPIRES_IN, replace: bool
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:
-        _emit(out, {"url": f"http://{HOST}:{server.server_address[1]}{server.path_ok}", "expires_in": int(expires_in)})
+        _emit(out, {"url": f"http://{HOST}:{server.server_address[1]}{server.path_ok}", "expires_in": int(expires_in),
+                    "pid": os.getpid()})
         if not server.submitted.wait(expires_in):
             # Closed under the lock, so a submit either landed first (and is used) or gets 404 from now
             # on: never a "received" page for a password that is then dropped.

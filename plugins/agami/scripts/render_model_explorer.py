@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 import _interp  # noqa: F401 — re-exec under agami's configured interpreter if PyYAML is missing
+import _scratch_out
 from _read_only_view import make_read_only, make_saving, saved_signoff
 
 SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
@@ -337,6 +338,15 @@ def main() -> int:
                            "(serve_page.py --decisions); approvals are signed as the saved identity")
     args = p.parse_args()
 
+    out_path = Path(os.path.expanduser(args.out)).resolve()
+    mpath = Path(os.path.expanduser(args.manifest_out)).resolve() if args.manifest_out else None
+    if _scratch_out.guarded():
+        try:
+            out_path = _scratch_out.scratch_file(args.out, _scratch_out.PAGE)
+            if args.manifest_out:
+                mpath = _scratch_out.scratch_file(args.manifest_out, ("json",))
+        except _scratch_out.Refused as e:
+            return _scratch_out.refuse("render_model_explorer.py", e)
     artifacts_dir = Path(os.path.expanduser(args.artifacts_dir)).resolve()
     profile_dir = artifacts_dir / args.profile
     if not profile_dir.is_dir():
@@ -376,19 +386,15 @@ def main() -> int:
         return 1
 
     title = args.title or f"Model explorer · {args.profile}"
-    out_path = Path(os.path.expanduser(args.out)).resolve()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     html = render(title=title, profile=args.profile, manifest=manifest)
     if args.read_only:
         html = make_read_only(html)
     elif args.save_to_helper:
         html = make_saving(html, signoff)
-    out_path.write_text(html, encoding="utf-8")
+    _scratch_out.save(out_path, html)
 
-    if args.manifest_out:
-        mpath = Path(os.path.expanduser(args.manifest_out)).resolve()
-        mpath.parent.mkdir(parents=True, exist_ok=True)
-        mpath.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    if mpath is not None:
+        _scratch_out.save(mpath, json.dumps(manifest, indent=2))
 
     t = manifest["totals"]
 

@@ -15,18 +15,23 @@ Output (the standard refactor contract):
       "profile": "main" | null,   # null on a first-time bootstrap (no profile yet — don't invent a name)
       "profile_source": "explicit" | "env" | "active_profile" | "default",
       "artifacts_dir": "/Users/me/agami-artifacts",
+      "artifacts_dir_source": "env" | "pointer" | "default",  # where artifacts_dir came from
+      "gitignore": "missing" | "has_local" | "lacks_local",  # <artifacts_dir>/.gitignore vs `local/`
       "credentials": {"present": bool, "chmod_ok": bool, "type": "sqlite"|null,
                       "fields": {...}, "missing_fields": [...]},
       "example_present": bool,
       "config": {"present": bool, "active_profile": ..., "tier": ..., "tool_paths": {...}},
       "interpreter": {"python3": "/path", "has_model_deps": bool,
                       "has_driver": bool|null, "chosen_because": "...",
+                      "has_core": bool,     # semantic_model.cli imports (what `sm` runs)
+                      "core_ready": bool,   # the deps + has_core + a current library: no install needed
                       "plugin_version": "0.9.18"|null, "agami_core": "0.9.18"|null,
                       "candidates_scored": [{..., "has_pip", "agami_core", "skipped", "reason"?}]},
       "tools": {"psql": "/path"|null, "sqlite3": ...},
       "next": "ready" | "build" | "promote" | "bootstrap"
     },
     "anomalies": [...],   # incl. library_older_than_plugin, agami_python_cannot_be_brought_current,
+                          # agami_python_lacks ($AGAMI_PYTHON lacks the model deps / driver; it is used anyway),
                           # env_profile_has_no_model (AGAMI_PROFILE names a database with no model)
     "needs_judgment": null
   }
@@ -70,6 +75,7 @@ from _plugin_version import (  # noqa: E402
 )
 
 _VERSION_HELPER = Path(__file__).resolve().parent / "_plugin_version.py"
+_PYTHON_SH = Path(__file__).resolve().parent / "_python.sh"
 
 # import module to probe per DB type (sqlite/duckdb need no external driver)
 _DRIVER_MOD = {
@@ -99,6 +105,8 @@ def driver_packages(db_type: str | None) -> dict[str, str]:
         return {}
     return {m: _DRIVER_PIP[m] for m in (driver, *_DRIVER_EXTRA.get(db_key, []))}
 _MODEL_DEPS = ("pydantic", "sqlglot", "yaml")
+# What `sm` runs. Probed by import, not by distribution metadata, which says nothing about a source tree.
+_CORE_MODULES = ("semantic_model.cli",)
 
 # The output lands in the agent's transcript, so a secret's VALUE never goes in it: the skill only
 # needs to know a field is set. A connection URL carries its password inline, so it is masked too.
@@ -175,6 +183,14 @@ def _candidate_interpreters() -> list[str]:
     return uniq
 
 
+def _canonical(py: str) -> str:
+    try:
+        return subprocess.run([py, "-X", "utf8", "-c", "import sys;print(sys.executable)"],
+                              capture_output=True, text=True, encoding="utf-8", timeout=10).stdout.strip() or py
+    except Exception:
+        return py
+
+
 def _probe_install(py: str) -> dict:
     """Whether `py` has pip and which agami-core it carries, read from metadata (nothing is imported or
     installed). Unknown values come back as None, and an unknown never gets a candidate skipped."""
@@ -188,24 +204,90 @@ def _probe_install(py: str) -> dict:
             "this_checkout": bool(got.get("this_checkout"))}
 
 
+def _launcher_python() -> str | None:
+    """The Python `sm` and `py` run, from `_python.sh`'s own resolve_python: one selection for preflight,
+    the setup verbs, the install and the deploy launcher's `py -m deploy_preflight`. Scoring candidates
+    here instead picked a later Python with the deps while `sm` kept the first installable one, so setup
+    checked one Python and installed into another. None when bash can't be run (then the scoring decides)."""
+    bash = shutil.which("bash")
+    if not bash:
+        return None
+    try:
+        r = subprocess.run([bash, "-c", '. "$1"; resolve_python', "_", _PYTHON_SH.as_posix()],
+                           capture_output=True, text=True, encoding="utf-8", timeout=120, stdin=subprocess.DEVNULL)
+    except Exception:
+        return None
+    lines = r.stdout.strip().splitlines()
+    return lines[-1].strip() if r.returncode == 0 and lines and lines[-1].strip() else None
+
+
+def _dev_layout() -> bool:
+    """A dev checkout, told apart from a marketplace install as `sm`'s _dev_layout does: packages/ beside
+    the plugin, in a folder whose name isn't a version."""
+    plugin_root = Path(__file__).resolve().parent.parent
+    return ((plugin_root.parent.parent / "packages" / "agami-core" / "pyproject.toml").is_file()
+            and not plugin_root.name[:1].isdigit())
+
+
+def _pinned_lacks(pinned: str, entry: dict, db_key: str, want: str | None) -> dict | None:
+    """The anomaly for an $AGAMI_PYTHON missing the model deps or the driver: what it lacks and the exact
+    line that adds it. It names pip only when pip is missing too, since then the line cannot run yet."""
+    lacks, pkgs = [], []
+    if not entry["has_model_deps"]:
+        have = entry["agami_core"]
+        lacks.append(f"agami-core {have} without its [model] extra (pydantic, sqlglot, pyyaml)" if have
+                     else "no agami-core and none of its model deps (pydantic, sqlglot, pyyaml)")
+        pkgs.append(f'"agami-core[model]=={want}"' if want else '"agami-core[model]"')
+    elif entry.get("has_core") is False:
+        # The deps import but `sm` has nothing to run: with the deps missing too, the line above says it.
+        lacks.append("no agami-core (its semantic_model package does not import)")
+        pkgs.append(f'"agami-core[model]=={want}"' if want else '"agami-core[model]"')
+    if entry["has_driver"] is False:
+        mods = driver_packages(db_key)
+        lacks.append(f"the {db_key} driver ({', '.join(mods)})")
+        pkgs.extend(mods.values())
+    if not lacks:
+        return None
+    fix = f'"{pinned}" -m pip install {" ".join(pkgs)}'
+    if entry["has_pip"] is False:
+        fix = (f"it has no pip either, so add pip first:  \"{pinned}\" -m ensurepip --upgrade  (where its Python "
+               f"ships ensurepip), then:  {fix}")
+    else:
+        fix = f"Fix:  {fix}"
+    return {"kind": "agami_python_lacks", "where": pinned,
+            "detail": (f"$AGAMI_PYTHON is {pinned}, and agami uses exactly that Python, but it has "
+                       f"{' and '.join(lacks)}. {fix}. Or unset AGAMI_PYTHON, or point it at a Python that has them.")}
+
+
 def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
     """Score candidates on (driver + model deps); pick the best. A configured
     interpreter that still satisfies everything wins (no churn). Mirrors 0a.5 — but
     deterministically, so we never record a Python that's missing a dep.
 
     A candidate that can't install packages and whose agami-core is missing or older than the plugin is
-    skipped: `sm install` could never fix it. $AGAMI_PYTHON is the user's explicit choice and is never
-    skipped; it gets a warning instead."""
+    skipped: `sm install` could never fix it. $AGAMI_PYTHON is the user's explicit choice and is the only
+    candidate when set, as it is for `sm` (#692): another Python carries another library version. What it
+    lacks comes back as an `agami_python_lacks` warning instead. Without it, the Python `_python.sh` picks
+    for `sm` and `py` is the one chosen (#698), and the scoring decides only when bash can't be run."""
     db_key = (db_type or "").lower()
     driver = _DRIVER_MOD.get(db_key, None)
     want_driver = bool(driver)
     driver_mods = [driver, *_DRIVER_EXTRA.get(db_key, [])] if want_driver else []
     want = plugin_version()
     pinned = os.environ.get("AGAMI_PYTHON") or None
+    # Without a pin, the launchers' selection is the one used, kept as written so it reads the same as
+    # the path `sm` prints; the other candidates are still scored, for the report only.
+    selected = None if pinned else _launcher_python()
     candidates = []
-    if configured and os.access(configured, os.X_OK):
-        candidates.append(configured)
-    candidates += [c for c in _candidate_interpreters() if c != configured]
+    if pinned:
+        candidates.append(pinned)
+    elif selected:
+        candidates.append(selected)
+        candidates += [c for c in _candidate_interpreters() if c != selected]
+    else:
+        if configured and os.access(configured, os.X_OK):
+            candidates.append(configured)
+        candidates += [c for c in _candidate_interpreters() if c != configured]
 
     scored = []
     best = None
@@ -216,34 +298,38 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
         has_deps = _probe(py, list(_MODEL_DEPS))
         has_driver = _probe(py, driver_mods) if want_driver else None
         score = (1 if has_deps else 0) + (1 if (has_driver or not want_driver) else 0)
-        # canonical path
-        try:
-            canon = subprocess.run([py, "-X", "utf8", "-c", "import sys;print(sys.executable)"],
-                                   capture_output=True, text=True, encoding="utf-8", timeout=10).stdout.strip() or py
-        except Exception:
-            canon = py
+        # canonical path; $AGAMI_PYTHON is kept as written, so it reads the same as the path `sm` uses
+        canon = py if py in (pinned, selected) else _canonical(py)
         inst = _probe_install(py)
         why_not = cannot_be_brought_current(inst, want)
         is_pinned = py == pinned
+        is_selected = selected is not None and py == selected
         if is_pinned and why_not:
             warnings.append({"kind": "agami_python_cannot_be_brought_current", "where": canon,
                              "detail": f"$AGAMI_PYTHON is kept as set, but it has {why_not}"})
         entry = {"python3": canon, "has_model_deps": has_deps, "has_driver": has_driver, "score": score,
                  "has_pip": inst["has_pip"], "agami_core": inst["agami_core"],
-                 "skipped": bool(why_not) and not is_pinned}
+                 "skipped": bool(why_not) and not (is_pinned or is_selected)}
         if entry["skipped"]:
             entry["reason"] = f"skipped: {why_not}"
         scored.append(entry)
         if inst["this_checkout"]:
             current.add(id(entry))
         full = has_deps and (has_driver or not want_driver)
-        if full and best is None and not entry["skipped"]:
+        if full and best is None and not entry["skipped"] and not selected:
             best = entry
             because = ("the first candidate with the model deps"
                        + (f" and the {db_key} driver" if want_driver else "")
                        + (" ($AGAMI_PYTHON)" if is_pinned else
                           " (the configured interpreter)" if py == configured else ""))
-    if best is None:
+    if pinned:
+        best = scored[0]
+        because = "$AGAMI_PYTHON, used as set: agami never replaces it with another Python"
+    elif selected:
+        best = scored[0]
+        because = ("the Python `sm` and `py` run (the configured one, else the first on PATH that `sm install` "
+                   "can bring current), so setup, the install and the deploy launcher all use this one")
+    elif best is None:
         # nothing fully equipped → first working base interpreter (caller installs into it)
         usable = [e for e in scored if not e["skipped"]]
         if usable:
@@ -256,10 +342,23 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
             best = {"python3": shutil.which("python3") or "python3", "has_model_deps": False,
                     "has_driver": None, "agami_core": None}
             because = "no candidate interpreter found"
-    if id(best) not in current and is_older(best.get("agami_core"), want):
+    # `sm` runs semantic_model.cli, so the deps importing is not enough: a fresh Python with pydantic,
+    # sqlglot and yaml but no agami-core skipped the install question, and the setup verbs exited 12.
+    best["has_core"] = bool(best["has_model_deps"]) and _probe(pinned or best["python3"], list(_CORE_MODULES))
+    if pinned:
+        lacks = _pinned_lacks(pinned, best, db_key, want)
+        if lacks:
+            # it already says pip is missing, and what to install once it is there
+            warnings = [w for w in warnings if w["kind"] != "agami_python_cannot_be_brought_current"]
+            warnings.append(lacks)
+    stale = id(best) not in current and is_older(best.get("agami_core"), want)
+    if stale:
         warnings.append({"kind": "library_older_than_plugin", "where": best["python3"],
                          "detail": stale_warning(best["python3"], best["agami_core"], want)})
-    return {**{k: best[k] for k in ("python3", "has_model_deps", "has_driver")}, "chosen_because": because,
+    # The same rule as `sm`'s _version_ok: in a dev checkout only this checkout's library will do.
+    current_enough = id(best) in current if _dev_layout() else not stale
+    return {**{k: best[k] for k in ("python3", "has_model_deps", "has_driver", "has_core")},
+            "core_ready": best["has_core"] and current_enough, "chosen_because": because,
             "plugin_version": want, "agami_core": best.get("agami_core"),
             "candidates_scored": scored, "warnings": warnings}
 
@@ -287,6 +386,34 @@ def _env_profile_has_no_model(profile: str, art: Path) -> dict | None:
             "existing": existing,
             "detail": (f"AGAMI_PROFILE is set to '{profile}', and that database has no model. Databases with a "
                        f"model: {', '.join(existing)}. Unset AGAMI_PROFILE or set it to one of them.")}
+
+
+def artifacts_dir_source() -> str:
+    """Where `agami_paths.artifacts_dir()` found the folder, in its own order: `env`
+    (AGAMI_ARTIFACTS_DIR), `pointer` (a non-empty ~/.config/agami/path) or `default`. The skill
+    asks for a folder only on `default`, so it never has to read the pointer file itself."""
+    if os.environ.get("AGAMI_ARTIFACTS_DIR"):
+        return "env"
+    try:
+        if agami_paths.POINTER_PATH.exists() and agami_paths.POINTER_PATH.read_text(encoding="utf-8").strip():
+            return "pointer"
+    except OSError:
+        pass
+    return "default"
+
+
+def gitignore_state(art: Path) -> str:
+    """Whether `<art>/.gitignore` already ignores `local/`: "missing" (no file: write it with that one
+    line), "has_local" (nothing to do) or "lacks_local" (read it, then add the line). Read here so the
+    skill never Reads a file that may not exist: a live run showed that Read as a failed step."""
+    try:
+        text = (art / ".gitignore").read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "lacks_local"
+    lines = {line.strip() for line in text.splitlines()}
+    return "has_local" if lines & {"local/", "local", "/local/", "/local"} else "lacks_local"
 
 
 def main(argv=None) -> int:
@@ -370,6 +497,8 @@ def main(argv=None) -> int:
         "profile": emitted_profile,
         "profile_source": profile_source,
         "artifacts_dir": str(art),
+        "artifacts_dir_source": artifacts_dir_source(),
+        "gitignore": gitignore_state(art),
         "credentials": creds,
         "example_present": example_present,
         "config": config,

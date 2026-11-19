@@ -21,6 +21,17 @@ _SPLIT = re.compile(r"[_\-\s.]+")
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 
+# The sample database's profile, datasource and area are all named `agami-example`: a key other
+# code and the local MCP server use, so it is never renamed. What a person reads names it in words.
+SAMPLE_NAME = "agami-example"
+SAMPLE_DISPLAY_NAME = "Sample store"
+
+
+def display_name(name: str) -> str:
+    """The name a person reads for a datasource or subject area: the sample's display name in place
+    of its key, any other name as it is."""
+    return SAMPLE_DISPLAY_NAME if str(name or "").strip() == SAMPLE_NAME else name
+
 def plain_words(identifier: str) -> str:
     """`in_stock` -> "In stock", `order_items` -> "Order items", `CustomerID` -> "Customer ID".
 

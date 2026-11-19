@@ -11,7 +11,6 @@ are deployed and restored by every core, and their models refuse a key an older 
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 PERSONAL_DATA_ENFORCED = "enforced_by_warehouse"
@@ -47,9 +46,20 @@ def set_personal_data(artifacts_dir: str | Path, setting: str) -> Path:
         doc["personal_data"] = setting
     else:
         doc.pop("personal_data", None)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    os.chmod(
-        path, 0o600
-    )  # the same mode the skill gives this file: it also holds the reviewer's identity
+    write_private(path, json.dumps(doc, indent=2) + "\n")
     return path
+
+
+def write_private(path: Path, text: str) -> None:
+    """`text` at `path`, a file under `<artifacts_dir>/local/`, readable by its owner only (it holds
+    the reviewer's identity), with `local/` made or tightened to 0700. Created at 0600 rather than
+    written and then chmod-ed, so it is never readable by others even for a moment. A linked `local/`
+or `.config` is refused (`scratch.LinkedTarget`)."""
+    from agami_paths import ensure_local_dir
+
+    from .scratch import write_replacing
+
+    ensure_local_dir(path.parent.parent)
+    # Through a temp file and a rename, and never into a linked `local/` or through a linked
+    # `.config`: a link planted there would otherwise point the write at a file the person owns.
+    write_replacing(path, text, 0o600)

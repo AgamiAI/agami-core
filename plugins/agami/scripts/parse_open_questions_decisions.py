@@ -34,12 +34,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import _scratch_out  # noqa: E402
 from _read_only_view import saved_signoff  # noqa: E402
 
 _TOP_KEYS = {"page", "profile", "decisions"}
@@ -221,8 +223,8 @@ def parse(
     return {"ops": ops, "counts": counts}, refused, None
 
 
-def _items(path: str) -> dict[str, dict]:
-    doc = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+def _items(path: str, read=None) -> dict[str, dict]:
+    doc = json.loads(read(path) if read else Path(path).expanduser().read_text(encoding="utf-8"))
     questions = doc.get("questions") if isinstance(doc, dict) else None
     if not isinstance(questions, list):
         raise ValueError("the items file holds no questions list")
@@ -246,20 +248,39 @@ def main(argv: list[str] | None = None) -> int:
         "--ops-out", required=True, help="where to write the `sm curate --ops-file` batch"
     )
     args = ap.parse_args(argv)
+    out = Path(args.ops_out).expanduser()
+    if _scratch_out.guarded():
+        try:
+            out = _scratch_out.scratch_file(args.ops_out, ("json",))
+        except _scratch_out.Refused as e:
+            return _fail(str(e))
+    under_guard = _scratch_out.guarded()
+    if under_guard:
+        # The inputs are held to scratch too, before anything else is read.
+        try:
+            for given in (args.decisions_file, args.items_file):
+                _scratch_out.scratch_file(os.path.expanduser(given), ("json",))
+        except _scratch_out.Refused as e:
+            return _fail(str(e))
     signoff = saved_signoff(Path(args.artifacts_dir).expanduser())
     if not (signoff.get("email") and signoff.get("role")):
         return _fail("no sign-off identity is saved, so no answer can be recorded as the person's")
     try:
-        doc = json.loads(Path(args.decisions_file).expanduser().read_text(encoding="utf-8"))
-        items = _items(args.items_file)
+        if under_guard:
+            doc = json.loads(_scratch_out.read_scratch_text(args.decisions_file))
+            items = _items(args.items_file, _scratch_out.read_scratch_text)
+        else:
+            doc = json.loads(Path(args.decisions_file).expanduser().read_text(encoding="utf-8"))
+            items = _items(args.items_file)
+    except _scratch_out.Refused as e:
+        return _fail(str(e))
     except (OSError, ValueError, RecursionError) as e:
-        return _fail(f"could not read the files: {e}")
+        # Under the guard the files are not the person's to read back, so say nothing of them.
+        return _fail("could not read the files" + ("" if under_guard else f": {e}"))
     data, refused, error = parse(doc, items, args.expect_profile)
     if error:
         return _fail(error)
-    out = Path(args.ops_out).expanduser()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(data["ops"], indent=2), encoding="utf-8")
+    _scratch_out.save(out, json.dumps(data["ops"], indent=2))
     print(
         json.dumps(
             {

@@ -4,3 +4,8 @@
 # use; this entry lets the new detectors run without rewriting public history. Do NOT add entries here to
 # silence a new finding — fix the leak instead.
 2c78f9c1b99f6400f6a6099d4e1bccfbc476733c:tests/test_dsn_parsing.py:supabase-pooler-credential:43
+
+# Unreleased false positive: a test built a relationship whose target column is literally named "pkey"
+# (a column name, not a credential). Already in pushed PR history, so it cannot be rewritten; the
+# working tree no longer has the shape.
+08c06eed89e89004b8cb8f048f2084902f0d2d87:tests/test_dictionary_joins.py:generic-api-key:484
