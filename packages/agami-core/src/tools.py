@@ -1606,6 +1606,11 @@ def _metric_full(
     binding = (m.bindings or {}).get(engine) if engine else None
     if binding and binding.strip():
         out["binding"] = binding
+    # How the binding's tables join (#42): the binding names columns, not the join, and a statement
+    # joined another way is not credited as the metric. Only when the metric says.
+    joins = getattr(m, "joins", None)
+    if joins:
+        out["joins"] = [{"table": j.table, "kind": j.kind} for j in joins]
     return out
 
 

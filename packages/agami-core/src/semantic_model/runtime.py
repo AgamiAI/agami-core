@@ -10372,6 +10372,7 @@ class _JoinMatch(NamedTuple):
     nodes: tuple = ()
     join_id: int = 0                # id() of the exp.Join it is the line of
     outer: bool = False             # an outer join the number reads the optional side of
+    optional: Optional[str] = None  # a LEFT join to a table: that table, the null-extended side
 
 
 class _Linked(NamedTuple):
@@ -10541,7 +10542,11 @@ def _inner_joins(s: "exp.Select", arm: _ArmRestrictions, wide: frozenset, tr: _T
             continue
         line = _join_line(s, join, here, party_named, keys, counted, natural, arm, tr)
         if line is not None:
-            line = line._replace(join_id=id(join), outer=bool(optional & counted))
+            # The optional side by its table, only where it IS a table: a metric's declared join
+            # kind (`_declared_join_fits`) is about its tables, not a step built from one.
+            far = grounded.get(here) if side == "LEFT" and step is None else None
+            line = line._replace(join_id=id(join), outer=bool(optional & counted),
+                                 optional=far[-1][1] if far else None)
         inner.append((line, tables))
 
 
@@ -11295,8 +11300,15 @@ def _match_output_column(oc: OutputColumn, unread: bool,
             # that measure rather than leave it nameless; never a match.
             near = {(c.area, c.metric.name): c for c, _conds, _g in found
                     if {_tkey(_bare(t)) for t in (c.metric.source_tables or [])} <= read_tables}
-            return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNMODELLED, aggregating=True,
-                                unconfirmed=next(iter(near.values())) if len(near) == 1 else None)
+            single = next(iter(near.values())) if len(near) == 1 else None
+            # Unless that one metric declares this very outer join (#42): then its null-extended
+            # rows are what the metric counts, and the value is compared as any other. Never past a
+            # FULL join or a window.
+            if (single is None or path.full or (_has(expr, exp.Window) and path.rows)
+                    or not _outer_joins_declared(single, path, join_status or {})):
+                return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNMODELLED, aggregating=True,
+                                    unconfirmed=single)
+            found = [f for f in found if f[0] is single]
         rows_by_form = {grouped: _rows(grouped) for grouped in own_found}
         if any(rows is None for rows in rows_by_form.values()):
             return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNMODELLED, aggregating=True)
@@ -11358,6 +11370,7 @@ def _match_output_column(oc: OutputColumn, unread: bool,
                 if len(linked[(table, label)]) == 1:
                     extras.append(_LinkSlot(table, label))
             joins: list = []
+            declared_outer: set = set()
             if aggregating:
                 # Every inner join drops the rows with no partner; one between two of the metric's
                 # own tables is part of what the metric counts. A self-join is not.
@@ -11365,11 +11378,21 @@ def _match_output_column(oc: OutputColumn, unread: bool,
                     if jm is None:
                         return _ColumnMatch(UNDETERMINED, None, reason=_WHY_JOIN_UNNAMED,
                                             aggregating=aggregating)
+                    fits = _declared_join_fits(cand, jm, tables, join_status or {})
+                    if fits is False:
+                        # The metric says how these two tables join, and the statement joined them
+                        # another way: written as the metric, not confirmed as it.
+                        return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNMODELLED,
+                                            aggregating=True, unconfirmed=cand)
+                    if fits and jm.outer:
+                        # The declared LEFT join: its null-extended rows are the metric's own.
+                        declared_outer.add(jm.join_id)
+                        continue
                     # A join between two of the metric's own tables is part of what it counts —
                     # never an outer join whose optional side the number is read from.
                     if jm.outer or not (tables and len(tables) > 1 and tables <= sources):
                         joins.append(jm)
-                listed = {jm.join_id for jm in joins}
+                listed = {jm.join_id for jm in joins} | declared_outer
                 if any(id(j) not in listed for j in _optional_side_joins(sel, wide)):
                     return _ColumnMatch(UNDETERMINED, None, reason=_WHY_JOIN_UNNAMED,
                                         aggregating=aggregating)
@@ -11543,6 +11566,36 @@ def _is_number(flow: _Flow, tr: _Trace) -> bool:
         if step is not None and step.computes:
             return True
     return False
+
+
+def _declared_join_fits(cand: "MetricCandidate", jm: _JoinMatch, tables: "frozenset | None",
+                        join_status: dict) -> "bool | None":
+    """Whether a join on the counted rows' path is the one the metric declares between two of its
+    tables (`Metric.joins`, #42): None when it declares nothing about this join; True when it is
+    the declared kind (a LEFT join with the declared table on its optional side, on a key the
+    joins section found declared, or an inner join where nothing is declared `left`); False when it
+    joins them another way. An outer join that drops its null-extended rows anyway (a later inner
+    join needs a partner) is not `outer` here, so it reads as the inner join it is."""
+    sources = {_tkey(_bare(t)) for t in (cand.metric.source_tables or [])}
+    if not (tables and len(tables) == 2 and tables <= sources):
+        return None
+    kinds = {_tkey(_bare(j.table)): j.kind for j in getattr(cand.metric, "joins", None) or ()}
+    declared = {t: kinds[t] for t in tables if t in kinds}
+    if not declared:
+        return None
+    if jm.outer:
+        return (len(declared) == 1 and declared.get(jm.optional) == "left"
+                and join_status.get(jm.join_id, (None, None))[0] == DECLARED)
+    return "left" not in declared.values()
+
+
+def _outer_joins_declared(cand: "MetricCandidate", path: _Path, join_status: dict) -> bool:
+    """Whether every outer join whose null-extended rows the number reads is one `cand` declares
+    (`_declared_join_fits`), so those rows are the metric's own. Any join the path could not name
+    and there is nothing to compare: False."""
+    outer = [(jm, tables) for jm, tables in path.inner if jm is None or jm.outer]
+    return bool(outer) and all(jm is not None and _declared_join_fits(cand, jm, tables, join_status)
+                               for jm, tables in outer)
 
 
 def _undeclared_joins(joins: list, tr: _Trace, join_status: dict,

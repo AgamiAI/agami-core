@@ -29,7 +29,8 @@ Fields: `name`, `description`, `calculation` (prose intent — **required**,
 provider-portable), `bindings` (per-dialect SQL keyed by `StorageType`),
 `source_tables`, `other_names`, `unit` (optional: a currency ISO code, optionally scaled and/or a rate — `USD`, `USD_millions`, `USD/day`, `USD_millions/year` — or a plain label),
 `subject_areas` (optional; only for cross-cutting metrics), `caveats` (optional; what the
-formula does not cover, served with the metric as a warning). Trust:
+formula does not cover, served with the metric as a warning), `joins` (optional; how a metric over
+several tables joins them, below). Trust:
 `confidence` + `review_state` (declared → `inferred`/`unreviewed`; pure guess →
 `proposed`/`unreviewed`).
 
@@ -62,6 +63,31 @@ source_tables:
   - tickets
 caveats:
   - Gives no value for a ticket with no opened_at.
+confidence: inferred
+review_state: unreviewed
+```
+
+**A metric over two tables says how they join (`joins`).** The binding names columns, not the
+join, and the join can change the figure: a ticket never handed off has no `handoffs` row, so a
+LEFT join keeps it and an inner join drops it. Name each table brought in and the kind of join,
+`left` (keep the other tables' rows that have no partner in it) or `inner` (keep only those that
+do). The key is the declared relationship's, so one must link the tables. Each `table` must be one
+of `source_tables`, named once. With it, a query that uses the binding over that join (same tables,
+the relationship's key, same kind) is credited as the metric; another kind, or no `joins` under an
+outer join, is said as *could not be confirmed*.
+
+```yaml
+name: first contact resolutions
+description: Tickets closed without a handoff, or after one out of the front desk.
+calculation: Closed tickets never handed off, or handed off once from the front desk.
+bindings:
+  PostgreSQL: "COUNT(DISTINCT CASE WHEN state = 'closed' AND (reassignments = 0 OR (reassignments = 1 AND kind = 'routing' AND value = 'front_desk')) THEN number END)"
+source_tables:
+  - tickets
+  - handoffs
+joins:
+  - table: handoffs
+    kind: left     # a ticket never handed off has no handoffs row and still counts
 confidence: inferred
 review_state: unreviewed
 ```

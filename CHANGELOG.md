@@ -26,6 +26,20 @@ below corresponds to one such version.
   refusal names a folder change that works. `sm seed-examples` with no `--area` now runs every
   area under the guard instead of exiting 2 with no output.
 
+### Added
+
+- **A metric over two tables can say how they join, and a query that joins them that way is
+  credited** (#42 on the running list). A metric takes an optional `joins: [{table, kind}]`, each
+  `table` one of its `source_tables` and `kind` `left` or `inner`; the key is the declared
+  relationship's. A figure written as the binding over that join (same tables, a declared
+  relationship's key, the same kind, the declared table on a LEFT join's optional side) is now
+  `matched`, and the declared LEFT join is not listed as a restriction. Another kind, a different
+  key, a FULL join or a window stays `undetermined` with `unconfirmed`, as before. The model
+  rejects an unknown kind, a table outside `source_tables` and a table named twice; the validator
+  warns (`metric_join_unrelated`) when no relationship links the table to the metric's others.
+  `sm curate` edits the field (an edit sends an approved metric back to review; clearing it removes
+  the key), and the schema reply serves it beside the binding.
+
 ## [0.9.25] — 2026-11-18
 
 ### Added

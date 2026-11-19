@@ -350,6 +350,7 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
     _check_metric_null_fill(org, res)
     _check_metric_binding_columns(org, res)
     _check_metric_avg_of_ratio(org, res)
+    _check_metric_joins(org, res)
 
     return res
 
@@ -1976,6 +1977,32 @@ def _check_metric_binding_columns(org: Datasource, res: ValidationResult) -> Non
                     f"metric {met.name!r} ({stype}) binding references column(s) {missing} not "
                     f"found on its source table(s) {met.source_tables} — check for a typo or a "
                     "missing source_table",
+                )
+
+
+def _check_metric_joins(org: Datasource, res: ValidationResult) -> None:
+    """WARN when a metric declares how a table joins (`joins`) but the model relates that table to
+    none of the metric's other tables. The declaration names a kind, not a key: the key is a
+    declared relationship's, so with none the receipt can never credit the join and the entry is
+    dead. A warning like the other best-effort metric checks; the model itself rejects an unknown
+    kind or a table outside `source_tables`."""
+    rels = [r for sa in org.subject_areas for r in sa.relationships]
+    rels.extend(org.cross_subject_area_relationships)
+    pairs = {frozenset({bare_name(r.from_table).lower(), bare_name(r.to_table).lower()})
+             for r in rels}
+    all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
+    for sa in org.subject_areas:
+        all_metrics.extend(sa.metrics)
+    for met in all_metrics:
+        for j in met.joins:
+            here = bare_name(j.table).lower()
+            others = {bare_name(t).lower() for t in met.source_tables} - {here}
+            if not any(frozenset({here, o}) in pairs for o in others):
+                res.warn(
+                    "metric_join_unrelated",
+                    f"metric {met.name!r} declares a {j.kind} join to {j.table!r}, but no "
+                    "relationship links it to the metric's other source tables — declare the "
+                    "relationship, or the join is never credited",
                 )
 
 
