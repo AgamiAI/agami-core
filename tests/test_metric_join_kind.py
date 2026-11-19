@@ -235,6 +235,21 @@ def test_a_windowed_figure_is_never_credited():
 # the key-alone one. A receipt fix fails closed: `undetermined`, naming the metric as unconfirmed.
 
 KEPT_WHERE = KEYED + " WHERE t.state = 'open'"
+JOINED = "FROM public.tickets t LEFT JOIN public.handoffs h ON h.ticket_id = t.id"
+
+
+def _filtered(cond: str) -> str:
+    return f"SELECT {WRITTEN} FILTER (WHERE {cond}) AS first_contact_resolved {JOINED}"
+
+
+def _outside(column: str, value: str) -> str:
+    # The figure counted per group inside, and one group picked by an outer query's WHERE.
+    return (
+        f"SELECT s.fcr FROM (SELECT {column} AS g, {WRITTEN} AS fcr {JOINED} "
+        f"GROUP BY {column}) s WHERE s.g = '{value}'"
+    )
+
+
 NOT_CREDITED = {
     "extra_key_on_ids": KEYED + " AND h.id = t.id",
     "extra_key_on_number": KEYED + " AND h.ticket_id = t.number",
@@ -253,6 +268,10 @@ NOT_CREDITED = {
     "far_side_in_exists": KEYED + " WHERE EXISTS (SELECT 1 WHERE h.kind = 'routing')",
     "subquery_in_where": KEYED
     + " WHERE t.id IN (SELECT ticket_id FROM public.handoffs WHERE kind = 'routing')",
+    # The far side read where the figure's own rows are restricted other than by a WHERE: the
+    # aggregate's FILTER, and an outer query picking a group. The same as `far_side_in_where`.
+    "far_side_in_filter": _filtered("h.kind = 'routing'"),
+    "far_side_outside": _outside("h.kind", "routing"),
 }
 
 
@@ -265,6 +284,15 @@ def test_a_declared_left_join_with_more_than_its_key_is_not_credited(sql):
 
 def test_a_kept_side_where_filter_on_the_declared_left_join_is_credited_and_listed():
     item = _first(_org([{"table": "handoffs", "kind": "left"}]), KEPT_WHERE)
+    assert item["status"] == rt.MATCHED and item["name"] == "first_contact_resolutions"
+    assert item["restrictions"] == ["t.state = 'open'"]
+
+
+@pytest.mark.parametrize(
+    "sql", [_filtered("t.state = 'open'"), _outside("t.state", "open")], ids=["filter", "outside"]
+)
+def test_a_kept_side_filter_or_outer_where_is_credited_and_listed(sql):
+    item = _first(_org([{"table": "handoffs", "kind": "left"}]), sql)
     assert item["status"] == rt.MATCHED and item["name"] == "first_contact_resolutions"
     assert item["restrictions"] == ["t.state = 'open'"]
 
@@ -305,6 +333,7 @@ def test_each_refused_shape_counts_something_other_than_its_credited_twin(duck):
     assert got["kept_side_in_on"] != kept_where
     assert got["far_side_not_null"] != keyed
     assert got["far_side_in_exists"] != keyed and got["subquery_in_where"] != keyed
+    assert got["far_side_in_filter"] != keyed and got["far_side_outside"] != keyed
 
 
 # --- the model and validator ---------------------------------------------------------------------

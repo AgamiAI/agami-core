@@ -11400,6 +11400,10 @@ def _match_output_column(oc: OutputColumn, unread: bool,
                     extras.append(_LinkSlot(table, label))
             joins: list = []
             declared_outer: set = set()
+            # Every restriction on the figure's rows that is not the metric's own: its FILTER and
+            # an outer query's WHERE as well as the path's, so a far-side read in any is seen.
+            beyond = [r for r in rows
+                      if not (r.key in conds and _compatible(r, sources, read, path.amap))]
             if aggregating:
                 # Every inner join drops the rows with no partner; one between two of the metric's
                 # own tables is part of what the metric counts. A self-join is not.
@@ -11407,7 +11411,7 @@ def _match_output_column(oc: OutputColumn, unread: bool,
                     if jm is None:
                         return _ColumnMatch(UNDETERMINED, None, reason=_WHY_JOIN_UNNAMED,
                                             aggregating=aggregating)
-                    fits = _declared_join_fits(cand, jm, tables, join_status or {}, path.rows)
+                    fits = _declared_join_fits(cand, jm, tables, join_status or {}, beyond)
                     if fits is False:
                         # The metric says how these two tables join, and the statement joined them
                         # another way: written as the metric, not confirmed as it.
@@ -11607,7 +11611,8 @@ def _declared_join_fits(cand: "MetricCandidate", jm: _JoinMatch, tables: "frozen
     join needs a partner) is not `outer` here, so it reads as the inner join it is.
 
     A declared LEFT join fits only as the bare join: its ON exactly the relationship's key, and no
-    WHERE or HAVING condition anywhere on the path (`rows`, the path's restrictions) reading its
+    WHERE or HAVING condition anywhere on the path (`rows`: every restriction on the figure's rows
+    but the metric's own, its FILTER and an outer query's WHERE included) reading its
     optional side. Anything more changes the figure in a way the receipt's restriction lines do not
     tell apart: an extra ON key or an ON condition keeps rows a WHERE would drop, and a WHERE on the
     optional side drops the tickets it null-extended (an inner join in effect). A condition holding
