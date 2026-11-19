@@ -44,7 +44,7 @@ The prompt names:
    choice only they can make, in `questions`.
 6. **Follow agami-connect's description rules**, in `<plugin_root>/skills/agami-connect/SKILL.md`:
    read "2a — Descriptions" (including the coded-name legend, the value-enum decode, `ai_unknown` and
-   the semantic column groups) and "2b — Entities" before you start, and apply them to your chunk's
+   the semantic column groups, which you propose in `notes`) and "2b — Entities" before you start, and apply them to your chunk's
    tables only. The documents come first, then `datasource.md`, then the profile. Never fill a meaning
    from general product knowledge: a column neither the documents nor the profile explain is marked
    `ai_unknown`. Where those sections say to run a command, read rows or write a file, this file
@@ -72,8 +72,10 @@ Three files, each one JSON value and nothing else:
    Only these fields: a table's or column's `description` (always with `"source": "ai"`), a column's
    `description_source: "ai_unknown"` (looked, couldn't tell: never a guessed description; also with
    `"source": "ai"`, and never any other value), a coded
-   column's `choice_field` labels, and a wide table's `column_groups` and `column_group_descriptions`.
-   No other op and no other field: the main chat's apply refuses the whole file if one is there. Leave
+   column's `choice_field` labels, and `column_group_descriptions` for groups the table already has.
+   No other op and no other field: the main chat's apply refuses the whole file if one is there. The
+   column groups you would make go in `notes` (a regroup changes what other areas show; the main
+   chat makes it). Leave
    out self-evident columns (`id`, `created_at`, a clear `name`) and any column that already has a
    description in the bundle.
 2. **`<result_stem>.entities.json`**: a JSON list of the entity objects 2b describes, ready for

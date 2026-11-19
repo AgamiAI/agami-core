@@ -486,3 +486,20 @@ def test_parallel_work_adds_entities_as_drafts_and_never_replaces():
         '"<artifacts_dir>/local/tmp/agami-enrich-<batch>-<chunk>.entities.json"'
     ) in PARALLEL
     assert "replaces the earlier" not in PARALLEL
+
+
+# --- column groups stay with the main chat ---
+
+
+def test_allow_refuses_a_column_groups_edit(model, tmp_path, capsys):
+    # Regrouping a table rewrites `expose_column_groups` in every area that shows it, and covering
+    # every group drops the field (show all): one area's subagent could widen another area's column
+    # view, which execute_sql's column scope enforces. So an enricher proposes groups as a note.
+    before = _yaml(model)
+    regroup = {**_edit(field="column_groups"), "value": {"all": ["id", "status"]}}
+    regroup.pop("source")
+    rc, out = _allow(model, tmp_path, capsys, [_edit(), regroup])
+    assert rc == 1 and out["applied"] == 0 and len(out["refused"]) == 1, out
+    assert _yaml(model) == before
+    _, body = _agent("agami-enricher")
+    assert "column groups you would make go in `notes`" in body

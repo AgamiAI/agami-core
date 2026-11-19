@@ -74,7 +74,7 @@ edited, merged or split by you):
 
 - **Enricher, 2a:** its edits, held to its own chunk by the engine:
   ```bash
-  AGAMI_SCRATCH_ONLY=1 bash "<plugin_root>/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-enrich-<batch>-<chunk>.ops.json" --allow description,description_source,choice_field,column_groups,column_group_descriptions --area <area> --tables <t1,t2>
+  AGAMI_SCRATCH_ONLY=1 bash "<plugin_root>/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-enrich-<batch>-<chunk>.ops.json" --allow description,description_source,choice_field,column_group_descriptions --area <area> --tables <t1,t2>
   ```
   A `refused` list means the file did something an enricher may not: nothing was applied. Describe
   that chunk inline instead. A validation failure is handled as 2a handles one.

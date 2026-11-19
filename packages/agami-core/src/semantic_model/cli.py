@@ -993,10 +993,11 @@ def cmd_curate(args) -> int:
 
 
 # What an agami-enricher subagent may change, passed as `curate --allow`: descriptions, the "looked,
-# couldn't tell" flag, coded values' labels and a wide table's column groups. Never a sign-off, a hide,
-# an add or a move: the person decides those on cards the subagent can't show.
-ENRICH_FIELDS = ("description", "description_source", "choice_field", "column_groups",
-                 "column_group_descriptions")
+# couldn't tell" flag, coded values' labels and the descriptions of a table's column groups. Never a
+# sign-off, a hide, an add or a move: the person decides those on cards the subagent can't show. Nor
+# `column_groups`: a regroup rewrites `expose_column_groups` in EVERY area showing the table, and one
+# covering every group drops it (show all), so a chunk of area A could widen area B's column scope.
+ENRICH_FIELDS = ("description", "description_source", "choice_field", "column_group_descriptions")
 
 
 def _ops_outside(ops: Any, fields: set[str], area: Optional[str],
