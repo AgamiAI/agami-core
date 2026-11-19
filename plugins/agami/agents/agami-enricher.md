@@ -77,7 +77,8 @@ Three files, each one JSON value and nothing else:
    out self-evident columns (`id`, `created_at`, a clear `name`) and any column that already has a
    description in the bundle.
 2. **`<result_stem>.entities.json`**: a JSON list of the entity objects 2b describes, ready for
-   `sm add --kind entity` (`confidence: inferred`, `review_state: unreviewed`); `[]` when there are
+   `sm add --kind entity --from-subagent`, which lands each one unreviewed and never replaces an
+   entity already in the bundle (`confidence: inferred`, `review_state: unreviewed`); `[]` when there are
    none. Each object has exactly the fields of the "Entity" section of
    `<plugin_root>/shared/metric-entity-shape.md`, read before you write it, and no other key: the
    engine skips an entity with an unknown field (a `primary_key`, say).

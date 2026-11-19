@@ -1234,7 +1234,7 @@ def cmd_add(args) -> int:
                                     for n in sorted(failed)]})
             return 1
     res = curate.write_items(args.root, args.area, args.kind, items,
-                             signer=args.signer, role=args.role)
+                             signer=args.signer, role=args.role, from_subagent=args.from_subagent)
     out = res.as_dict()
     if test_runs is not None:
         out["test_run"] = test_runs
@@ -3087,6 +3087,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--profile", default=None,
                     help="run each metric's SQL over zero rows on this database first; nothing is "
                          "written if one fails (a metric over several tables is reported not_test_run)")
+    sp.add_argument("--from-subagent", action="store_true", dest="from_subagent",
+                    help="the file is an onboarding subagent's: each item lands unreviewed whatever it "
+                         "claims, and a name already in the area is skipped, never replaced")
     sp.set_defaults(func=cmd_add)
 
     sp = sub.add_parser("add-example", help="append/replace NL→SQL examples (prompt_examples/<area>/examples.yaml)")

@@ -80,10 +80,12 @@ edited, merged or split by you):
   that chunk inline instead. A validation failure is handled as 2a handles one.
 - **Enricher, 2b:** its entities, when the list isn't empty:
   ```bash
-  AGAMI_SCRATCH_ONLY=1 bash "<plugin_root>/scripts/sm" add "<root>" --kind entity --area <area> --file "<artifacts_dir>/local/tmp/agami-enrich-<batch>-<chunk>.entities.json"
+  AGAMI_SCRATCH_ONLY=1 bash "<plugin_root>/scripts/sm" add "<root>" --kind entity --area <area> --from-subagent --file "<artifacts_dir>/local/tmp/agami-enrich-<batch>-<chunk>.entities.json"
   ```
-  Two chunks of one area may return the same entity; applying the later one replaces the earlier, so
-  nothing needs doing. An entity the command lists under `skipped` is not fixed in the file: draft it
+  `--from-subagent` lands every entity unreviewed, whatever the file says, and never replaces one
+  already in the model: an entity skipped because its name is taken stays as it was, and goes on 2g's
+  cards as a note to the person if the two differ.
+  An entity skipped for any other reason is not fixed in the file: draft it
   yourself as 2b says, and add it with your own entities.
 - **Enricher, the rest:** its `terms` go into 2a's one `set-terminology` file with your own; its
   `metric_ideas` into 2c; its `cross_area` notes into the entities, joins and metrics you draft with

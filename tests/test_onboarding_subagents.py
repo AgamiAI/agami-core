@@ -399,3 +399,90 @@ def test_allow_applies_generated_descriptions_and_the_couldnt_tell_mark(model, t
     cols = {c["name"]: c for c in doc["columns"]}
     assert cols["status"]["description_source"] == "ai_unvalidated"
     assert cols["customer_id"]["description_source"] == "ai_unknown"
+
+
+# --- sm add --from-subagent: a subagent's entities land as drafts and never replace one ---
+
+_FORGED = {
+    "review_state": "approved",
+    "confidence": "confirmed",
+    "signed_off_by": "you@example.com",
+    "signed_off_role": "owner",
+    "signed_off_at": "2026-01-01T00:00:00Z",
+}
+
+
+def _add(model: Path, tmp_path: Path, items, capsys, *extra: str) -> tuple[int, dict]:
+    f = tmp_path / "agami-entities.json"
+    f.write_text(json.dumps(items))
+    rc = cli.main(["add", str(model), "--kind", "entity", "--file", str(f), *extra])
+    return rc, json.loads(capsys.readouterr().out)
+
+
+def _entity(name: str, table: str, **extra) -> dict:
+    return {"name": name, "description": "A thing.", "maps_to": [{"table": table, "column": "id", "primary": True}], **extra}
+
+
+def _entity_file(model: Path, name: str) -> Path:
+    return model / "subject_areas" / "agami-example" / "entities" / f"{name}.yaml"
+
+
+def test_from_subagent_never_replaces_an_existing_entity(model, tmp_path, capsys):
+    before = _yaml(model)
+    rc, out = _add(
+        model, tmp_path, [_entity("customer", "customers", **_FORGED)], capsys,
+        "--area", "agami-example", "--from-subagent",
+    )
+    assert not out["applied"], out
+    assert [s["item"] for s in out["skipped"]] == ["customer"]
+    assert "already" in out["skipped"][0]["reason"]
+    assert _yaml(model) == before
+    assert "signed_off_by" not in _entity_file(model, "customer").read_text()
+
+
+def test_from_subagent_lands_an_entity_as_an_unapproved_draft(model, tmp_path, capsys):
+    rc, out = _add(
+        model, tmp_path, [_entity("line item", "order_items", **_FORGED)], capsys,
+        "--area", "agami-example", "--from-subagent",
+    )
+    assert rc == 0 and out["validated"] is True, out
+    doc = yaml.safe_load(_entity_file(model, "line_item").read_text())
+    assert doc["review_state"] == "unreviewed" and doc["confidence"] == "inferred"
+    assert not any(k.startswith("signed_off") for k in doc), doc
+
+
+def test_from_subagent_keeps_the_first_of_two_with_one_name(model, tmp_path, capsys):
+    rc, out = _add(
+        model, tmp_path,
+        [_entity("line item", "order_items"), _entity("line item", "orders", description="Second.")],
+        capsys, "--area", "agami-example", "--from-subagent",
+    )
+    assert rc == 0 and len(out["applied"]) == 1 and len(out["skipped"]) == 1, out
+    assert "order_items" in _entity_file(model, "line_item").read_text()
+
+
+def test_from_subagent_refuses_the_cross_area_list(model, tmp_path, capsys):
+    before = _yaml(model)
+    rc, out = _add(
+        model, tmp_path, [_entity("line item", "order_items")], capsys,
+        "--area", "_cross", "--from-subagent",
+    )
+    assert rc == 1 and not out["applied"], out
+    assert _yaml(model) == before
+
+
+def test_add_without_from_subagent_still_replaces_as_a_person_asked(model, tmp_path, capsys):
+    rc, out = _add(
+        model, tmp_path, [_entity("customer", "customers", description="Rewritten by a person.")],
+        capsys, "--area", "agami-example",
+    )
+    assert rc == 0 and out["validated"] is True, out
+    assert "Rewritten by a person." in _entity_file(model, "customer").read_text()
+
+
+def test_parallel_work_adds_entities_as_drafts_and_never_replaces():
+    assert (
+        'scripts/sm" add "<root>" --kind entity --area <area> --from-subagent --file '
+        '"<artifacts_dir>/local/tmp/agami-enrich-<batch>-<chunk>.entities.json"'
+    ) in PARALLEL
+    assert "replaces the earlier" not in PARALLEL
