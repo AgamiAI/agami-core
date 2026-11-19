@@ -111,7 +111,7 @@ You don't build hand-rolled indexes — the loader returns structured objects. T
 - **Subject areas** — the primary scoping unit (replaces "load every table"). Each has a description, a table list, entities, metrics, and an intra-area relationship graph (each edge carries join **cardinality** + a trust block).
 - **`get_table_context(area, tables)`** — columns (scoped by `expose_column_groups`), `default_filters`, relationships, `caveats`, `value_transforms`, metrics — in one call.
 - **Entities** — the vocabulary users say (name/plural/other_names → `maps_to` table.column, with a `value_pattern` for opaque IDs). Use `resolve_entities` / `identify_entity`.
-- **Metrics** — reusable aggregations with prose `calculation` + per-dialect `bindings`. **Use the binding SQL VERBATIM** when the user asks for a metric by name or synonym; don't hand-roll the aggregate.
+- **Metrics** — reusable aggregations with prose `calculation` + per-dialect `bindings`. **Use the binding SQL VERBATIM** when the user asks for a metric by name or synonym; don't hand-roll the aggregate. A metric with `joins` says how its tables join: bring each named table in with that kind (`left` → `LEFT JOIN`, `inner` → `JOIN`) on the declared relationship's key, or the receipt cannot credit the metric.
 - **Cross-subject-area relationships** (org level) — for joins that span two areas.
 
 ### 1d — load the examples library

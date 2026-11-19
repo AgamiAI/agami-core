@@ -1004,9 +1004,12 @@ def _apply_one(root: Path, op: dict, signer, role,
             reason = _nested_aggregate_refusal(root, item)
             if reason:
                 raise ValueError(reason)  # before the dump: nothing is written for this op
-        if kind == "metric" and not item.get("caveats"):
-            # clearing the caveats removes the key, so the file stays readable by an older release
-            item.pop("caveats", None)
+        if kind == "metric":
+            # clearing the caveats or joins removes the key, so the file stays readable by an
+            # older release
+            for fld in ("caveats", "joins"):
+                if not item.get(fld):
+                    item.pop(fld, None)
         staled = _stale_on_edit(kind, prior, item, op)
         _dump(path, {key: doc} if isinstance(doc, list) else doc)
         # The log's history matches by declared name, as `_find_item` resolves (`revenue ($)` vs `revenue (%)`).
