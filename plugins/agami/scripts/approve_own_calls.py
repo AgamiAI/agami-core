@@ -107,13 +107,15 @@ def _no_network_link(path: str) -> bool:
     text before anything follows it. A path that is local by its text can still reach a share through
     a symlink or junction, and `realpath`, `exists` or `stat` would open it. Each component's target
     is read with `readlink` (which does not follow it), outside in, and the walk restarts on the
-    substituted path, the way the OS follows a chain. Mirrors `semantic_model.loader.
-    _refuse_network_links`; mirrored, not imported, like `artifacts_dir` below."""
+    substituted path, the way the OS follows a chain. A `..` segment, in the path or a link's
+    target, is False too: normalizing it away as text would skip the component before it, and the
+    OS follows that one first (`a -> pivot/../x` with `pivot` a link to a share). Mirrors
+    `semantic_model.loader._refuse_network_links`; mirrored, not imported, like `artifacts_dir`."""
     todo, hops = path, 0
     while True:
-        if _network_text(todo):
+        if _network_text(todo) or ".." in re.split(r"[\\/]", todo):
             return False
-        todo = os.path.normpath(todo)
+        todo = os.path.normpath(todo)  # with no `..`, drops only `.` and repeated separators
         prefixes, cur = [], todo
         while True:  # `todo` and each folder above it, up to the root
             head, tail = os.path.split(cur)

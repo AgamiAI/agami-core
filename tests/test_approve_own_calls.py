@@ -1831,6 +1831,40 @@ def test_a_link_to_a_unc_share_is_refused_before_anything_follows_it(art, tmp_pa
 
 
 @SYMLINKS
+def test_a_link_whose_target_climbs_through_a_unc_link_is_refused_before_anything_follows_it(
+    art, tmp_path, monkeypatch
+):
+    """`artlink -> pivot/../artifacts`, `pivot -> //uncprobe/share`: normalized as text, the target
+    loses `pivot` and looks local, but the OS follows `pivot` first. A link target with a parent
+    segment is never approved, so nothing reaches the share."""
+    (tmp_path / "pivot").symlink_to(UNC_TARGET)
+    linked = tmp_path / "artlink"
+    linked.symlink_to(os.path.join("pivot", "..", "artifacts"))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(linked))
+    touched = _nothing_follows_into_unc(monkeypatch)
+    assert HOOK_MOD.scratch_file(str(art / "local" / "tmp" / "agami-x.json")) is False
+    assert HOOK_MOD.model_root(str(art / "acme")) is False
+    assert HOOK_MOD._no_network_link(str(linked / "acme")) is False
+    assert touched == []
+
+
+@SYMLINKS
+def test_a_parent_segment_in_any_link_target_says_nothing(art, tmp_path, monkeypatch):
+    """Even a local one: telling a harmless `..` from one that climbs through a link would mean
+    following links the check has not read yet."""
+    (tmp_path / "plain").mkdir()
+    linked = tmp_path / "artlink"
+    linked.symlink_to(os.path.join("plain", "..", "artifacts"))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(linked))
+    assert HOOK_MOD.scratch_file(str(art / "local" / "tmp" / "agami-x.json")) is False
+    # ... and a relative link without one is followed as before
+    linked.unlink()
+    linked.symlink_to("artifacts")
+    assert HOOK_MOD.scratch_file(str(art / "local" / "tmp" / "agami-x.json")) is True
+    assert HOOK_MOD.model_root(str(art / "acme")) is True
+
+
+@SYMLINKS
 def test_a_plugin_link_to_a_unc_share_is_refused_before_anything_follows_it(art, monkeypatch):
     link = PLUGIN / "shared" / "zz-test-unc-link.md"
     link.symlink_to(UNC_TARGET + "/x.md")
