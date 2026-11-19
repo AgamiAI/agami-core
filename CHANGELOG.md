@@ -61,6 +61,16 @@ below corresponds to one such version.
   miss). The join cards put that answer first with "(Recommended)", and the one-by-one cards add
   only the remaining recommended joins, so the first answer is no longer the chance match.
 
+- **Long text ends its turn** (from #662). In Claude apps, prose over about 200 characters written
+  before a card or another tool call reached the person only as a one-sentence summary, so tables
+  and summaries went missing. The rule is now one shared file (`long-text.md`) and each skill's last
+  message follows it: onboarding ends on one closing message (the summary and the starter
+  questions, with typed replies for review, the model and the full view) and no card; an answer ends
+  on a typed-reply line ("looks right", what is off, "chart", "sign off") with no card after it, and
+  the one-time star ask comes after the person's reply; a sign-off list ends on "approve all",
+  "review each" or "later"; the overview ends on a reply line; and nothing a person needs to answer
+  a card lives only in an option's preview.
+
 ## [0.9.25] — 2026-11-18
 
 ### Added
