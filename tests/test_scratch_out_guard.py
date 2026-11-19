@@ -458,3 +458,37 @@ def test_an_items_file_swapped_for_a_link_after_its_check_is_not_read(art, tmp_p
     assert swapped and rc != 0
     assert MARKER not in said.out + said.err
     assert not out.exists() or MARKER not in out.read_text()
+
+
+def _no_resolve_of(monkeypatch, probe: str) -> list:
+    touched: list = []
+    real_resolve, real_realpath = Path.resolve, os.path.realpath
+
+    def resolve(self, *a, **k):
+        if probe in str(self):
+            touched.append(str(self))
+        return real_resolve(self, *a, **k)
+
+    def realpath(p, *a, **k):
+        if probe in str(p):
+            touched.append(str(p))
+        return real_realpath(p, *a, **k)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    monkeypatch.setattr(os.path, "realpath", realpath)
+    return touched
+
+
+@pytest.mark.parametrize("which", ["--out", "--manifest-out"])
+def test_a_guarded_explorer_refuses_a_unc_output_before_resolving_it(art, monkeypatch, capsys, which):
+    unc = "//uncprobe/share/agami-x." + ("html" if which == "--out" else "json")
+    argv = ["--profile", "acme", "--artifacts-dir", str(art), "--out",
+            str(art / "local" / "tmp" / "agami-x.html")]
+    if which == "--out":
+        argv[-1] = unc
+    else:
+        argv += ["--manifest-out", unc]
+    touched = _no_resolve_of(monkeypatch, "uncprobe")
+    rc = _main("render_model_explorer", argv, monkeypatch)
+    assert rc == 2 and "refused" in capsys.readouterr().err
+    assert touched == []
