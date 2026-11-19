@@ -12,6 +12,14 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **Every MCP tool now lists a title and says whether it reads or writes.** The four core tools carry
+  plain titles (for example, "Run read-only SQL"), and a tool registered without one gets its name
+  as a sentence. A tool not marked read-only now states `readOnlyHint: false` and
+  `destructiveHint: true` instead of stating nothing, which is the same caution a client already
+  applied. Claude's connector directory requires both on every tool.
+
 ## [0.9.25] — 2026-11-18
 
 ### Added

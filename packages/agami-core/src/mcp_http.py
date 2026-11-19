@@ -487,10 +487,9 @@ def build_server(
         instructions = f"{instructions}\n{extra_instructions}"
     server = Server(SERVER_NAME, version=server_version(), instructions=instructions)
 
-    def _annotations(meta: dict) -> mt.ToolAnnotations | None:
+    def _annotations(name: str, meta: dict) -> mt.ToolAnnotations:
         # Spec-shaped dict from the registry (see `tools.tool_annotations`), typed here for the SDK.
-        hints = tool_annotations(meta)
-        return mt.ToolAnnotations(**hints) if hints else None
+        return mt.ToolAnnotations(**tool_annotations(meta, name))
 
     def _described(names: list[str]) -> list:
         return [
@@ -501,7 +500,7 @@ def build_server(
                 name=name,
                 description=tool_description(name, registry[name]["description"]),
                 inputSchema=registry[name]["inputSchema"],
-                annotations=_annotations(registry[name]),
+                annotations=_annotations(name, registry[name]),
             )
             for name in names
         ]
