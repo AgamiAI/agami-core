@@ -1826,7 +1826,11 @@ def cmd_seed_examples(args) -> int:
         if block is not None:
             _print_json(block)
             return 2
-    cands = _read_json_file(args.file)
+    # The every-area form hands each area its own seeds; reading them back from a temp file would
+    # be refused under the scratch guard.
+    cands = getattr(args, "seeds", None)
+    if cands is None:
+        cands = _read_json_file(args.file)
     if isinstance(cands, dict):
         cands = cands.get("examples", cands.get("items", []))
     runner = make_execute_sql_runner(args.profile)
@@ -1944,8 +1948,13 @@ def _run_one_area(cmd, args, area: str, **overrides) -> tuple[int, Any]:
     """Run a single-area command for `area` and return its exit code and parsed JSON output."""
     sub = argparse.Namespace(**{**vars(args), "area": area, **overrides})
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        rc = cmd(sub)
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = cmd(sub)
+    except SystemExit:
+        # A command that stops this way printed why first; dropping the capture said nothing at all.
+        sys.stdout.write(buf.getvalue())
+        raise
     return rc, json.loads(buf.getvalue())
 
 
@@ -1991,20 +2000,16 @@ def cmd_seed_examples_areas(args) -> int:
                      "message": "with several areas (or none named) every seed needs an `area` "
                                 f"that is one of: {', '.join(areas)}"})
         return 2
-    import tempfile
     per_area = []
-    with tempfile.TemporaryDirectory() as tmp:
-        for area in areas:
-            if area not in by_area:
-                continue
-            f = Path(tmp) / "seeds.json"
-            f.write_text(json.dumps(by_area[area]), encoding="utf-8")
-            rc, out = _run_one_area(cmd_seed_examples, args, area, file=str(f))
-            if rc != 0:
-                # A gate refusal is model-wide and no area has been written yet: report it as is.
-                _print_json(out)
-                return rc
-            per_area.append({"area": area, **out})
+    for area in areas:
+        if area not in by_area:
+            continue
+        rc, out = _run_one_area(cmd_seed_examples, args, area, seeds=by_area[area])
+        if rc != 0:
+            # A gate refusal is model-wide and no area has been written yet: report it as is.
+            _print_json(out)
+            return rc
+        per_area.append({"area": area, **out})
     rejected = [{"area": a["area"], **r} for a in per_area for r in a.get("rejected", [])]
     _print_json({"added": [x for a in per_area for x in a.get("added", [])],
                  "written": any(a.get("written") for a in per_area),
