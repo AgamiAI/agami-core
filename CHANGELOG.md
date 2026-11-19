@@ -12,6 +12,11 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **The plugin has an icon.** A square Agami mark at `.claude-plugin/icon.png`, for the plugin's listing
+  in Claude's plugin directory.
+
 ## [0.9.25] — 2026-11-18
 
 ### Added
