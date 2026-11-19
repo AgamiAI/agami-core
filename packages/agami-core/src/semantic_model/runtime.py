@@ -11653,30 +11653,66 @@ def _declared_join_fits(cand: "MetricCandidate", jm: _JoinMatch, tables: "frozen
             and join_status.get(jm.join_id, (None, None))[0] == DECLARED and jm.exact)
 
 
+def _grouping_items(node: "exp.Expression") -> list:
+    """What a GROUP BY or DISTINCT ON groups on, item by item: ROLLUP, CUBE, GROUPING SETS and a
+    set's brackets opened up, so an integer standing alone in any of them is an ordinal, while one
+    inside an expression (`COALESCE(x, 0)`) stays the constant it is."""
+    out: list = []
+    stack: list = list(reversed(list(node.iter_expressions())))
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, (exp.Rollup, exp.Cube, exp.GroupingSets, exp.Tuple, exp.Paren)):
+            stack.extend(reversed(list(cur.iter_expressions())))
+        else:
+            out.append(cur)
+    return out
+
+
 def _shaped_by(sel: "exp.Select", refs: set, tr: _Trace) -> bool:
     """Whether `sel`'s GROUP BY, DISTINCT ON, HAVING or QUALIFY reads any of `refs` (path
-    references), followed through the steps it reads. An ordinal or a select-list alias stands for
-    the projection it names. Fails closed: a column that cannot be followed to a table, a subquery,
-    `GROUP BY ALL` or an ordinal past the select list each count as reading them."""
+    references), followed through the steps it reads. An ordinal (a grouping item that is itself an
+    integer) or a select-list alias stands for the projection it names. Fails closed: a column that
+    cannot be followed to a table, a subquery, `GROUP BY ALL`, an ordinal outside the select list,
+    and a name that is an alias an input column may also bear (or two aliases' one spelling) each
+    count as reading them. Engines bind that last one differently (SQLite and MySQL can read the
+    input column where Postgres reads the alias), so neither binding is taken."""
     projections = sel.expressions
-    aliases = {_tkey(p.alias): p.this for p in projections if isinstance(p, exp.Alias)}
+    aliases: dict = {}
+    for p in projections:
+        if isinstance(p, exp.Alias):
+            aliases.setdefault(_tkey(p.alias), []).append(p.this)
+    sources = _own_sources(sel)
     distinct = sel.args.get("distinct")
-    nodes = [sel.args.get(k) for k in ("group", "having", "qualify")]
-    nodes += [distinct.args["on"]] if distinct is not None and distinct.args.get("on") else []
-    columns: list = []
-    for node in filter(None, nodes):
+    lists = [sel.args.get("group")] + [distinct.args.get("on") if distinct is not None else None]
+    lists = [n for n in lists if n is not None]
+    others = [n for n in (sel.args.get("having"), sel.args.get("qualify")) if n is not None]
+    exprs: list = list(others)
+    for node in lists + others:
         if node.args.get("all") or _has(node, exp.Select):
             return True
-        if isinstance(node, exp.Group):
-            for lit in node.find_all(exp.Literal):
-                if lit.is_int:
-                    k = int(lit.this)
-                    if not 1 <= k <= len(projections):
-                        return True
-                    columns += _own_nodes(projections[k - 1].unalias(), exp.Column)
+    for node in lists:
+        for item in _grouping_items(node):
+            if isinstance(item, exp.Literal) and item.is_int:
+                k = int(item.this)
+                if not 1 <= k <= len(projections):
+                    return True
+                exprs.append(projections[k - 1].unalias())
+            else:
+                exprs.append(item)
+    columns: list = []
+    for node in exprs:
+        if _has(node, exp.Select):
+            return True                     # a projection an ordinal names can hold one
         for col in _own_nodes(node, exp.Column):
             named = aliases.get(_tkey(col.name)) if not col.table else None
-            columns += _own_nodes(named, exp.Column) if named is not None else [col]
+            if named is None:
+                columns.append(col)
+                continue
+            if len(named) > 1 or _has(named[0], exp.Select) or any(
+                    _supplies(src, col.name, tr.smemo, tr.tidx or {}) is not False
+                    for src in sources):
+                return True
+            columns += _own_nodes(named[0], exp.Column)
     for col in columns:
         found = _ground(col, sel, tr.smemo, set())
         if found is None or _pref(found[0], found[1]) in refs:

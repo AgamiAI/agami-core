@@ -464,6 +464,76 @@ def test_the_swept_shapes_count_something_other_than_the_declared_join(duck):
     assert {r[0] for r in rows(SWEEP_CREDITED["second_far_left_unread"])} == {keyed}
 
 
+# --- how a grouping key is spelled: an alias an input column shadows, ordinals, GROUP BY ALL ---
+#
+# A grouping name that is both a select-list alias and an input column binds differently by engine
+# (SQLite and MySQL can read the input column, Postgres the alias), so it is refused whichever it
+# would be. An ordinal is a grouping item that is itself an integer, inside ROLLUP, CUBE or GROUPING
+# SETS too; an integer inside an expression is a constant and reads nothing.
+
+KIND_IS_STATE = "s.state AS kind, "
+GROUPING_REFUSED = {
+    "alias_shadowed_by_input": _over_step("GROUP BY kind, s.state", head=KIND_IS_STATE),
+    "alias_shadowed_direct": f"SELECT t.state AS kind, {WRITTEN} AS fcr {JOINED} GROUP BY kind",
+    "alias_shadowed_in_rollup": _over_step("GROUP BY ROLLUP (kind)", head=KIND_IS_STATE),
+    "alias_shadowed_in_cube": _over_step("GROUP BY CUBE (kind)", head=KIND_IS_STATE),
+    "alias_shadowed_in_grouping_sets": _over_step(
+        "GROUP BY GROUPING SETS ((kind), ())", head=KIND_IS_STATE
+    ),
+    "alias_shadowed_in_having": _over_step(
+        "GROUP BY s.state HAVING MAX(kind) = 'routing'", head=KIND_IS_STATE
+    ),
+    "alias_shadowed_other_case": _over_step("GROUP BY kind", head='s.state AS "Kind", '),
+    "alias_shadowed_quoted": _over_step('GROUP BY "KIND"', head=KIND_IS_STATE),
+    "aliases_differ_only_by_case": _over_step("GROUP BY g", head='s.kind AS "G", s.state AS g, '),
+    "alias_to_correlated_subquery": _over_step(
+        "GROUP BY g",
+        head="(SELECT MAX(h2.kind) FROM public.handoffs h2 WHERE h2.ticket_id = s.id) AS g, ",
+    ),
+    "ordinal_far_in_rollup": _over_step("GROUP BY ROLLUP (1)", head="s.kind AS g, "),
+    "ordinal_far_in_cube": _over_step("GROUP BY CUBE (1)", head="s.kind AS g, "),
+    "ordinal_far_in_grouping_sets": _over_step(
+        "GROUP BY GROUPING SETS ((1), ())", head="s.kind AS g, "
+    ),
+    "ordinal_far_second": _over_step("GROUP BY 1, 2", head="s.state AS g, s.kind AS k, "),
+    "ordinal_out_of_range": _over_step("GROUP BY 3", head="s.state AS g, "),
+    "ordinal_out_of_range_in_rollup": _over_step("GROUP BY ROLLUP (3)", head="s.state AS g, "),
+    "ordinal_zero": _over_step("GROUP BY 0", head="s.state AS g, "),
+    "distinct_on_ordinal_far": f"SELECT DISTINCT ON (1) MAX(s.kind) AS m, s.state AS g, "
+    f"{OVER_STEP} AS fcr FROM {STEP} s GROUP BY s.state",
+    "group_all_far": _over_step("GROUP BY ALL", head="s.kind AS g, "),
+    "group_all_kept": _over_step("GROUP BY ALL", head="s.state AS g, "),
+    "mixed_kept_and_far": _over_step("GROUP BY s.state || s.kind", head="s.state || s.kind AS g, "),
+    "mixed_in_coalesce": _over_step("GROUP BY COALESCE(s.state, s.kind)"),
+}
+GROUPING_CREDITED = {
+    "coalesce_constant": KEYED + " GROUP BY COALESCE(t.reassignments, 0)",
+    "coalesce_constant_over_step": _over_step(
+        "GROUP BY COALESCE(s.reassignments, 0)", head="COALESCE(s.reassignments, 0) AS g, "
+    ),
+    "arithmetic_constant": _over_step("GROUP BY s.reassignments + 1"),
+    "constant_in_rollup": _over_step("GROUP BY ROLLUP (COALESCE(s.reassignments, 0))"),
+    "ordinal_kept": _over_step("GROUP BY 1", head="s.state AS g, "),
+    "ordinal_kept_in_rollup": _over_step("GROUP BY ROLLUP (1)", head="s.state AS g, "),
+    "ordinal_kept_in_grouping_sets": _over_step(
+        "GROUP BY GROUPING SETS ((1), ())", head="s.state AS g, "
+    ),
+    "alias_no_input_namesake": _over_step("GROUP BY g", head="s.state AS g, "),
+}
+
+
+@pytest.mark.parametrize("sql", list(GROUPING_REFUSED.values()), ids=list(GROUPING_REFUSED))
+def test_a_grouping_key_that_may_read_the_far_side_is_not_credited(sql):
+    item = _figure(_org([{"table": "handoffs", "kind": "left"}]), sql)
+    assert item["status"] != rt.MATCHED and item["name"] is None
+
+
+@pytest.mark.parametrize("sql", list(GROUPING_CREDITED.values()), ids=list(GROUPING_CREDITED))
+def test_a_grouping_key_that_reads_only_the_kept_side_is_credited(sql):
+    item = _figure(_org([{"table": "handoffs", "kind": "left"}]), sql)
+    assert item["status"] == rt.MATCHED and item["name"] == "first_contact_resolutions"
+
+
 # --- the model and validator ---------------------------------------------------------------------
 
 
