@@ -1851,3 +1851,20 @@ def test_a_chain_of_local_links_to_a_local_scratch_file_is_still_followed(art, t
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(linked))
     assert HOOK_MOD.scratch_file(str(art / "local" / "tmp" / "agami-x.json")) is True
     assert HOOK_MOD.model_root(str(art / "acme")) is True
+
+
+@pytest.mark.skipif(not hasattr(os, "link"), reason="hard links")
+def test_a_hard_linked_file_inside_the_plugin_says_nothing(art):
+    """A file in the plugin tree that shares its contents with another name (which could be anywhere)
+    is not approved for Read, as the scratch and contained-model readers already refuse one."""
+    first = PLUGIN / "shared" / "zz-test-hard-a.md"
+    second = PLUGIN / "shared" / "zz-test-hard-b.md"
+    first.write_text("x")
+    try:
+        assert _decision(_file("Read", str(first)), art) == "allow"
+        os.link(first, second)
+        assert _decision(_file("Read", str(first)), art) is None
+        assert _decision(_file("Read", str(second)), art) is None
+    finally:
+        first.unlink()
+        second.unlink(missing_ok=True)

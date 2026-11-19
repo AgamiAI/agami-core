@@ -18,7 +18,7 @@ permission flow applies (a skill's `allowed-tools` still cover its own turn). It
   B. Write / Edit / Read of a file directly inside `<artifacts_dir>/local/tmp/` named
      `agami-*.json|txt|tsv|md` (case-sensitive), symlinks resolved, not a hard link. Edit gets
      exactly Write's checks: it can do nothing to such a file that Write could not.
-  C. Read of a file under this plugin's root.
+  C. Read of a file under this plugin's root, not a hard link.
 
 The plugin root is where this file is, never anything the call names. Every check fails closed:
 any doubt (an input it can't parse, a path it can't resolve, an exception) prints nothing. It
@@ -238,7 +238,15 @@ def plugin_file(file_path: Any) -> bool:
         inside = os.path.commonpath([root, real]) == root
     except ValueError:  # different drives on Windows
         return False
-    return inside and real != root and os.path.isfile(real)
+    if not inside or real == root:
+        return False
+    # A hard link's other name could be any file the person owns, so one name only, as the scratch
+    # and contained-model readers require.
+    try:
+        st = os.stat(real)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_nlink == 1
 
 
 # --- the verb table ---------------------------------------------------------------------------------
