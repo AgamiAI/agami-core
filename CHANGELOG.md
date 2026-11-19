@@ -12,6 +12,16 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **Each join candidate says which answer its card recommends** (ported from #662). Every entry
+  in `join_candidates.json` carries `recommend`: `add` only when the data clears the match bar and
+  the column's name reads as a reference to the table (named for the key, or the table's word with
+  at most one of `id`/`ref`/`key`/`no`/`num`/`fk`, or `code` against a code key), or the dictionary
+  states it; `leave_out` for anything else (`store_visits`, `seats_taken`, a type-only match, a near
+  miss). The join cards put that answer first with "(Recommended)", and the one-by-one cards add
+  only the remaining recommended joins, so the first answer is no longer the chance match.
+
 ## [0.9.25] — 2026-11-18
 
 ### Added
