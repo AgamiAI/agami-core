@@ -336,6 +336,134 @@ def test_each_refused_shape_counts_something_other_than_its_credited_twin(duck):
     assert got["far_side_in_filter"] != keyed and got["far_side_outside"] != keyed
 
 
+# --- every other place the far side, or a change to the rows, could hide on the counted path ---
+#
+# The rule: credited only when nothing on the counted path reads the optional side and the join is
+# exactly the declared one. Each shape below is refused; some were already, and stay pinned here.
+
+COLS = (
+    "t.id AS id, t.number AS number, t.state AS state, t.reassignments AS reassignments, "
+    "h.kind AS kind, h.value AS value"
+)
+OVER_STEP = (
+    BINDING.replace("state", "s.state")
+    .replace("reassignments", "s.reassignments")
+    .replace("kind", "s.kind")
+    .replace("value", "s.value")
+    .replace("THEN number", "THEN s.number")
+)
+STEP = f"(SELECT {COLS} {JOINED})"
+
+
+def _over_step(tail: str = "", *, head: str = "", inner: str = "") -> str:
+    step = STEP if not inner else f"(SELECT {COLS} {JOINED} {inner})"
+    return f"SELECT {head}{OVER_STEP} AS fcr FROM {step} s {tail}".strip()
+
+
+SWEEP_REFUSED = {
+    # A WITH step or derived table, the far side filtered outside it.
+    "step_filter_outside": _over_step("WHERE s.kind = 'routing'"),
+    "cte_filter_outside": f"WITH s AS {STEP} SELECT {OVER_STEP} AS fcr FROM s "
+    "WHERE s.kind = 'routing'",
+    "cte_not_null_outside": f"WITH s AS {STEP} SELECT {OVER_STEP} AS fcr FROM s "
+    "WHERE s.value IS NOT NULL",
+    "far_filter_inside_step": _over_step(inner="WHERE h.kind = 'routing'"),
+    "filter_over_step": _over_step(head="").replace(
+        " AS fcr", " FILTER (WHERE s.kind = 'routing') AS fcr"
+    ),
+    # Windows and QUALIFY over the far side.
+    "qualify_far": _over_step(
+        inner="QUALIFY ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY h.kind) = 1"
+    ),
+    "window_far_filtered": f"SELECT {OVER_STEP} AS fcr FROM (SELECT {COLS}, ROW_NUMBER() OVER "
+    f"(PARTITION BY t.id ORDER BY h.kind) AS rn {JOINED}) s WHERE s.rn = 1",
+    "distinct_on_in_step": f"SELECT {OVER_STEP} AS fcr FROM (SELECT DISTINCT ON (t.id) {COLS} "
+    f"{JOINED} ORDER BY t.id, h.kind) s",
+    "distinct_on": f"SELECT DISTINCT ON (h.kind) {WRITTEN} AS fcr {JOINED} GROUP BY h.kind",
+    # A far-side read inside the aggregate that is not the binding: not this metric at all.
+    "case_far_extra": f"SELECT COUNT(DISTINCT CASE WHEN h.kind = 'x' THEN NULL "
+    f"ELSE t.number END) AS fcr {JOINED}",
+    "case_wrap_far": f"SELECT {WRITTEN.replace('CASE WHEN', 'CASE WHEN h.id IS NOT NULL AND', 1)}"
+    f" AS fcr {JOINED}",
+    # Grouped, or groups picked, by the far side, however the key is spelled and wherever.
+    "group_far": KEYED + " GROUP BY h.kind",
+    "group_far_rollup": KEYED + " GROUP BY ROLLUP (h.kind)",
+    "group_far_and_kept": KEYED + " GROUP BY t.state, h.value",
+    "group_far_ordinal": f"SELECT h.kind AS g, {WRITTEN} AS fcr {JOINED} GROUP BY 1",
+    "group_far_alias": f"SELECT h.kind AS g, {WRITTEN} AS fcr {JOINED} GROUP BY g",
+    "group_far_over_step": _over_step("GROUP BY s.kind", head="s.kind AS g, "),
+    "group_far_ordinal_over_step": _over_step("GROUP BY 1", head="s.kind AS g, "),
+    "group_far_in_cte": f"WITH s AS {STEP} SELECT s.kind AS g, {OVER_STEP} AS fcr FROM s "
+    "GROUP BY s.kind",
+    "having_far": KEYED + " GROUP BY t.state HAVING COUNT(h.id) > 0",
+    "having_far_over_step": _over_step(
+        "GROUP BY s.state HAVING MAX(s.kind) = 'routing'", head="s.state AS g, "
+    ),
+    # LATERAL and UNNEST.
+    "lateral": KEYED + ", LATERAL (SELECT 1 AS one WHERE h.kind = 'routing') l",
+    "unnest": KEYED + " CROSS JOIN UNNEST([1, 2]) AS u(x)",
+    # The far table joined again, the join spelled another way, or another join on its side.
+    "second_far_inner": KEYED + " JOIN public.handoffs h2 ON h2.ticket_id = t.id",
+    "self_join_far": KEYED + " JOIN public.handoffs h2 ON h2.id = h.id",
+    "right_from_the_other_side": f"SELECT {WRITTEN} AS fcr FROM public.handoffs h "
+    "RIGHT JOIN public.tickets t ON h.ticket_id = t.id",
+    "using": f"SELECT {WRITTEN} AS fcr FROM public.tickets t LEFT JOIN public.handoffs h "
+    "USING (id)",
+    "natural": f"SELECT {WRITTEN} AS fcr FROM public.tickets t NATURAL LEFT JOIN "
+    "public.handoffs h",
+    "on_true": f"SELECT {WRITTEN} AS fcr FROM public.tickets t LEFT JOIN public.handoffs h "
+    "ON TRUE",
+    "inner_on_true_mixed": KEYED + " JOIN public.tickets t2 ON TRUE",
+    "cross_join_far_filter": KEYED + " CROSS JOIN public.tickets t2 WHERE t2.id = h.ticket_id",
+}
+# Nothing on the path reads the far side and the join is the declared one: still credited.
+SWEEP_CREDITED = {
+    "over_step": _over_step(),
+    "in_cte": f"WITH s AS {STEP} SELECT {OVER_STEP} AS fcr FROM s",
+    "group_kept": KEYED + " GROUP BY t.state",
+    "group_kept_over_step": _over_step("GROUP BY s.state", head="s.state AS g, "),
+    "kept_filter_inside_step": _over_step(inner="WHERE t.state = 'open'"),
+    # Repeats the counted rows without reading them: a distinct count is unmoved (2 below).
+    "second_far_left_unread": KEYED + " LEFT JOIN public.handoffs h2 ON h2.ticket_id = t.id",
+}
+
+
+def _figure(org: m.Datasource, sql: str) -> dict:
+    items = rt.assemble_receipt(org, sql)["columns"]["items"]
+    return next(i for i in items if i["kind"] == "output" and i["aggregate"])
+
+
+@pytest.mark.parametrize("sql", list(SWEEP_REFUSED.values()), ids=list(SWEEP_REFUSED))
+def test_a_far_side_read_or_a_changed_row_set_anywhere_on_the_path_is_not_credited(sql):
+    item = _figure(_org([{"table": "handoffs", "kind": "left"}]), sql)
+    assert item["status"] != rt.MATCHED and item["name"] is None
+
+
+@pytest.mark.parametrize("sql", list(SWEEP_CREDITED.values()), ids=list(SWEEP_CREDITED))
+def test_the_declared_join_with_nothing_reading_its_far_side_is_still_credited(sql):
+    item = _figure(_org([{"table": "handoffs", "kind": "left"}]), sql)
+    assert item["status"] == rt.MATCHED and item["name"] == "first_contact_resolutions"
+
+
+def test_the_swept_shapes_count_something_other_than_the_declared_join(duck):
+    def rows(sql: str) -> list:
+        return duck.execute(sql).fetchall()
+
+    keyed = rows(KEYED)[0][0]
+    assert keyed == 2
+    for name in ("step_filter_outside", "cte_filter_outside", "cte_not_null_outside",
+                 "far_filter_inside_step", "filter_over_step", "qualify_far",
+                 "window_far_filtered", "distinct_on_in_step", "case_wrap_far", "lateral",
+                 "second_far_inner", "self_join_far", "using", "natural",
+                 "cross_join_far_filter"):
+        assert rows(SWEEP_REFUSED[name]) != [(keyed,)], name
+    # Grouping by the far side is the far-side WHERE, one group at a time.
+    where = rows(KEYED + " WHERE h.kind = 'routing'")[0][0]
+    grouped = dict(rows(SWEEP_REFUSED["group_far_over_step"]))
+    assert grouped["routing"] == where != keyed
+    assert {r[0] for r in rows(SWEEP_CREDITED["second_far_left_unread"])} == {keyed}
+
+
 # --- the model and validator ---------------------------------------------------------------------
 
 

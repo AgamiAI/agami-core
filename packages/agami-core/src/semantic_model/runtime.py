@@ -10570,6 +10570,11 @@ def _inner_joins(s: "exp.Select", arm: _ArmRestrictions, wide: frozenset, tr: _T
             filters = [c for pred in [_where_predicate(s)] + [s.args[k].this for k in
                                                               ("having", "qualify") if s.args.get(k)]
                        for c in _and_conjuncts(pred)]
+            # Grouping on the optional side splits each figure by it, and DISTINCT ON keeps one
+            # partner row a ticket: each reads the optional side the way a WHERE on it does.
+            filters += [s.args["group"]] if s.args.get("group") else []
+            distinct = s.args.get("distinct")
+            filters += [distinct] if distinct is not None and distinct.args.get("on") else []
             line = line._replace(join_id=id(join), outer=bool(optional & counted),
                                  optional=far[-1][1] if far else None,
                                  optional_ref=far[0][0] if far else None,
@@ -11400,6 +11405,7 @@ def _match_output_column(oc: OutputColumn, unread: bool,
                     extras.append(_LinkSlot(table, label))
             joins: list = []
             declared_outer: set = set()
+            optional_refs: set = set()
             # Every restriction on the figure's rows that is not the metric's own: its FILTER and
             # an outer query's WHERE as well as the path's, so a far-side read in any is seen.
             beyond = [r for r in rows
@@ -11420,11 +11426,18 @@ def _match_output_column(oc: OutputColumn, unread: bool,
                     if fits and jm.outer:
                         # The declared LEFT join: its null-extended rows are the metric's own.
                         declared_outer.add(jm.join_id)
+                        optional_refs.add(jm.optional_ref)
                         continue
                     # A join between two of the metric's own tables is part of what it counts —
                     # never an outer join whose optional side the number is read from.
                     if jm.outer or not (tables and len(tables) > 1 and tables <= sources):
                         joins.append(jm)
+                if optional_refs and _shaped_by(sel, optional_refs, tr):
+                    # Grouped, or groups picked, by the optional side where the figure is counted
+                    # (over a step, say): each figure is then the metric over the rows that found
+                    # such a partner, which no restriction line says.
+                    return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNMODELLED,
+                                        aggregating=True, unconfirmed=cand)
                 listed = {jm.join_id for jm in joins} | declared_outer
                 if any(id(j) not in listed for j in _optional_side_joins(sel, wide)):
                     return _ColumnMatch(UNDETERMINED, None, reason=_WHY_JOIN_UNNAMED,
@@ -11619,9 +11632,13 @@ def _declared_join_fits(cand: "MetricCandidate", jm: _JoinMatch, tables: "frozen
     a subquery (EXISTS, IN, a scalar one) is never looked inside, so it is not credited whichever
     side it reads: a correlated one can read the optional side unseen. Fails closed."""
     sources = {_tkey(_bare(t)) for t in (cand.metric.source_tables or [])}
-    if not (tables and len(tables) == 2 and tables <= sources):
-        return None
     kinds = {_tkey(_bare(j.table)): j.kind for j in getattr(cand.metric, "joins", None) or ()}
+    if not (tables and len(tables) == 2 and tables <= sources):
+        # Any other join reaching the table the metric declares `left` (a self-join, a USING or
+        # NATURAL join whose sides are not the declared pair) can drop or keep its null-extended
+        # rows in a way no line says: not the declared join, so never credited as it.
+        reaches = set(tables or ()) | ({jm.optional} if jm.optional else set())
+        return False if any(kinds.get(t) == "left" for t in reaches) else None
     declared = {t: kinds[t] for t in tables if t in kinds}
     if not declared:
         return None
@@ -11634,6 +11651,37 @@ def _declared_join_fits(cand: "MetricCandidate", jm: _JoinMatch, tables: "frozen
     # relationship's key. Without it `kind: inner` would credit a join on another relationship.
     return ("left" not in declared.values()
             and join_status.get(jm.join_id, (None, None))[0] == DECLARED and jm.exact)
+
+
+def _shaped_by(sel: "exp.Select", refs: set, tr: _Trace) -> bool:
+    """Whether `sel`'s GROUP BY, DISTINCT ON, HAVING or QUALIFY reads any of `refs` (path
+    references), followed through the steps it reads. An ordinal or a select-list alias stands for
+    the projection it names. Fails closed: a column that cannot be followed to a table, a subquery,
+    `GROUP BY ALL` or an ordinal past the select list each count as reading them."""
+    projections = sel.expressions
+    aliases = {_tkey(p.alias): p.this for p in projections if isinstance(p, exp.Alias)}
+    distinct = sel.args.get("distinct")
+    nodes = [sel.args.get(k) for k in ("group", "having", "qualify")]
+    nodes += [distinct.args["on"]] if distinct is not None and distinct.args.get("on") else []
+    columns: list = []
+    for node in filter(None, nodes):
+        if node.args.get("all") or _has(node, exp.Select):
+            return True
+        if isinstance(node, exp.Group):
+            for lit in node.find_all(exp.Literal):
+                if lit.is_int:
+                    k = int(lit.this)
+                    if not 1 <= k <= len(projections):
+                        return True
+                    columns += _own_nodes(projections[k - 1].unalias(), exp.Column)
+        for col in _own_nodes(node, exp.Column):
+            named = aliases.get(_tkey(col.name)) if not col.table else None
+            columns += _own_nodes(named, exp.Column) if named is not None else [col]
+    for col in columns:
+        found = _ground(col, sel, tr.smemo, set())
+        if found is None or _pref(found[0], found[1]) in refs:
+            return True
+    return False
 
 
 def _outer_joins_declared(cand: "MetricCandidate", path: _Path, join_status: dict) -> bool:
