@@ -12,6 +12,20 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Link and UNC hardening after 0.9.25** (#699). The permission hook reads every link on a model,
+  scratch or plugin path as text before following it, so a link to a network share is refused
+  without being opened, and it no longer approves a Read of a hard-linked plugin file. Under
+  `AGAMI_SCRATCH_ONLY`, folders are checked outside in without following links (a dangling link
+  at `local/samples` is refused instead of the sample being written where it points), the examples
+  dashboard reads its items files link-safe, the model explorer checks its output paths before
+  resolving them, and the open-questions page and table picker take their inputs only from scratch
+  (or, for the inventory, the profile's own `.introspect/inventory.json`). `connect_helper` refuses
+  a linked `local/` or credentials file before writing. When `local/` can't be kept private, the
+  refusal names a folder change that works. `sm seed-examples` with no `--area` now runs every
+  area under the guard instead of exiting 2 with no output.
+
 ## [0.9.25] — 2026-11-18
 
 ### Added
