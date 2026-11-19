@@ -782,10 +782,10 @@ def test_steps_that_fan_out_stay_linear(org):
         for i in range(1, 40)
     ]
     sql = "WITH " + ", ".join(ctes) + " SELECT SUM(total_amount) AS n FROM c39"
-    # Relative to a parse-and-walk of the same statement on this machine (tests/timing_bound.py);
-    # a 2^n walk is astronomically past 1000x, and the backstop catches a hang.
-    assert_assembly_within(
-        lambda: _one(org, sql, "n"), sql, "postgres", repeats=3, ratio=1000)  # locally 50-180x: a 5 ms reference is mostly jitter
+    # Relative to a parse-and-walk of the same statement on this machine (tests/timing_bound.py).
+    # Measured 8.2x idle and at most 10.2x with 8 CPU burners running; 100x leaves 10x headroom,
+    # and a 2^n walk is astronomically past it. The backstop catches a hang.
+    assert_assembly_within(lambda: _one(org, sql, "n"), sql, "postgres", repeats=3, ratio=100)
     item = _one(org, sql, "n")
     assert item["status"] == rt.UNDETERMINED
 
