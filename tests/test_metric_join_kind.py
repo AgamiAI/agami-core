@@ -135,12 +135,15 @@ UNCONFIRMED = {"name": "first_contact_resolutions", "area": "support"}
 
 
 def test_a_left_join_the_metric_declares_is_credited_as_the_metric():
-    item = _first(_org([{"table": "handoffs", "kind": "left"}]), LEFT)
+    # On the key alone. This once credited the live shape (`LEFT`, a history condition in the ON)
+    # and listed that condition as a restriction, but the same line is what a WHERE on the history
+    # lists, and the two count differently (2 against 1 on the rows below): that shape is now left
+    # unconfirmed (`far_side_in_on`), and the credited one is the join exactly as declared.
+    item = _first(_org([{"table": "handoffs", "kind": "left"}]), KEYED)
     assert item["status"] == rt.MATCHED and item["name"] == "first_contact_resolutions"
     assert item["review_state"] == "approved" and item["unconfirmed"] is None
     assert not item["joins_not_declared"]
-    # The condition beyond the declared key is said; the declared join itself is not a restriction.
-    assert len(item["restrictions"]) == 1 and "routing" in item["restrictions"][0]
+    # The declared join itself is not a restriction.
     assert not any("matching" in r for r in item["restrictions"])
 
 
@@ -204,6 +207,79 @@ def test_a_windowed_figure_is_never_credited():
     sql = LEFT.replace(" AS first_contact_resolved", " OVER () AS first_contact_resolved")
     item = _first(_org([{"table": "handoffs", "kind": "left"}]), sql)
     assert item["status"] != rt.MATCHED and item["name"] is None
+
+
+# --- a declared LEFT join is credited only as written: the exact key, nothing else on the far side
+#
+# Each shape below gives a different figure from the key-alone join over the same rows (counted in
+# DuckDB beside it), and each once came back `matched` with a receipt that could not tell it from
+# the key-alone one. A receipt fix fails closed: `undetermined`, naming the metric as unconfirmed.
+
+KEPT_WHERE = KEYED + " WHERE t.state = 'open'"
+NOT_CREDITED = {
+    "extra_key_on_ids": KEYED + " AND h.id = t.id",
+    "extra_key_on_number": KEYED + " AND h.ticket_id = t.number",
+    # The live shape: the history condition in the ON keeps every ticket, the same text in the
+    # WHERE keeps only tickets with such a row. The restriction line read the same for both.
+    "far_side_in_on": LEFT,
+    "far_side_in_where": KEYED + " WHERE h.kind = 'routing'",
+    # A kept-side condition in the ON filters nothing (each ticket is kept, partner or not); in the
+    # WHERE it drops tickets. Both listed `t.state = 'open'`.
+    "kept_side_in_on": KEYED + " AND t.state = 'open'",
+    # An inner join in effect, which written as INNER is already refused.
+    "far_side_not_null": KEYED + " WHERE h.id IS NOT NULL",
+    "far_side_in_having": KEYED + " HAVING MAX(h.kind) = 'routing'",
+}
+
+
+@pytest.mark.parametrize("sql", list(NOT_CREDITED.values()), ids=list(NOT_CREDITED))
+def test_a_declared_left_join_with_more_than_its_key_is_not_credited(sql):
+    item = _first(_org([{"table": "handoffs", "kind": "left"}]), sql)
+    assert item["status"] == rt.UNDETERMINED and item["name"] is None
+    assert item["unconfirmed"] == UNCONFIRMED
+
+
+def test_a_kept_side_where_filter_on_the_declared_left_join_is_credited_and_listed():
+    item = _first(_org([{"table": "handoffs", "kind": "left"}]), KEPT_WHERE)
+    assert item["status"] == rt.MATCHED and item["name"] == "first_contact_resolutions"
+    assert item["restrictions"] == ["t.state = 'open'"]
+
+
+@pytest.fixture()
+def duck():
+    duckdb = pytest.importorskip("duckdb")
+    con = duckdb.connect()
+    con.execute("CREATE SCHEMA IF NOT EXISTS public")
+    con.execute(
+        "CREATE TABLE public.tickets (id VARCHAR, number VARCHAR, state VARCHAR, "
+        "reassignments INTEGER)"
+    )
+    con.execute(
+        "INSERT INTO public.tickets VALUES ('t1', 'N1', 'closed', 0), ('t2', 'N2', 'closed', 1), "
+        "('t3', 'N3', 'open', 0)"
+    )
+    con.execute(
+        "CREATE TABLE public.handoffs (id VARCHAR, ticket_id VARCHAR, kind VARCHAR, value VARCHAR)"
+    )
+    con.execute(
+        "INSERT INTO public.handoffs VALUES ('h1', 't2', 'routing', 'front_desk'), "
+        "('h2', 't2', 'other', 'front_desk')"
+    )
+    yield con
+    con.close()
+
+
+def test_each_refused_shape_counts_something_other_than_its_credited_twin(duck):
+    def count(sql: str) -> int:
+        return duck.execute(sql).fetchone()[0]
+
+    keyed, kept_where = count(KEYED), count(KEPT_WHERE)
+    assert (keyed, kept_where) == (2, 0)
+    got = {name: count(sql) for name, sql in NOT_CREDITED.items() if name != "far_side_in_having"}
+    assert got["extra_key_on_ids"] != keyed and got["extra_key_on_number"] != keyed
+    assert got["far_side_in_on"] != got["far_side_in_where"]
+    assert got["kept_side_in_on"] != kept_where
+    assert got["far_side_not_null"] != keyed
 
 
 # --- the model and validator ---------------------------------------------------------------------

@@ -4379,6 +4379,23 @@ def _join_site_status(js: "_JoinSite", declared_pairs: list) -> "tuple[str, Opti
     return status, match
 
 
+def _exact_key_joins(join_sites: list, join_results: list, declared_pairs: list) -> frozenset:
+    """id(join) of every written join whose ON is exactly the key of the relationship it matched:
+    the declared column pairs (and fixed values), each written once, and no other condition. The
+    joins section's own match is a SUBSET match, so `ON h.ticket_id = t.id AND h.id = t.id` is
+    `declared` there; a metric's declared LEFT join is credited only on this narrower fact, since an
+    extra ON condition keeps every row of the other side and so changes the figure (#42)."""
+    out = set()
+    for js, (status, match) in zip(join_sites, join_results):
+        on = js.node.args.get("on")
+        if status != DECLARED or match is None or on is None:
+            continue
+        pairs = next((p for rel, p in declared_pairs if rel is match), None)
+        if pairs and (js.pairs | js.fixed) == pairs and len(list(_and_conjuncts(on))) == len(pairs):
+            out.add(id(js.node))
+    return frozenset(out)
+
+
 def _join_links(join_sites: list, declared_pairs: list) -> "tuple[dict, dict, frozenset]":
     """(id(join) -> which declared relationship a written join used, table pair -> the tables a
     condition on means something different through each), over every pair of tables the model
@@ -4754,7 +4771,8 @@ def assemble_receipt(
     # it; each written join's status and label, so a number counted through one the model does not
     # declare can name it; and the declared second-order metrics, by what they are built from.
     trace = _Trace(metric_dialect, tidx, visible, restriction_memo, own_alias_memo, {}, {},
-                   *_join_links(join_sites, declared_pairs))
+                   *_join_links(join_sites, declared_pairs),
+                   exact=_exact_key_joins(join_sites, join_results, declared_pairs))
     join_status = {id(js.node): (status, f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
                    for js, (status, _match) in zip(join_sites, join_results)}
     second_order = _second_order_index(candidates, metric_storage_type)
@@ -10179,6 +10197,7 @@ class _Trace(NamedTuple):
     links: Mapping = _EMPTY     # `_join_links`: id(join) -> the declared link it used
     far: Mapping = _EMPTY       # `_join_links`: table pair -> the tables a link tells apart
     declared: frozenset = frozenset()  # `_join_links`: every pair of tables the model relates
+    exact: frozenset = frozenset()  # `_exact_key_joins`: id(join) whose ON is a declared key, whole
 
     def arm(self, sel: "exp.Select") -> _ArmRestrictions:
         return _arm_restrictions(sel, self.dialect, self.tidx, self.visible, self.rmemo,
@@ -10373,6 +10392,9 @@ class _JoinMatch(NamedTuple):
     join_id: int = 0                # id() of the exp.Join it is the line of
     outer: bool = False             # an outer join the number reads the optional side of
     optional: Optional[str] = None  # a LEFT join to a table: that table, the null-extended side
+    optional_ref: Optional[str] = None  # ... and its path reference, for conditions read off it
+    exact: bool = False             # its ON is a declared key and nothing else (`_exact_key_joins`)
+    filtered: bool = False          # its SELECT's WHERE or HAVING reads the optional side
 
 
 class _Linked(NamedTuple):
@@ -10545,8 +10567,14 @@ def _inner_joins(s: "exp.Select", arm: _ArmRestrictions, wide: frozenset, tr: _T
             # The optional side by its table, only where it IS a table: a metric's declared join
             # kind (`_declared_join_fits`) is about its tables, not a step built from one.
             far = grounded.get(here) if side == "LEFT" and step is None else None
+            filters = [c for pred in [_where_predicate(s)] + [s.args[k].this for k in
+                                                              ("having", "qualify") if s.args.get(k)]
+                       for c in _and_conjuncts(pred)]
             line = line._replace(join_id=id(join), outer=bool(optional & counted),
-                                 optional=far[-1][1] if far else None)
+                                 optional=far[-1][1] if far else None,
+                                 optional_ref=far[0][0] if far else None,
+                                 exact=id(join) in tr.exact,
+                                 filtered=any(optional & _condition_refs(c, arm) for c in filters))
         inner.append((line, tables))
 
 
@@ -11378,7 +11406,7 @@ def _match_output_column(oc: OutputColumn, unread: bool,
                     if jm is None:
                         return _ColumnMatch(UNDETERMINED, None, reason=_WHY_JOIN_UNNAMED,
                                             aggregating=aggregating)
-                    fits = _declared_join_fits(cand, jm, tables, join_status or {})
+                    fits = _declared_join_fits(cand, jm, tables, join_status or {}, path.rows)
                     if fits is False:
                         # The metric says how these two tables join, and the statement joined them
                         # another way: written as the metric, not confirmed as it.
@@ -11569,13 +11597,19 @@ def _is_number(flow: _Flow, tr: _Trace) -> bool:
 
 
 def _declared_join_fits(cand: "MetricCandidate", jm: _JoinMatch, tables: "frozenset | None",
-                        join_status: dict) -> "bool | None":
+                        join_status: dict, rows: "list | tuple" = ()) -> "bool | None":
     """Whether a join on the counted rows' path is the one the metric declares between two of its
     tables (`Metric.joins`, #42): None when it declares nothing about this join; True when it is
     the declared kind (a LEFT join with the declared table on its optional side, on a key the
     joins section found declared, or an inner join where nothing is declared `left`); False when it
     joins them another way. An outer join that drops its null-extended rows anyway (a later inner
-    join needs a partner) is not `outer` here, so it reads as the inner join it is."""
+    join needs a partner) is not `outer` here, so it reads as the inner join it is.
+
+    A declared LEFT join fits only as the bare join: its ON exactly the relationship's key, and no
+    WHERE or HAVING condition anywhere on the path (`rows`, the path's restrictions) reading its
+    optional side. Anything more changes the figure in a way the receipt's restriction lines do not
+    tell apart: an extra ON key or an ON condition keeps rows a WHERE would drop, and a WHERE on the
+    optional side drops the tickets it null-extended (an inner join in effect). Fails closed."""
     sources = {_tkey(_bare(t)) for t in (cand.metric.source_tables or [])}
     if not (tables and len(tables) == 2 and tables <= sources):
         return None
@@ -11585,7 +11619,9 @@ def _declared_join_fits(cand: "MetricCandidate", jm: _JoinMatch, tables: "frozen
         return None
     if jm.outer:
         return (len(declared) == 1 and declared.get(jm.optional) == "left"
-                and join_status.get(jm.join_id, (None, None))[0] == DECLARED)
+                and join_status.get(jm.join_id, (None, None))[0] == DECLARED
+                and jm.exact and not jm.filtered and jm.optional_ref is not None
+                and not any(jm.optional_ref in r.refs for r in rows))
     return "left" not in declared.values()
 
 
@@ -11594,7 +11630,8 @@ def _outer_joins_declared(cand: "MetricCandidate", path: _Path, join_status: dic
     (`_declared_join_fits`), so those rows are the metric's own. Any join the path could not name
     and there is nothing to compare: False."""
     outer = [(jm, tables) for jm, tables in path.inner if jm is None or jm.outer]
-    return bool(outer) and all(jm is not None and _declared_join_fits(cand, jm, tables, join_status)
+    return bool(outer) and all(jm is not None
+                               and _declared_join_fits(cand, jm, tables, join_status, path.rows)
                                for jm, tables in outer)
 
 
