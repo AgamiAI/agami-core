@@ -2144,7 +2144,8 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
         before = doc.get(fld)
         # A generated description never replaces one a person wrote or the database's own dictionary
         # supplied — enrichment describes what is undescribed. A person can still overwrite either.
-        if (fld == "description" and desc_source and op.get("source") == "ai"
+        # The same holds for a generated "looked, couldn't tell" mark: it would relabel their text.
+        if (fld in ("description", "description_source") and desc_source and op.get("source") == "ai"
                 and doc.get("description_source") in ("human", "metadata")
                 and (doc.get("description") or "").strip()):
             raise ValueError(f"kept the existing {doc['description_source']} description "
@@ -2308,8 +2309,20 @@ def _writable_items(root: Path, kind: str, items: list[dict], res: ApplyResult) 
     return out
 
 
+# What a draft from a subagent may not say about itself: the sign-off is the person's, on a card.
+_DRAFT_STRIPPED = ("review_state", "confidence", "signed_off_by", "signed_off_at", "signed_off_role")
+
+
+def _as_drafts(items: list[dict]) -> list[dict]:
+    """`items` with any claim of sign-off removed, each in the state the build gives an AI draft."""
+    return [{**{k: v for k, v in item.items() if k not in _DRAFT_STRIPPED},
+             "confidence": "inferred", "review_state": "unreviewed"} if isinstance(item, dict) else item
+            for item in items]
+
+
 def write_items(root: str | Path, area: str, kind: str, items: list[dict],
-                *, signer: Optional[str] = None, role: Optional[str] = None) -> ApplyResult:
+                *, signer: Optional[str] = None, role: Optional[str] = None,
+                from_subagent: bool = False) -> ApplyResult:
     """Create metric/entity YAML files from structured dicts — one validated,
     revertable batch. This is the packaged path for *creating* enrichment entries
     (e.g. the many metrics extracted from a LookML/dbt repo), so a skill never
@@ -2320,12 +2333,21 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
 
     `area` is a subject area datasource.yaml lists, or `CROSS_AREA` for the datasource-level list of
     items that span areas. Any other name is refused: the loader reads only listed areas, so the
-    files would be written, validated against a model that doesn't contain them, and never served."""
+    files would be written, validated against a model that doesn't contain them, and never served.
+
+    `from_subagent` is for a file an onboarding subagent wrote, whose text may have been steered by
+    what it read: each item lands as an unreviewed AI draft whatever it claims, never replaces an item
+    already there (or an earlier one of the batch), and never goes to the cross-area list."""
     root = Path(root)
     res = ApplyResult()
     if kind not in _KINDS:
         res.errors.append(f"unknown kind {kind!r} (expected metric|entity)")
         return res
+    if from_subagent:
+        if area == CROSS_AREA:
+            res.errors.append(f"a subagent's {kind}s go into its own subject area, not {CROSS_AREA}")
+            return res
+        items = _as_drafts(items)
     if area == CROSS_AREA:
         return _write_cross_items(root, kind, items, signer, role)
     listed = _listed_areas(root) if (root / "datasource.yaml").exists() else []
@@ -2341,6 +2363,10 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
 
     for obj in _writable_items(root, kind, items, res):
         path = dest / f"{_slug(obj.name)}.yaml"
+        if from_subagent and (path.exists() or any(p == path for p, _ in backups)):
+            res.skipped.append({"item": obj.name, "reason": f"a {kind} named {obj.name!r} is already in "
+                                f"{area}; not replaced. Tell the person about the clash"})
+            continue
         backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
         dest.mkdir(parents=True, exist_ok=True)
         _dump(path, obj.model_dump(mode="json", exclude_none=True))

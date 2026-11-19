@@ -993,10 +993,11 @@ def cmd_curate(args) -> int:
 
 
 # What an agami-enricher subagent may change, passed as `curate --allow`: descriptions, the "looked,
-# couldn't tell" flag, coded values' labels and a wide table's column groups. Never a sign-off, a hide,
-# an add or a move: the person decides those on cards the subagent can't show.
-ENRICH_FIELDS = ("description", "description_source", "choice_field", "column_groups",
-                 "column_group_descriptions")
+# couldn't tell" flag, coded values' labels and the descriptions of a table's column groups. Never a
+# sign-off, a hide, an add or a move: the person decides those on cards the subagent can't show. Nor
+# `column_groups`: a regroup rewrites `expose_column_groups` in EVERY area showing the table, and one
+# covering every group drops it (show all), so a chunk of area A could widen area B's column scope.
+ENRICH_FIELDS = ("description", "description_source", "choice_field", "column_group_descriptions")
 
 
 def _ops_outside(ops: Any, fields: set[str], area: Optional[str],
@@ -1023,7 +1024,25 @@ def _ops_outside(ops: Any, fields: set[str], area: Optional[str],
             out.append(f"op {i}: {op.get('kind')} {op.get('name')!r} is not one of the named tables")
         elif bad := _path_keys(op):
             out.append(f"op {i}: {', '.join(bad)} is not a plain name: {json.dumps(op)[:120]}")
+        elif why := _not_generated(op):
+            out.append(f"op {i}: {why}")
     return out
+
+
+def _not_generated(op: dict) -> Optional[str]:
+    """Why a description edit under `--allow` isn't marked as generated, else None. The field names
+    alone would let a subagent stamp its text `human` or `metadata`, laundering it as a person's or the
+    dictionary's, and an unmarked edit skips the guard that keeps a person's description (curate fires
+    it on `source: ai` only). So text goes in as `ai`, and the only provenance it may set is
+    "looked, couldn't tell", also as `ai` so the same guard holds it off a person's description."""
+    field = op.get("field")
+    if field not in ("description", "description_source"):
+        return None
+    if op.get("source") != "ai":
+        return f"a {field} edit must carry source 'ai', not {op.get('source')!r}"
+    if field == "description_source" and op.get("value") != "ai_unknown":
+        return f"description_source may only be set to 'ai_unknown', not {op.get('value')!r}"
+    return None
 
 
 # The kinds whose `name` curate puts into a file path as-is (subject_areas/<area>/tables/<name>.yaml).
@@ -1216,7 +1235,7 @@ def cmd_add(args) -> int:
                                     for n in sorted(failed)]})
             return 1
     res = curate.write_items(args.root, args.area, args.kind, items,
-                             signer=args.signer, role=args.role)
+                             signer=args.signer, role=args.role, from_subagent=args.from_subagent)
     out = res.as_dict()
     if test_runs is not None:
         out["test_run"] = test_runs
@@ -3069,6 +3088,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--profile", default=None,
                     help="run each metric's SQL over zero rows on this database first; nothing is "
                          "written if one fails (a metric over several tables is reported not_test_run)")
+    sp.add_argument("--from-subagent", action="store_true", dest="from_subagent",
+                    help="the file is an onboarding subagent's: each item lands unreviewed whatever it "
+                         "claims, and a name already in the area is skipped, never replaced")
     sp.set_defaults(func=cmd_add)
 
     sp = sub.add_parser("add-example", help="append/replace NL→SQL examples (prompt_examples/<area>/examples.yaml)")
