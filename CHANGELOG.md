@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.26] — 2026-11-19
+
 ### Fixed
 
 - **Link and UNC hardening after 0.9.25** (#699). The permission hook reads every link on a model,
