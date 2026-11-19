@@ -80,12 +80,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
     out = Path(args.out).expanduser()
-    if _scratch_out.guarded():
-        try:
+    try:
+        if _scratch_out.guarded():
+            # The inventory's tables go into the page: held to `inventory_summary.py`'s input rules
+            # and read link-safe there.
             out = _scratch_out.scratch_file(args.out, _scratch_out.PAGE)
-        except _scratch_out.Refused as e:
-            return _scratch_out.refuse("render_table_picker.py", e)
-    inventory = json.loads(Path(args.inventory).expanduser().read_text(encoding="utf-8"))
+            inventory_summary.guard_inventory(args.inventory)
+        inventory = json.loads(inventory_summary._read(args.inventory))
+    except _scratch_out.Refused as e:
+        return _scratch_out.refuse("render_table_picker.py", e)
     if not inventory.get("tables"):
         print(json.dumps({"error": "the inventory lists no tables"}))
         return 1

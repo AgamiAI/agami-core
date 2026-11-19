@@ -492,3 +492,89 @@ def test_a_guarded_explorer_refuses_a_unc_output_before_resolving_it(art, monkey
     rc = _main("render_model_explorer", argv, monkeypatch)
     assert rc == 2 and "refused" in capsys.readouterr().err
     assert touched == []
+
+
+def _signed(art: Path) -> None:
+    (art / "local" / ".config").write_text(
+        json.dumps({"reviewer_email": "you@example.com", "reviewer_role": "analyst"})
+    )
+
+
+def test_a_guarded_open_questions_page_reads_its_items_only_from_scratch(art, victim, capsys, monkeypatch):
+    _signed(art)
+    victim.write_text(json.dumps({"questions": [{"id": "q1", "question": MARKER}]}))
+    out = art / "local" / "tmp" / "agami-oq.html"
+    rc = _main(
+        "render_open_questions_page",
+        ["--items-file", str(victim), "--profile", "acme", "--artifacts-dir", str(art),
+         "--save-to-helper", "--out", str(out)],
+        monkeypatch,
+    )
+    said = capsys.readouterr()
+    assert rc == 2 and "refused" in said.err, said
+    assert MARKER not in said.out + said.err and not out.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_a_guarded_open_questions_page_does_not_follow_a_linked_items_file(art, victim, capsys, monkeypatch):
+    _signed(art)
+    victim.write_text(json.dumps({"questions": [{"id": "q1", "question": MARKER}]}))
+    link = art / "local" / "tmp" / "agami-oq.json"
+    link.symlink_to(victim)
+    out = art / "local" / "tmp" / "agami-oq.html"
+    rc = _main(
+        "render_open_questions_page",
+        ["--items-file", str(link), "--profile", "acme", "--artifacts-dir", str(art),
+         "--save-to-helper", "--out", str(out)],
+        monkeypatch,
+    )
+    said = capsys.readouterr()
+    assert rc == 2 and MARKER not in said.out + said.err and not out.exists()
+
+
+def _inventory_doc() -> str:
+    return json.dumps(
+        {"profile": "acme", "schemas": ["s"],
+         "tables": [{"schema": "s", "table": MARKER, "columns": [{"name": "id", "type": "int"}]}]}
+    )
+
+
+def test_a_guarded_table_picker_reads_its_inventory_only_from_scratch_or_the_build(art, victim, capsys, monkeypatch):
+    victim.write_text(_inventory_doc())
+    out = art / "local" / "tmp" / "agami-picker.html"
+    rc = _main(
+        "render_table_picker",
+        ["--inventory", str(victim), "--save-to-helper", "--out", str(out)],
+        monkeypatch,
+    )
+    said = capsys.readouterr()
+    assert rc == 2 and "refused" in said.err, said
+    assert MARKER not in said.out + said.err and not out.exists()
+
+
+def test_a_guarded_table_picker_takes_the_builds_own_inventory(art, capsys, monkeypatch):
+    inv = art / "acme" / ".introspect" / "inventory.json"
+    inv.write_text(_inventory_doc())
+    out = art / "local" / "tmp" / "agami-picker.html"
+    rc = _main(
+        "render_table_picker",
+        ["--inventory", str(inv), "--save-to-helper", "--out", str(out)],
+        monkeypatch,
+    )
+    assert rc == 0, capsys.readouterr()
+    assert MARKER in out.read_text()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_a_guarded_table_picker_does_not_follow_a_linked_inventory(art, victim, capsys, monkeypatch):
+    victim.write_text(_inventory_doc())
+    inv = art / "acme" / ".introspect" / "inventory.json"
+    inv.symlink_to(victim)
+    out = art / "local" / "tmp" / "agami-picker.html"
+    rc = _main(
+        "render_table_picker",
+        ["--inventory", str(inv), "--save-to-helper", "--out", str(out)],
+        monkeypatch,
+    )
+    said = capsys.readouterr()
+    assert rc == 2 and MARKER not in said.out + said.err and not out.exists()

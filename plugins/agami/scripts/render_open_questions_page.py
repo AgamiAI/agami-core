@@ -185,11 +185,15 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     page = Path(args.out).expanduser()
     if _scratch_out.guarded():
+        # The items are copied into the page, so they too come only from a scratch file, read
+        # link-safe: otherwise any JSON file with a `questions` entry would be.
         try:
             page = _scratch_out.scratch_file(args.out, _scratch_out.PAGE)
+            out_doc = json.loads(_scratch_out.read_scratch_text(args.items_file))
         except _scratch_out.Refused as e:
             return _scratch_out.refuse("render_open_questions_page.py", e)
-    out_doc = json.loads(Path(args.items_file).expanduser().read_text(encoding="utf-8"))
+    else:
+        out_doc = json.loads(Path(args.items_file).expanduser().read_text(encoding="utf-8"))
     signoff = saved_signoff(Path(args.artifacts_dir).expanduser())
     if not (signoff.get("email") and signoff.get("role")):
         print(
