@@ -1,0 +1,1 @@
+../../plugins/agami/agents/agami-example-writer.md
