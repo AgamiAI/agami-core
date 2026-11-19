@@ -11601,8 +11601,8 @@ def _declared_join_fits(cand: "MetricCandidate", jm: _JoinMatch, tables: "frozen
     """Whether a join on the counted rows' path is the one the metric declares between two of its
     tables (`Metric.joins`, #42): None when it declares nothing about this join; True when it is
     the declared kind (a LEFT join with the declared table on its optional side, on a key the
-    joins section found declared, or an inner join where nothing is declared `left`); False when it
-    joins them another way. An outer join that drops its null-extended rows anyway (a later inner
+    joins section found declared, or an inner join on exactly a declared key where nothing is
+    declared `left`); False when it joins them another way. An outer join that drops its null-extended rows anyway (a later inner
     join needs a partner) is not `outer` here, so it reads as the inner join it is.
 
     A declared LEFT join fits only as the bare join: its ON exactly the relationship's key, and no
@@ -11622,7 +11622,10 @@ def _declared_join_fits(cand: "MetricCandidate", jm: _JoinMatch, tables: "frozen
                 and join_status.get(jm.join_id, (None, None))[0] == DECLARED
                 and jm.exact and not jm.filtered and jm.optional_ref is not None
                 and not any(jm.optional_ref in r.refs for r in rows))
-    return "left" not in declared.values()
+    # A declared inner join fits on the same terms as the LEFT one's key: ON exactly a declared
+    # relationship's key. Without it `kind: inner` would credit a join on another relationship.
+    return ("left" not in declared.values()
+            and join_status.get(jm.join_id, (None, None))[0] == DECLARED and jm.exact)
 
 
 def _outer_joins_declared(cand: "MetricCandidate", path: _Path, join_status: dict) -> bool:

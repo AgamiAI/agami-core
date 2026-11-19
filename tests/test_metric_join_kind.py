@@ -173,8 +173,27 @@ def test_a_left_join_where_the_metric_declares_inner_stays_unconfirmed(sql):
 
 
 def test_an_inner_join_the_metric_declares_is_credited():
-    item = _first(_org([{"table": "handoffs", "kind": "inner"}]), INNER)
+    sql = KEYED.replace("LEFT JOIN", "JOIN")
+    item = _first(_org([{"table": "handoffs", "kind": "inner"}]), sql)
     assert item["status"] == rt.MATCHED and item["name"] == "first_contact_resolutions"
+
+
+# A declared inner join is credited on the same terms as a declared LEFT one: its ON exactly the
+# declared relationship's key, nothing more. Otherwise a declaration of `kind: inner` would credit
+# a join on another relationship altogether (`h.ticket_id = t.number`, which the joins section
+# reads `undeclared`). Fails closed: `undetermined`, the metric named as unconfirmed.
+INNER_NOT_CREDITED = {
+    "another_key": KEYED.replace("LEFT JOIN", "JOIN").replace("t.id", "t.number"),
+    "extra_on_condition": INNER,
+    "extra_key": KEYED.replace("LEFT JOIN", "JOIN") + " AND h.ticket_id = t.number",
+}
+
+
+@pytest.mark.parametrize("sql", list(INNER_NOT_CREDITED.values()), ids=list(INNER_NOT_CREDITED))
+def test_a_declared_inner_join_with_other_than_its_key_is_not_credited(sql):
+    item = _first(_org([{"table": "handoffs", "kind": "inner"}]), sql)
+    assert item["status"] == rt.UNDETERMINED and item["name"] is None
+    assert item["unconfirmed"] == UNCONFIRMED
 
 
 def test_a_left_join_on_another_key_is_not_credited():
