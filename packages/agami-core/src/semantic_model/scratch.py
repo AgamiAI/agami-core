@@ -135,8 +135,17 @@ def _artifacts_dir() -> Path:
 
 def scratch_dir() -> Path:
     """`<artifacts_dir>/local/tmp`, when it and `local` are real folders, not links."""
-    tmp = _artifacts_dir() / "local" / "tmp"
-    if os.path.realpath(tmp) != str(tmp) or not tmp.is_dir():
+    art = _artifacts_dir()
+    tmp = art / "local" / "tmp"
+    # `lstat`, outside in, never following a link: `realpath` would follow one to a UNC share on
+    # Windows (opening it, credentials and all) before the folder could be refused.
+    for here in (art / "local", tmp):
+        try:
+            if _is_link(os.lstat(here)):
+                raise NotScratch(f"agami's scratch folder {tmp} is missing or is a link")
+        except FileNotFoundError:
+            break
+    if not tmp.is_dir():
         raise NotScratch(f"agami's scratch folder {tmp} is missing or is a link")
     return tmp
 

@@ -322,3 +322,89 @@ def test_examples_go_flat_into_scratch_so_add_example_can_read_them(art):
 def test_without_the_guard_nothing_changes(tmp_path, monkeypatch):
     monkeypatch.delenv("AGAMI_SCRATCH_ONLY", raising=False)
     assert not _scratch_out.guarded()
+
+
+# --- #699: links are inspected outside in, before anything follows them --------------------------------
+
+
+def _follows_into(monkeypatch, probe: str) -> list:
+    """The calls that follow links, made to note any whose argument leads to `probe` once followed
+    (judged with the real `realpath`; on macOS and Linux `//uncprobe` is just a local name)."""
+    real_realpath = os.path.realpath
+    touched: list = []
+
+    def leads_there(p) -> bool:
+        try:
+            return probe in str(p) or probe in real_realpath(p)
+        except (OSError, ValueError, TypeError):
+            return False
+
+    for mod, name in ((os.path, "realpath"), (os.path, "exists"), (os.path, "isdir"), (os, "stat")):
+        real = getattr(mod, name)
+
+        def spy(p, *a, _real=real, **k):
+            if leads_there(p):
+                touched.append(p)
+            return _real(p, *a, **k)
+
+        monkeypatch.setattr(mod, name, spy)
+    return touched
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_a_scratch_folder_linked_to_a_unc_share_is_refused_before_it_is_followed(art, monkeypatch):
+    (art / "local" / "tmp").rmdir()
+    (art / "local" / "tmp").symlink_to("//uncprobe/share")
+    touched = _follows_into(monkeypatch, "uncprobe")
+    with pytest.raises(_scratch_out.Refused, match="is a link"):
+        _scratch_out.scratch_file(str(art / "local" / "tmp" / "agami-x.json"))
+    assert touched == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_a_model_spec_folder_linked_to_a_unc_share_is_refused_before_it_is_followed(art, monkeypatch):
+    (art / "local" / "model-spec").symlink_to("//uncprobe/share")
+    touched = _follows_into(monkeypatch, "uncprobe")
+    path = str(art / "local" / "model-spec" / "acme" / "spec.json")
+    with pytest.raises(_scratch_out.Refused, match="is a link"):
+        _scratch_out.model_file(path, "local", "model-spec", "<profile>", "spec.json", profile_at=2)
+    assert touched == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_the_core_scratch_folder_linked_to_a_unc_share_is_refused_before_it_is_followed(art, monkeypatch):
+    sys.path.insert(0, str(PLUGIN.parent.parent / "packages" / "agami-core" / "src"))
+    from semantic_model import scratch
+
+    (art / "local" / "tmp").rmdir()
+    (art / "local" / "tmp").symlink_to("//uncprobe/share")
+    touched = _follows_into(monkeypatch, "uncprobe")
+    with pytest.raises(scratch.NotScratch, match="is a link"):
+        scratch.in_scratch(str(art / "local" / "tmp" / "agami-x.json"))
+    assert touched == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_a_dangling_link_at_samples_is_refused_and_nothing_is_made_where_it_points(art, tmp_path):
+    # `exists()` is false for a link whose target is missing, so the old walk took it for a missing
+    # folder; save() would then have made the target and written store.db outside the folder.
+    target = tmp_path / "elsewhere" / "samples"
+    (art / "local" / "samples").symlink_to(target)
+    with pytest.raises(_scratch_out.Refused, match="is a link"):
+        _scratch_out.model_file(
+            str(art / "local" / "samples" / "store.db"), "local", "samples", "store.db"
+        )
+    assert not target.exists() and not target.parent.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_a_dangling_link_at_the_samples_folder_stops_the_sample_build(art, tmp_path):
+    target = tmp_path / "elsewhere" / "samples"
+    (art / "local" / "samples").symlink_to(target)
+    proc = _run(
+        PLUGIN / "samples" / "store" / "build_sample.py",
+        "--out",
+        str(art / "local" / "samples" / "store.db"),
+    )
+    assert proc.returncode == 2 and _guard_said_no(proc), (proc.stdout, proc.stderr)
+    assert not target.exists()
