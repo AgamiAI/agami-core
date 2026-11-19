@@ -1758,3 +1758,96 @@ def test_an_approved_verb_never_reaches_the_installer_after_its_guard(art, tmp_p
     runs = ran.read_text()
     assert "from semantic_model import cli" in runs
     assert f" {verb} {art / 'acme'}" in runs
+
+
+# --- #699: links to a UNC share ------------------------------------------------------------------------
+# A path the call names may be local by its text and still reach a share through a link (a symlink, or
+# on Windows a junction) on the way. Every check reads each link's target as text before anything
+# follows it, so a link to `\\host\share` is refused before `realpath`, `exists` or `stat` can open it.
+
+
+def _nothing_follows_into_unc(monkeypatch) -> list:
+    """The filesystem calls that follow links, made to note any whose argument leads to the probe
+    share once links are followed (judged with the real `realpath`, which on macOS and Linux reads
+    `//uncprobe` as a local folder)."""
+    real_realpath = os.path.realpath
+    touched: list = []
+
+    def leads_there(p) -> bool:
+        try:
+            return "uncprobe" in str(p) or "uncprobe" in real_realpath(p)
+        except (OSError, ValueError, TypeError):
+            return False
+
+    for mod, name in (
+        (os.path, "realpath"),
+        (os.path, "exists"),
+        (os.path, "isfile"),
+        (os.path, "isdir"),
+        (os, "stat"),
+    ):
+        real = getattr(mod, name)
+
+        def spy(p, *a, _real=real, **k):
+            if leads_there(p):
+                touched.append(p)
+            return _real(p, *a, **k)
+
+        monkeypatch.setattr(mod, name, spy)
+    return touched
+
+
+UNC_TARGET = "//uncprobe/share"
+
+
+@SYMLINKS
+@pytest.mark.parametrize("where", ["scratch_file", "scratch_folder", "local", "model_root", "artifacts"])
+def test_a_link_to_a_unc_share_is_refused_before_anything_follows_it(art, tmp_path, monkeypatch, where):
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    scratch = art / "local" / "tmp" / "agami-x.json"
+    root = art / "acme"
+    if where == "scratch_file":
+        scratch.symlink_to(UNC_TARGET + "/agami-x.json")
+    elif where == "scratch_folder":
+        (art / "local" / "tmp").rmdir()
+        (art / "local" / "tmp").symlink_to(UNC_TARGET)
+    elif where == "local":
+        shutil.rmtree(art / "local")
+        (art / "local").symlink_to(UNC_TARGET)
+    elif where == "model_root":
+        root.rmdir()
+        root.symlink_to(UNC_TARGET + "/acme")
+    else:
+        linked = tmp_path / "artlink"
+        linked.symlink_to(UNC_TARGET)
+        monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(linked))
+        scratch = linked / "local" / "tmp" / "agami-x.json"
+        root = linked / "acme"
+    touched = _nothing_follows_into_unc(monkeypatch)
+    assert HOOK_MOD.scratch_file(str(scratch)) is (where == "model_root")
+    if where in ("model_root", "artifacts", "local"):
+        assert HOOK_MOD.model_root(str(root)) is (where == "local")
+    assert touched == []
+
+
+@SYMLINKS
+def test_a_plugin_link_to_a_unc_share_is_refused_before_anything_follows_it(art, monkeypatch):
+    link = PLUGIN / "shared" / "zz-test-unc-link.md"
+    link.symlink_to(UNC_TARGET + "/x.md")
+    try:
+        touched = _nothing_follows_into_unc(monkeypatch)
+        assert HOOK_MOD.plugin_file(str(link)) is False
+        assert touched == []
+    finally:
+        link.unlink()
+
+
+@SYMLINKS
+def test_a_chain_of_local_links_to_a_local_scratch_file_is_still_followed(art, tmp_path, monkeypatch):
+    """The text check refuses only a network or device target: a scratch folder reached through a
+    plain local link on the way to the artifacts folder still works as before."""
+    linked = tmp_path / "artlink"
+    linked.symlink_to(art)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(linked))
+    assert HOOK_MOD.scratch_file(str(art / "local" / "tmp" / "agami-x.json")) is True
+    assert HOOK_MOD.model_root(str(art / "acme")) is True
