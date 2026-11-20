@@ -292,6 +292,12 @@ def _redirect_allowed(redirect_uri: str, registered: str | None) -> bool:
     return _same_origin(redirect_uri, public_base_url())
 
 
+def _client_redirect_allowed(store: Store, client_id: str, redirect_uri: str) -> bool:
+    """`_redirect_allowed` against the redirect URIs `client_id` registered (none if it is unknown)."""
+    rows = store.query("SELECT redirect_uris FROM oauth_client WHERE client_id = ?", (client_id,))
+    return _redirect_allowed(redirect_uri, rows[0]["redirect_uris"] if rows else None)
+
+
 async def _form(request: Request) -> dict[str, str]:
     """Parse an application/x-www-form-urlencoded body without pulling in python-multipart."""
     body = (await request.body()).decode()
@@ -431,12 +437,8 @@ async def authorize(request: Request) -> Response:
     try:
         redirect_uri = form.get("redirect_uri", "")
         client_id = form.get("client_id", "")
-        client = store.query(
-            "SELECT redirect_uris FROM oauth_client WHERE client_id = ?", (client_id,)
-        )
-        registered = client[0]["redirect_uris"] if client else None
         # Validate the redirect target BEFORE authenticating — never send a code to an unvetted URL.
-        if not _redirect_allowed(redirect_uri, registered):
+        if not _client_redirect_allowed(store, client_id, redirect_uri):
             return _oauth_error("invalid_request", "redirect_uri not allowed")
         # PKCE is mandatory: reject a missing challenge now rather than persist a code that could
         # never be redeemed (the token step requires a verifier that matches it).
@@ -490,9 +492,16 @@ def _issue_authorization_code(
     code_challenge: str,
     username: str,
     client_state: str,
-) -> RedirectResponse:
+) -> Response:
     """Mint a fresh authorization code for an authenticated user and 302 back to the client. Shared
-    by the password path and the OIDC callback so both resume the same OAuth token exchange."""
+    by the password path and the OIDC callback so both resume the same OAuth token exchange.
+
+    The redirect is checked again here, at the one place a code is minted, so no caller can deliver a
+    code without the allow-list: the OIDC callback's redirect comes from a state signed up to ten
+    minutes earlier, under whatever allow-list was in force then. A refusal is a plain error body,
+    never a redirect to the URI that was refused."""
+    if not _client_redirect_allowed(store, client_id, redirect_uri):
+        return _oauth_error("invalid_request", "redirect_uri not allowed")
     code = secrets.token_urlsafe(32)
     _cleanup_spent_codes(store)  # clear spent/expired tickets while we're here (ACE-050)
     store.execute(
@@ -843,13 +852,10 @@ async def oidc_start(request: Request) -> Response:
     if store is None:
         return _oauth_error("server_error", "no datastore configured", status=500)
     try:
-        client = store.query(
-            "SELECT redirect_uris FROM oauth_client WHERE client_id = ?", (q.get("client_id", ""),)
-        )
-        registered = client[0]["redirect_uris"] if client else None
+        allowed = _client_redirect_allowed(store, q.get("client_id", ""), redirect_uri)
     finally:
         store.close()
-    if not _redirect_allowed(redirect_uri, registered):
+    if not allowed:
         return _oauth_error("invalid_request", "redirect_uri not allowed")
     if not code_challenge:
         return _oauth_error("invalid_request", "code_challenge is required (PKCE)")
@@ -939,6 +945,20 @@ async def oidc_callback(request: Request) -> Response:
         return _oauth_error("access_denied", "admin sign-in needs a tenant-pinned provider", status=403)
     if not q.get("code"):
         return _oauth_error("invalid_request", "missing code")
+    if claims.get("purpose") != "admin_login":
+        # `_issue_authorization_code` refuses this too; checking before the IdP exchange as well means a
+        # stale state costs no IdP round trip and can't self-provision a user on its way to a refusal.
+        store = _open_store()
+        if store is None:
+            return _oauth_error("server_error", "no datastore configured", status=500)
+        try:
+            allowed = _client_redirect_allowed(
+                store, claims.get("client_id", ""), claims.get("redirect_uri", "")
+            )
+        finally:
+            store.close()
+        if not allowed:
+            return _oauth_error("invalid_request", "redirect_uri not allowed")
     try:
         # The IdP token exchange (a network round-trip, up to a 10 s timeout) + the JWKS-backed ID-token
         # verification run off the event loop so a slow/unreachable IdP never freezes other requests (ACE-048).

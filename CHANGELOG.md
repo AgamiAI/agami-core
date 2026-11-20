@@ -22,7 +22,9 @@ below corresponds to one such version.
   `http://127.0.0.1` / `[::1]` / `localhost` loopback URI on any port (RFC 8252), or listed in the new
   optional `AGAMI_OAUTH_REDIRECT_URIS` (exact URIs or https origins, no wildcards). A registration
   with no redirect URI is refused too. A client registered earlier with any other URI is refused at
-  sign-in, so it never receives a code.
+  sign-in, so it never receives a code. The check runs again when a Google or Microsoft sign-in
+  returns, so a sign-in started before the upgrade, or before an operator removed an entry from
+  `AGAMI_OAUTH_REDIRECT_URIS`, cannot finish at a URI that is no longer allowed.
 
 ## [0.9.26] — 2026-11-19
 

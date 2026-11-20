@@ -1050,3 +1050,24 @@ def test_a_registered_loopback_client_completes_the_flow(env):
         },
     )
     assert t.status_code == 200 and t.json()["access_token"]
+
+
+def test_issuing_a_code_rechecks_the_redirect_whoever_calls_it(env):
+    # The one place a code is minted refuses a disallowed redirect itself, so a caller that skipped the
+    # check (or carried a redirect vetted under an older allow-list) still cannot deliver a code.
+    from oauth_server import _issue_authorization_code
+
+    s = Store.connect(env)
+    try:
+        r = _issue_authorization_code(
+            s,
+            client_id="cid",
+            redirect_uri="https://attacker.example/cb",
+            code_challenge=_challenge(VERIFIER),
+            username="admin",
+            client_state="xyz",
+        )
+        assert r.status_code == 400 and "location" not in r.headers
+        assert s.query("SELECT code FROM oauth_state") == []
+    finally:
+        s.close()

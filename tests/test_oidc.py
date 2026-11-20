@@ -254,6 +254,87 @@ def test_callback_rejects_tampered_state_or_missing_cookie(env, monkeypatch):
     assert cb.status_code == 400
 
 
+# The signed state carries the redirect for up to ten minutes, so the callback re-checks it rather than
+# trusting what /oauth/oidc/start accepted: a state minted before an upgrade, or before an operator
+# removed an extra redirect, must not still deliver a code.
+
+PARTNER = "https://partner.example"
+PARTNER_CB = PARTNER + "/cb"
+
+
+def _codes(db_url: str) -> list:
+    s = Store.connect(db_url)
+    try:
+        return s.query("SELECT code FROM oauth_state")
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("extra_removed", [False, True])
+def test_callback_rechecks_the_redirect_the_state_carries(env, monkeypatch, extra_removed):
+    monkeypatch.setenv("AGAMI_OAUTH_REDIRECT_URIS", PARTNER)
+    c = _client()
+    client_id = c.post("/oauth/register", json={"redirect_uris": [PARTNER_CB]}).json()["client_id"]
+    r = c.get(
+        "/oauth/oidc/start",
+        params={
+            "provider": "google",
+            "client_id": client_id,
+            "redirect_uri": PARTNER_CB,
+            "code_challenge": CHALLENGE,
+            "state": "client-xyz",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 302
+    q = parse_qs(urlparse(r.headers["location"]).query)
+    monkeypatch.setattr(
+        oidc, "exchange_code", lambda p, *, code, redirect_uri: _id_token(nonce=q["nonce"][0])
+    )
+    if extra_removed:
+        monkeypatch.delenv("AGAMI_OAUTH_REDIRECT_URIS")
+    cb = c.get(
+        "/oauth/oidc/callback",
+        params={"code": "idp-code", "state": q["state"][0]},
+        follow_redirects=False,
+    )
+    if extra_removed:
+        assert cb.status_code == 400 and cb.json()["error"] == "invalid_request"
+        assert "location" not in cb.headers  # the refusal is never sent to the disallowed URI
+        assert _codes(env) == []
+    else:
+        assert cb.status_code == 302 and cb.headers["location"].startswith(PARTNER_CB + "?")
+        assert len(_codes(env)) == 1
+
+
+def test_callback_refuses_a_state_minted_with_a_redirect_the_allow_list_never_had(env, monkeypatch):
+    # A state signed by the server before the allow-list existed: nothing at start vetted it then.
+    from oauth_server import _CSRF_COOKIE, _mint_oidc_state
+
+    state = _mint_oidc_state(
+        {
+            "provider": "google",
+            "client_id": CLIENT_ID,
+            "redirect_uri": "https://attacker.example/cb",
+            "code_challenge": CHALLENGE,
+            "client_state": "client-xyz",
+            "nonce": "the-nonce",
+        },
+        "the-csrf",
+    )
+    c = _client()
+    c.cookies.set(_CSRF_COOKIE, "the-csrf")
+    monkeypatch.setattr(oidc, "exchange_code", lambda p, *, code, redirect_uri: _id_token())
+    cb = c.get(
+        "/oauth/oidc/callback",
+        params={"code": "idp-code", "state": state},
+        follow_redirects=False,
+    )
+    assert cb.status_code == 400 and cb.json()["error"] == "invalid_request"
+    assert "location" not in cb.headers
+    assert _codes(env) == []
+
+
 # --- admin social login (OIDC → admin SESSION, provider-pinned) --------------
 
 ADMIN_EMAIL = "admin@example.com"
