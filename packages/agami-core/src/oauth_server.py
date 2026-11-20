@@ -15,8 +15,10 @@ locally and tells the browser where to redirect.
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import hmac
+import logging
 import os
 import re
 import secrets
@@ -45,6 +47,7 @@ if TYPE_CHECKING:
     from oidc import Identity  # for type hints only — runtime imports oidc lazily (egress module)
 
 _CODE_TTL = timedelta(minutes=10)  # authorization codes are short-lived
+_log = logging.getLogger(__name__)
 
 
 def _ttl_from_env(var: str, default: timedelta) -> timedelta:
@@ -212,9 +215,34 @@ def _same_origin(a: str, b: str) -> bool:
     return bool(pa.scheme) and pa.scheme == pb.scheme and pa.netloc == pb.netloc
 
 
-def _extra_redirect_entries() -> list[str]:
-    raw = os.environ.get(_EXTRA_REDIRECTS_ENV, "")
-    return [e for e in re.split(r"[\s,]+", raw) if e and "*" not in e]
+def _parses(uri: str) -> bool:
+    try:
+        urlsplit(uri).port  # noqa: B018 — raises on a malformed host or port
+    except ValueError:
+        return False
+    return True
+
+
+@functools.lru_cache(maxsize=8)
+def _parse_extra_redirects(raw: str) -> tuple[str, ...]:
+    """The usable entries of one value of the setting. Cached per value: the setting is read on every
+    request, and an unparseable entry is warned about once rather than on each of them."""
+    entries = [e for e in re.split(r"[\s,]+", raw) if e and "*" not in e]
+    usable = tuple(e for e in entries if _parses(e))
+    if len(usable) < len(entries):
+        # A typo in one entry must not turn every registration and sign-in into a 500, so it is
+        # dropped and the rest still apply. The entry itself is not logged: an operator may have
+        # pasted a URI with credentials in it.
+        _log.warning(
+            "%s: ignoring %d entry(ies) that do not parse as a URI",
+            _EXTRA_REDIRECTS_ENV,
+            len(entries) - len(usable),
+        )
+    return usable
+
+
+def _extra_redirect_entries() -> tuple[str, ...]:
+    return _parse_extra_redirects(os.environ.get(_EXTRA_REDIRECTS_ENV, ""))
 
 
 def _is_https_origin(entry: str) -> bool:
@@ -257,11 +285,9 @@ def _redirect_uri_acceptable(redirect_uri: str) -> bool:
 
     if not redirect_uri or "#" in redirect_uri or any(c.isspace() for c in redirect_uri):
         return False
-    try:
-        parts = urlsplit(redirect_uri)
-        parts.port  # noqa: B018 — raises on a malformed port, which must refuse, not 500
-    except ValueError:
+    if not _parses(redirect_uri):  # a malformed host or port must refuse, not 500
         return False
+    parts = urlsplit(redirect_uri)
     if "@" in parts.netloc:
         return False
     if redirect_uri in _CLAUDE_CALLBACKS or redirect_uri == _CHATGPT_CALLBACK:

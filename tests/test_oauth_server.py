@@ -1071,3 +1071,60 @@ def test_issuing_a_code_rechecks_the_redirect_whoever_calls_it(env):
         assert s.query("SELECT code FROM oauth_state") == []
     finally:
         s.close()
+
+
+def test_a_malformed_operator_extra_is_ignored_and_the_valid_ones_still_work(
+    env, monkeypatch, caplog
+):
+    # One unparseable entry in the setting must not take registration and sign-in down with a 500.
+    import oauth_server
+
+    oauth_server._parse_extra_redirects.cache_clear()  # warned once per value, per process
+    monkeypatch.setenv(
+        EXTRA_ENV, "https://[::1, https://partner.example, https://bad.example:99999"
+    )
+    c = TestClient(mcp_http.build_app())
+    with caplog.at_level("WARNING", logger="oauth_server"):
+        r = _register(c, ["https://partner.example/cb"])
+        assert r.status_code == 201, r.text
+        a = c.post(
+            "/oauth/authorize",
+            data={
+                "username": "admin",
+                "password": ADMIN_PW,
+                "redirect_uri": "https://partner.example/cb",
+                "client_id": r.json()["client_id"],
+                "code_challenge": _challenge(VERIFIER),
+                "state": "xyz",
+            },
+            follow_redirects=False,
+        )
+    assert a.status_code == 302 and a.headers["location"].startswith("https://partner.example/cb?")
+    assert _register(c, ["https://bad.example:99999/cb"]).status_code == 400
+    warnings = [rec.getMessage() for rec in caplog.records if EXTRA_ENV in rec.getMessage()]
+    # Said once for this setting, however many requests read it, and never quoting the entry: an
+    # operator may have pasted a URI with credentials in it.
+    assert len(warnings) == 1
+    assert "[::1" not in warnings[0] and "bad.example" not in warnings[0]
+
+
+@pytest.mark.parametrize("uri", ["https://[::1/cb", "https://partner.example:99999/cb"])
+def test_a_malformed_redirect_is_refused_never_a_500(env, monkeypatch, uri):
+    # A malformed operator extra beside it must not change that either.
+    monkeypatch.setenv(EXTRA_ENV, "https://[::1, https://partner.example")
+    c = TestClient(mcp_http.build_app())
+    r = _register(c, [uri])
+    assert r.status_code == 400 and r.json()["error"] == "invalid_redirect_uri"
+    a = c.post(
+        "/oauth/authorize",
+        data={
+            "username": "admin",
+            "password": ADMIN_PW,
+            "redirect_uri": uri,
+            "client_id": "cid",
+            "code_challenge": _challenge(VERIFIER),
+            "state": "xyz",
+        },
+        follow_redirects=False,
+    )
+    assert a.status_code == 400 and a.json()["error"] == "invalid_request"
