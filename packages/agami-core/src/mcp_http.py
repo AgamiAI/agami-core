@@ -26,6 +26,7 @@ import time
 from collections.abc import Callable
 from contextvars import ContextVar
 from pathlib import Path
+from typing import Any
 
 import admin
 import onboarding
@@ -38,6 +39,7 @@ from oss_adapters import (
     SingleTenantOrgResolver,
 )
 from ports import Adapters, AuthProvider, Org, OrgResolver
+from security_headers import SecurityHeaders
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -45,6 +47,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
+from starlette.types import ASGIApp
 from store import Store
 from tools import (
     REPLY_SEPARATORS,
@@ -820,7 +823,30 @@ def create_app(
         Middleware(_NormalizeMcpSlash),
         Middleware(_AuthMiddleware, resolver=adapters.org_resolver, auth=auth_provider),
     ]
-    return Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
+    return _SecuredStarlette(
+        routes=routes,
+        middleware=middleware,
+        lifespan=lifespan,
+        https=base.startswith("https://"),
+    )
+
+
+class _SecuredStarlette(Starlette):
+    """A Starlette app whose security headers wrap everything it serves, its own 500 included.
+
+    Starlette builds its `ServerErrorMiddleware` outside every entry in `middleware`, so a header
+    layer listed there never sees the 500 an unhandled exception produces. Wrapping the built stack
+    puts `SecurityHeaders` outermost while the app stays a Starlette: `router`, `routes`, `state` and
+    the lifespan are untouched, and an app that mounts this one keeps working. The 401 the auth layer
+    answers with, and any route added later, carry the headers the same way.
+    See `security_headers` for what each header is for."""
+
+    def __init__(self, *args: Any, https: bool, **kwargs: Any) -> None:
+        self._https = https
+        super().__init__(*args, **kwargs)
+
+    def build_middleware_stack(self) -> ASGIApp:
+        return SecurityHeaders(super().build_middleware_stack(), https=self._https)
 
 
 def build_app() -> Starlette:
