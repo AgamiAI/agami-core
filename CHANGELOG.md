@@ -26,6 +26,23 @@ below corresponds to one such version.
   code. The check runs again when a Google or Microsoft sign-in
   returns, so a sign-in started before the upgrade, or before an operator removed an entry from
   `AGAMI_OAUTH_REDIRECT_URIS`, cannot finish at a URI that is no longer allowed.
+- **The server sends HSTS and an anti-framing policy from one layer.** A new `SecurityHeaders`
+  layer wraps the whole HTTP app, outside Starlette's own error handler, so every response carries
+  the headers, a 500 from an unhandled error and the auth layer's 401 included. When
+  `PUBLIC_BASE_URL` is https it sends `Strict-Transport-Security: max-age=31536000` (no
+  `includeSubDomains`, no `preload`; a loopback http deployment gets none). Every response gets
+  `X-Content-Type-Options: nosniff` and `Referrer-Policy: strict-origin-when-cross-origin`. Every
+  HTML page (the OAuth sign-in, the admin sign-in and console, the landing page), recognised
+  however its content type is spelled, gets a `Content-Security-Policy` with `frame-ancestors
+  'none'`, `base-uri 'none'`, `object-src 'none'` and `script-src 'self'` plus hashes of core's
+  inline scripts, and `X-Frame-Options: DENY`. Every HEAD response gets `frame-ancestors 'none'`
+  and `X-Frame-Options: DENY` too, because `/oauth/authorize` answers HEAD with a JSON error rather
+  than the page. There is deliberately no `form-action`, which would break the OAuth sign-in's
+  redirect to the client. A header a route already set is never replaced.
+- **`/admin/login` shows the password form only when a password can sign the admin in**: always
+  with no identity provider configured, and with one only when the admin's account has a password
+  (the way back in when the provider is down). A provider-only admin no longer sees a form that
+  could only ever say "invalid".
 
 ## [0.9.26] — 2026-11-19
 
