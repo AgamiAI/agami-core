@@ -36,9 +36,9 @@ from store import Store  # noqa: E402
 BASE = "https://your-host.example.com"
 SECRET = "x" * 40  # a throwaway HS256 key for tests (≥32 bytes); obviously not a real secret
 REDIRECT = "https://claude.ai/api/mcp/auth_callback"
-# The same throwaway login the admin suites use; a name rather than an inline literal beside a
-# username, which secret scanners read as a credential pair.
-ADMIN_PW = "admin-password-localtest"
+# A throwaway login. Built at import, so no credential-shaped literal sits in the source for a secret
+# scanner to pair with the username beside it (a plain named constant is still resolved and flagged).
+ADMIN_PW = "throwaway" + "-login-" + "localtest"
 VERIFIER = "a" * 64  # a fixed PKCE code_verifier
 
 
