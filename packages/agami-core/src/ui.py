@@ -114,7 +114,7 @@ td{padding:13px 12px;border-top:1px solid var(--line);vertical-align:middle}
 .usermenu-pop a{display:block;padding:11px 15px;color:var(--ink);font-size:14px}
 .usermenu-pop a:hover{background:var(--chip);text-decoration:none}
 
-/* Password reveal (eye) toggle — the button is injected inside the field by _PW_SCRIPT. */
+/* Password reveal (eye) toggle — the button is injected inside the field by _PW_JS. */
 .pw-field{position:relative;display:block}
 .pw-field>input{padding-right:44px}
 .pw-eye{position:absolute;right:6px;top:0;bottom:0;margin:auto;height:34px;width:34px;display:grid;
@@ -391,18 +391,17 @@ def initials(name: str) -> str:
 
 # Localize <time data-utc="…"> to the viewer's timezone — the server stores UTC and can't know the
 # browser's zone, so this is the one small script. No-JS degrades to the UTC text already in the element.
-_TIME_SCRIPT = (
-    "<script>for(const t of document.querySelectorAll('time[data-utc]')){"
+_TIME_JS = (
+    "for(const t of document.querySelectorAll('time[data-utc]')){"
     "const d=new Date(t.dataset.utc);"
     "if(!isNaN(d))t.textContent=d.toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'});}"
-    "</script>"
 )
 
 # Add a reveal (eye) toggle to every password field. Toggling an input's `type` needs a line of JS
 # (CSS can't do it); with no JS the field still works as a normal password input. Wraps each input so
 # the button sits inside it — applies to all sign-in pages (admin / OAuth / onboarding) at once.
-_PW_SCRIPT = (
-    "<script>for(const i of document.querySelectorAll('input[type=password]')){"
+_PW_JS = (
+    "for(const i of document.querySelectorAll('input[type=password]')){"
     "const w=document.createElement('span');w.className='pw-field';"
     "i.parentNode.insertBefore(w,i);w.appendChild(i);"
     "const b=document.createElement('button');b.type='button';b.className='pw-eye';"
@@ -412,8 +411,18 @@ _PW_SCRIPT = (
     " 7-10-7-10-7Z\"/><circle cx=\"12\" cy=\"12\" r=\"3\"/></svg>';"
     "b.addEventListener('click',function(){var s=i.type==='password';i.type=s?'text':'password';"
     "b.classList.toggle('on',s);b.setAttribute('aria-label',s?'Hide password':'Show password');});"
-    "w.appendChild(b);}</script>"
+    "w.appendChild(b);}"
 )
+
+# Auto-submit a <select>'s form on change. The one inline event handler core renders; named here so
+# the markup and the hash `security_headers` allows for it are the same string.
+AUTOSUBMIT_JS = "this.form.submit()"
+
+# Every inline script body and inline handler a core page can contain. The pages' Content-Security-
+# Policy allows exactly these by hash, so a script added to a page without being listed here is
+# refused by the browser, and `tests/test_security_headers.py` fails first.
+INLINE_SCRIPTS = (_TIME_JS, _PW_JS)
+INLINE_HANDLERS = (AUTOSUBMIT_JS,)
 
 
 def _doc(title: str, body: str) -> str:
@@ -424,7 +433,7 @@ def _doc(title: str, body: str) -> str:
 <title>{esc(title)}</title>
 <link rel="icon" href="/static/logo_icon.png">
 <style>{_CSS}</style>
-</head><body>{body}{_TIME_SCRIPT}{_PW_SCRIPT}</body></html>"""
+</head><body>{body}<script>{_TIME_JS}</script><script>{_PW_JS}</script></body></html>"""
 
 
 def auth_page(title: str, body: str) -> str:
