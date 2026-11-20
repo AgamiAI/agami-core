@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.27] — 2026-11-20
+
 ### Security
 
 - **OAuth redirect URIs are allow-listed at registration and at every use.** `/oauth/register` is
