@@ -43,24 +43,32 @@ def _full_name(user: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def admin_login_body_html(error: str = "", provider: str | None = None) -> str:
+def admin_login_body_html(
+    error: str = "", provider: str | None = None, *, password: bool = True
+) -> str:
     """The admin sign-in page: the admin's pinned social provider (when configured) above the password
     form — matching the MCP login's options. Only the admin's *one* pinned provider is offered, since
     that's the only one that can resolve to the admin (a second button would just say "not an admin").
-    No banner copy — the logo and the form speak for themselves (this is the admin's own login)."""
+    No banner copy — the logo and the form speak for themselves (this is the admin's own login).
+
+    `password=False` drops the form: see `_admin_password_enabled` for when a password cannot work."""
     button = (
         ui.provider_button(provider, f"/admin/oidc/start?provider={provider}") if provider else ""
     )
-    social = f'<div class="providers">{button}</div><div class="divider">or</div>' if button else ""
-    alert = f'<div class="alert error">{ui.esc(error)}</div>' if error else ""
-    body = f"""{alert}{social}
-<form method="post">
+    form = """<form method="post">
 <label for="u">Email</label>
 <input id="u" name="username" type="email" autocomplete="email" placeholder="you@example.com">
 <label for="p">Password</label>
 <input id="p" name="password" type="password" autocomplete="current-password" placeholder="••••••••">
 <button class="btn" type="submit" style="margin-top:22px">Sign in</button>
 </form>"""
+    if not password:
+        form = "" if button else '<p class="muted">Password sign-in is off on this server.</p>'
+    divider = '<div class="divider">or</div>' if button and password else ""
+    social = f'<div class="providers">{button}</div>{divider}' if button else ""
+    alert = f'<div class="alert error">{ui.esc(error)}</div>' if error else ""
+    body = f"""{alert}{social}
+{form}"""
     return ui.auth_page("Admin sign in", body)
 
 
@@ -508,6 +516,33 @@ def _admin_login_provider() -> str | None:
     return provider if row is not None and row.get("oidc_provider") == provider else None
 
 
+def _admin_password_enabled() -> bool:
+    """Whether a password can sign the admin in, so the sign-in page offers the form only then.
+
+    With no identity provider configured, password is the deployment's sign-in method, as it is for
+    `/oauth/authorize`. With one configured, `/oauth/authorize` refuses passwords outright, but this
+    page deliberately still accepts the admin's own: it is the way back in when the provider is down
+    or misconfigured. So here the answer is whether the admin's stored row has a password at all. A
+    provider-only admin has none, and a form that can only ever say "invalid" is not a way in.
+    """
+    import oidc  # lazy: the egress module, server-only
+
+    if not oidc.available_providers():
+        return True
+    admin = _admin_username()
+    # Checked before opening the datastore, so a missing admin never opens a connection to leak.
+    if admin is None:
+        return False
+    store = _open_store()
+    if store is None:
+        return False
+    try:
+        row = user_store.get_user(store, admin)
+    finally:
+        store.close()
+    return bool(row and row.get("password_hash"))
+
+
 def issue_session(username: str) -> str:
     """A short-TTL HS256 session JWT (sub=username, purpose=admin_session) for the cookie."""
     now = datetime.now(timezone.utc)
@@ -653,7 +688,11 @@ async def admin_login(request: Request) -> Response:
     if request.method == "GET":
         if current_admin(request) is not None:
             return RedirectResponse("/admin", status_code=302)
-        return HTMLResponse(admin_login_body_html(provider=_admin_login_provider()))
+        return HTMLResponse(
+            admin_login_body_html(
+                provider=_admin_login_provider(), password=_admin_password_enabled()
+            )
+        )
 
     form = await _form(request)
     # Email is the identity: normalize the typed address (trim + lowercase) so login is
@@ -670,7 +709,9 @@ async def admin_login(request: Request) -> Response:
         # Keep the social button on the re-render so a failed password attempt doesn't hide it.
         return HTMLResponse(
             admin_login_body_html(
-                error="Invalid email or password.", provider=_admin_login_provider()
+                error="Invalid email or password.",
+                provider=_admin_login_provider(),
+                password=_admin_password_enabled(),
             ),
             status_code=401,
         )
@@ -891,6 +932,29 @@ def _area_nav_html(
     return head + f'<div class="children">{leaves}</div>' if leaves else head
 
 
+def datasource_picker_html(datasource: str, datasources: list[str]) -> str:
+    """The rail's datasource control: a picker when more than one is served, else the one name."""
+    if len(datasources) <= 1:
+        return (
+            f'<div class="ds"><span class="muted">Datasource</span>'
+            f"<b>{ui.esc(datasource)}</b></div>"
+        )
+    opts = "".join(
+        f'<option value="{ui.esc(d)}"{" selected" if d == datasource else ""}>{ui.esc(d)}'
+        "</option>"
+        for d in datasources
+    )
+    # onchange auto-submits for JS users; the Go button is the no-JS fallback (the rest of the
+    # admin UI is JS-free, so the picker keeps a working control without JavaScript too). The handler
+    # is `ui.AUTOSUBMIT_JS` because the pages' CSP allows exactly that string by hash.
+    return (
+        '<form class="ds" method="get" action="/admin/model">'
+        '<span class="muted">Datasource</span>'
+        f'<select name="datasource" onchange="{ui.AUTOSUBMIT_JS}">{opts}</select>'
+        '<button type="submit" class="ds-go">Go</button></form>'
+    )
+
+
 def _model_tree_html(
     org: Any,
     datasource: str,
@@ -902,25 +966,7 @@ def _model_tree_html(
 ) -> str:
     """The left browse rail: a datasource picker (only when more than one is served), an Overview
     link, the subject areas (the active one expands to its tables), and the Domain-context node."""
-    if len(datasources) > 1:
-        opts = "".join(
-            f'<option value="{ui.esc(d)}"{" selected" if d == datasource else ""}>{ui.esc(d)}'
-            "</option>"
-            for d in datasources
-        )
-        # onchange auto-submits for JS users; the Go button is the no-JS fallback (the rest of the
-        # admin UI is JS-free, so the picker keeps a working control without JavaScript too).
-        picker = (
-            '<form class="ds" method="get" action="/admin/model">'
-            '<span class="muted">Datasource</span>'
-            f'<select name="datasource" onchange="this.form.submit()">{opts}</select>'
-            '<button type="submit" class="ds-go">Go</button></form>'
-        )
-    else:
-        picker = (
-            f'<div class="ds"><span class="muted">Datasource</span>'
-            f"<b>{ui.esc(datasource)}</b></div>"
-        )
+    picker = datasource_picker_html(datasource, datasources)
     overview_cls = "navitem" + (" active" if active_area is None and active_view is None else "")
     areas = "".join(
         _area_nav_html(a, datasource, active_area, active_table) for a in org.subject_areas
