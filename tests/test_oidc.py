@@ -1116,3 +1116,29 @@ def test_a_refusal_is_never_sent_to_a_redirect_the_allow_list_dropped(env, monke
         "/oauth/oidc/callback", params={"error": "access_denied", "state": state}, follow_redirects=False
     )
     assert cb.status_code == 400 and "location" not in cb.headers
+
+
+@pytest.mark.parametrize("provider_error", ["temporarily_unavailable", "server_error"])
+def test_a_provider_outage_on_the_callback_is_not_a_refusal(env, provider_error):
+    c = _client()
+    state, _ = _start_and_capture(c)
+    cb = c.get(
+        "/oauth/oidc/callback",
+        params={"error": provider_error, "state": state},
+        follow_redirects=False,
+    )
+    assert cb.status_code == 302
+    q = parse_qs(urlparse(cb.headers["location"]).query)
+    assert q["error"] == ["temporarily_unavailable"] and q["state"] == ["client-xyz"]
+
+
+def test_a_redirect_with_its_own_query_keeps_it_and_gets_ours_as_separate_parameters():
+    # The allow-list admits a redirect with a query string; ours must arrive as their own parameters.
+    q_redirect = REDIRECT + "?tenant=demo"
+    refused = oauth_server._refuse_to_client(
+        {"redirect_uri": q_redirect, "client_state": "s1"}, "this account is not authorized"
+    )
+    q = parse_qs(urlparse(refused.headers["location"]).query)
+    assert q["tenant"] == ["demo"] and q["error"] == ["access_denied"] and q["state"] == ["s1"]
+    assert oauth_server._with_query(REDIRECT, "code=c") == REDIRECT + "?code=c"
+    assert oauth_server._with_query(q_redirect, "code=c") == q_redirect + "&code=c"

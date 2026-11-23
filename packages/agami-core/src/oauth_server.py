@@ -510,6 +510,13 @@ def _cleanup_spent_codes(store: Store) -> None:
     )
 
 
+def _with_query(redirect_uri: str, query: str) -> str:
+    """Append our parameters to a client redirect. The allow-list admits a redirect that already has a
+    query string, and a second `?` would fold our parameters into its last value, so the client would
+    see no `code` or `error` at all (RFC 6749 §3.1.2 keeps the registered query and adds to it)."""
+    return f"{redirect_uri}{'&' if '?' in redirect_uri else '?'}{query}"
+
+
 def _issue_authorization_code(
     store: Store,
     *,
@@ -545,7 +552,7 @@ def _issue_authorization_code(
     )
     store.commit()
     query = urlencode({"code": code, "state": client_state})
-    return RedirectResponse(f"{redirect_uri}?{query}", status_code=302)
+    return RedirectResponse(_with_query(redirect_uri, query), status_code=302)
 
 
 def _hash_token(token: str) -> str:
@@ -950,6 +957,10 @@ async def admin_oidc_start(request: Request) -> Response:
     return resp
 
 
+# The errors a provider returns on the callback when it, not the person, failed (RFC 6749 §4.1.2.1).
+_PROVIDER_OUTAGE_ERRORS = {"temporarily_unavailable", "server_error"}
+
+
 def _refuse_to_client(claims: dict, description: str, error: str = "access_denied") -> Response:
     """Send a refused connector sign-in back to the client that started it, the way RFC 6749 §4.1.2.1
     returns an authorization error: `error=access_denied` (or `temporarily_unavailable` when the
@@ -964,7 +975,7 @@ def _refuse_to_client(claims: dict, description: str, error: str = "access_denie
             "state": claims.get("client_state", ""),
         }
     )
-    resp = RedirectResponse(f"{claims.get('redirect_uri', '')}?{query}", status_code=302)
+    resp = RedirectResponse(_with_query(claims.get("redirect_uri", ""), query), status_code=302)
     resp.delete_cookie(_CSRF_COOKIE)
     return resp
 
@@ -1007,9 +1018,15 @@ async def oidc_callback(request: Request) -> Response:
         if not allowed:
             return _oauth_error("invalid_request", "redirect_uri not allowed")
     if not q.get("code"):
-        # The provider sent the person back without a code: they declined, or it turned them away.
+        # The provider sent the person back without a code: they declined, it turned them away, or it
+        # was down. An outage is not a refusal of the person, so it is reported as one the client can
+        # retry; the provider's own description is never passed on.
         if is_admin_login:
             return _oauth_error("invalid_request", "missing code")
+        if q.get("error") in _PROVIDER_OUTAGE_ERRORS:
+            return _refuse_to_client(
+                claims, "the sign-in provider could not be reached", "temporarily_unavailable"
+            )
         return _refuse_to_client(claims, "sign-in was not completed at the provider")
     try:
         # The IdP token exchange (a network round-trip, up to a 10 s timeout) + the JWKS-backed ID-token
