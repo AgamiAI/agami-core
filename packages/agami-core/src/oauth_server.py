@@ -825,7 +825,7 @@ def _oidc_callback_uri() -> str:
 
 
 def _safe_provider(key: str):
-    """`oidc.provider`, but a misconfigured provider (e.g. a Microsoft `common` tenant, which raises)
+    """`oidc.provider`, but a misconfigured provider (e.g. a Microsoft `organizations` tenant, which raises)
     resolves to None so the handler answers a clean 400 instead of an unhandled 500."""
     import oidc
 
@@ -994,8 +994,15 @@ async def oidc_callback(request: Request) -> Response:
         identity = await run_blocking(
             oidc.verify_id_token, p, id_token, nonce=claims.get("nonce", "")
         )
-    except Exception:
-        # Bad signature/aud/iss/sub/nonce/unverified-email/exchange error — all collapse to one verdict.
+    except Exception as exc:
+        # Bad signature/aud/iss/sub/nonce/unverified-email/exchange error — all collapse to one verdict
+        # for the caller, but the operator needs to know which, or "Microsoft sign-in doesn't work" has
+        # no answer. Only our own and PyJWT's messages are logged: they name a check, never a claim
+        # value. Anything else is logged by class alone: an HTTP error can quote a URL, and a JWKS
+        # lookup error quotes the token's `kid`, which whoever sent the token chose.
+        named = isinstance(exc, (ValueError, jwt.PyJWTError))
+        reason = type(exc).__name__ if not named or isinstance(exc, jwt.PyJWKClientError) else str(exc)
+        _log.warning("oidc sign-in refused (%s): %s", p.key, reason)
         return _oauth_error("access_denied", "OIDC verification failed", status=403)
 
     store = _open_store()
