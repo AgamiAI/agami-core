@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.29] — 2026-11-23
+
 ### Fixed
 
 - **A refused Google or Microsoft sign-in goes back to the app that started it.** The OIDC callback
