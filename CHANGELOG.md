@@ -12,6 +12,18 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A refused Google or Microsoft sign-in goes back to the app that started it.** The OIDC callback
+  used to end a connector sign-in that was turned away (an account nobody invited, a failed
+  verification, or a person declining at the provider) on a bare JSON error page. It now redirects
+  to the client's redirect URI with `error=access_denied` and the client's own `state`, as RFC 6749
+  §4.1.2.1 returns an authorization error. Claude and the web app can then show their own message.
+  A provider that could not be reached sends `temporarily_unavailable` instead, because the person
+  was not refused.
+  That happens only once the redirect has passed the allow-list in the same request; one the list no
+  longer holds still gets the bare error. Admin sign-in is unchanged.
+
 ## [0.9.28] — 2026-11-23
 
 ### Added

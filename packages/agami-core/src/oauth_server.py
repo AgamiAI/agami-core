@@ -510,6 +510,13 @@ def _cleanup_spent_codes(store: Store) -> None:
     )
 
 
+def _with_query(redirect_uri: str, query: str) -> str:
+    """Append our parameters to a client redirect. The allow-list admits a redirect that already has a
+    query string, and a second `?` would fold our parameters into its last value, so the client would
+    see no `code` or `error` at all (RFC 6749 §3.1.2 keeps the registered query and adds to it)."""
+    return f"{redirect_uri}{'&' if '?' in redirect_uri else '?'}{query}"
+
+
 def _issue_authorization_code(
     store: Store,
     *,
@@ -545,7 +552,7 @@ def _issue_authorization_code(
     )
     store.commit()
     query = urlencode({"code": code, "state": client_state})
-    return RedirectResponse(f"{redirect_uri}?{query}", status_code=302)
+    return RedirectResponse(_with_query(redirect_uri, query), status_code=302)
 
 
 def _hash_token(token: str) -> str:
@@ -950,10 +957,34 @@ async def admin_oidc_start(request: Request) -> Response:
     return resp
 
 
+# The errors a provider returns on the callback when it, not the person, failed (RFC 6749 §4.1.2.1).
+_PROVIDER_OUTAGE_ERRORS = {"temporarily_unavailable", "server_error"}
+
+
+def _refuse_to_client(claims: dict, description: str, error: str = "access_denied") -> Response:
+    """Send a refused connector sign-in back to the client that started it, the way RFC 6749 §4.1.2.1
+    returns an authorization error: `error=access_denied` (or `temporarily_unavailable` when the
+    provider could not be reached) and the client's own `state`. A bare JSON
+    body here is a dead end in a browser. The client turns this into its own page (Claude its error,
+    the web app its "not authorized" screen), and it matches the refusal to a flow it started by the
+    state. Only called once the redirect has passed the allow-list in this same request."""
+    query = urlencode(
+        {
+            "error": error,
+            "error_description": description,
+            "state": claims.get("client_state", ""),
+        }
+    )
+    resp = RedirectResponse(_with_query(claims.get("redirect_uri", ""), query), status_code=302)
+    resp.delete_cookie(_CSRF_COOKIE)
+    return resp
+
+
 async def oidc_callback(request: Request) -> Response:
     """Complete OIDC: verify state + CSRF, exchange the code, verify the ID token, resolve the user
     **onboarded-only**, then either mint an **admin session** (when the state's `purpose=admin_login`)
-    or resume the OAuth code mint. Any verification failure is a generic 403 — never an auto-created
+    or resume the OAuth code mint. A connector refusal goes back to the client as `access_denied` (an
+    admin one stays a 403) — never an auto-created
     account. The `purpose` marker keeps the two flows from crossing: an admin-login state can only mint
     a session, a connector state can only mint a bearer code."""
     import oidc
@@ -969,11 +1000,12 @@ async def oidc_callback(request: Request) -> Response:
     # before the tenant setting changed cannot finish an admin sign-in.
     if claims.get("purpose") == "admin_login" and not p.pinned:
         return _oauth_error("access_denied", "admin sign-in needs a tenant-pinned provider", status=403)
-    if not q.get("code"):
-        return _oauth_error("invalid_request", "missing code")
-    if claims.get("purpose") != "admin_login":
+    is_admin_login = claims.get("purpose") == "admin_login"
+    if not is_admin_login:
         # `_issue_authorization_code` refuses this too; checking before the IdP exchange as well means a
         # stale state costs no IdP round trip and can't self-provision a user on its way to a refusal.
+        # It also comes first because every refusal below is sent back to this redirect, and only a
+        # redirect the allow-list still holds may receive one.
         store = _open_store()
         if store is None:
             return _oauth_error("server_error", "no datastore configured", status=500)
@@ -985,6 +1017,17 @@ async def oidc_callback(request: Request) -> Response:
             store.close()
         if not allowed:
             return _oauth_error("invalid_request", "redirect_uri not allowed")
+    if not q.get("code"):
+        # The provider sent the person back without a code: they declined, it turned them away, or it
+        # was down. An outage is not a refusal of the person, so it is reported as one the client can
+        # retry; the provider's own description is never passed on.
+        if is_admin_login:
+            return _oauth_error("invalid_request", "missing code")
+        if q.get("error") in _PROVIDER_OUTAGE_ERRORS:
+            return _refuse_to_client(
+                claims, "the sign-in provider could not be reached", "temporarily_unavailable"
+            )
+        return _refuse_to_client(claims, "sign-in was not completed at the provider")
     try:
         # The IdP token exchange (a network round-trip, up to a 10 s timeout) + the JWKS-backed ID-token
         # verification run off the event loop so a slow/unreachable IdP never freezes other requests (ACE-048).
@@ -1003,12 +1046,20 @@ async def oidc_callback(request: Request) -> Response:
         named = isinstance(exc, (ValueError, jwt.PyJWTError))
         reason = type(exc).__name__ if not named or isinstance(exc, jwt.PyJWKClientError) else str(exc)
         _log.warning("oidc sign-in refused (%s): %s", p.key, reason)
-        return _oauth_error("access_denied", "OIDC verification failed", status=403)
+        if is_admin_login:
+            return _oauth_error("access_denied", "OIDC verification failed", status=403)
+        if not named:
+            # The provider could not be reached or answered badly. The person's account is fine, so
+            # telling them it is not authorized would be wrong; the client says the sign-in did not
+            # complete instead.
+            return _refuse_to_client(
+                claims, "the sign-in provider could not be reached", "temporarily_unavailable"
+            )
+        return _refuse_to_client(claims, "OIDC verification failed")
 
     store = _open_store()
     if store is None:
         return _oauth_error("server_error", "no datastore configured", status=500)
-    is_admin_login = claims.get("purpose") == "admin_login"
     try:
         # Admin login is strictly onboarded-only — never self-provision a user as a side effect of an
         # admin sign-in attempt (even on a public-signup demo instance).
@@ -1021,7 +1072,7 @@ async def oidc_callback(request: Request) -> Response:
 
             resp = admin.complete_admin_oidc_login(username)
         elif username is None:
-            return _oauth_error("access_denied", "this account is not authorized", status=403)
+            resp = _refuse_to_client(claims, "this account is not authorized")
         else:
             resp = _issue_authorization_code(
                 store,
