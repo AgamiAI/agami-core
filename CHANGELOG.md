@@ -12,6 +12,34 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **Microsoft sign-in for any Microsoft account.** `AGAMI_OIDC_MICROSOFT_TENANT=common` admits
+  personal accounts and work or school accounts from any organization. Before, a server could take
+  personal accounts (`consumers`) or one organization's accounts, never both. A work account is
+  admitted only when its token carries `xms_edov`, Microsoft's statement that the organization has
+  verified the address's domain. The app registration has to request that optional claim, and without
+  it every work account is refused. Each token's issuer must be its own organization's, because
+  Microsoft signs for every organization with the same keys. The new
+  `AGAMI_OIDC_MICROSOFT_ALLOWED_TENANTS` limits `common` to the listed organizations (and personal
+  accounts when it lists `consumers`). The list only narrows: a listed organization's work accounts
+  still need `xms_edov`, so `Provider.require_email_verified` is true on `common` either way. A
+  setting that is not valid hides the Microsoft button and logs a warning. `Provider` gains
+  `any_tenant` and `allowed_tenants`. Admin sign-in still needs a pinned tenant, and `organizations`
+  is still refused. Because `pinned` is false on `common`, a caller that maps roles or groups from the
+  token has to refuse them there: any organization's administrator can assign their own people the
+  app's roles.
+
+### Changed
+
+- **Microsoft sign-in shows the account picker** (`prompt=select_account`). Before, Microsoft reused
+  whichever account the browser was signed in to, so a person with a personal and a work account
+  could not choose.
+- **A refused Google or Microsoft sign-in logs why.** The callback still answers one generic 403, but
+  it now logs `oidc sign-in refused (<provider>): <check>`. The message names the check that failed and
+  never a claim value. Errors from outside the verifier, such as a failed token exchange, are logged by
+  class name only.
+
 ## [0.9.27] — 2026-11-20
 
 ### Security

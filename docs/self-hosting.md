@@ -71,10 +71,29 @@ single-provider login is **free**. Per-org (multi-tenant) SSO, SAML, and SCIM ar
 `AGAMI_OIDC_MICROSOFT_TENANT=consumers` instead of a tenant id. Only personal Microsoft accounts
 (`outlook.com`, `hotmail.com`, `live.com`, and addresses people signed up with at Microsoft) can then
 sign in, and their address is treated as proven; Microsoft turns work and school accounts away. The
-app registration must allow personal Microsoft accounts. `common` and `organizations` are refused,
-because Microsoft documents no claim that proves a work account's address. A company server should
-keep its tenant id. The admin can't sign in with Microsoft on `consumers`, so keep
-`AGAMI_ADMIN_PASSWORD` set or use Google for the admin; with neither, no admin login works.
+app registration must allow personal Microsoft accounts. A company server should keep its tenant id.
+
+**Any Microsoft account.** `AGAMI_OIDC_MICROSOFT_TENANT=common` admits personal accounts and work or
+school accounts from any organization. Any organization's administrator can put any address on an
+account, so a work account is admitted only when Microsoft says its address's domain is verified by
+that organization. Set the app registration to accept accounts in any organizational directory and
+personal Microsoft accounts. Then request the optional ID-token claims `email` and `xms_edov` (Token
+configuration → Add optional claim, or `optionalClaims.idToken` in the manifest). Without `xms_edov`,
+every work account is refused, and the server logs `work account's email domain is not verified`.
+Microsoft also recommends turning on `removeUnverifiedEmailClaim` on the application.
+
+**Named organizations only.** To admit only some organizations, add
+`AGAMI_OIDC_MICROSOFT_ALLOWED_TENANTS` with their tenant ids, comma-separated, and `consumers` if
+personal accounts should also be admitted. It applies only with `common`. The list only narrows who
+may sign in: a listed organization's work accounts still need `xms_edov`. Otherwise one listed
+organization's administrator could put another's addresses on an account. An entry that is not a
+tenant id hides the Microsoft button and logs a warning. To trust one organization's directory
+without `xms_edov`, pin its tenant id instead.
+
+`organizations` is refused; use `common`. The admin can't sign in with Microsoft on `consumers` or
+`common`, so keep `AGAMI_ADMIN_PASSWORD` set or use Google for the admin; with neither, no admin login
+works. Microsoft sign-in always shows Microsoft's account picker, so a person signed in to several
+accounts chooses which one to use.
 
 > **Serverless note:** on a managed-container platform (Cloud Run, ECS/Fargate, Container Apps) the server
 > runs under a cloud identity — scope it to a dedicated least-privilege one, not the platform default. See

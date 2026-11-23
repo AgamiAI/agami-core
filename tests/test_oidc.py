@@ -27,6 +27,7 @@ PKG_SRC = Path(__file__).resolve().parent.parent / "packages" / "agami-core" / "
 if str(PKG_SRC) not in sys.path:
     sys.path.insert(0, str(PKG_SRC))
 
+import httpx  # noqa: E402
 import jwt  # noqa: E402
 import mcp_http  # noqa: E402
 import oidc  # noqa: E402
@@ -487,8 +488,8 @@ def test_provider_option_hidden_when_unconfigured(monkeypatch, tmp_path):
 def test_microsoft_requires_a_pinned_tenant(monkeypatch):
     monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_ID", "ms-client")
     monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_SECRET", "ms-secret")
-    # `consumers` (personal accounts only) is accepted; the any-tenant authorities are not.
-    for bad in ("", "common", "organizations"):
+    # `consumers` and `common` are accepted (their own tests below); unset and `organizations` are not.
+    for bad in ("", "organizations"):
         monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", bad)
         with pytest.raises(ValueError):
             oidc.provider("microsoft")
@@ -645,7 +646,8 @@ def test_misconfigured_microsoft_tenant_is_a_clean_400_not_500(env, monkeypatch)
     # (a stale/bookmarked ?provider=microsoft link must not 500).
     monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_ID", "ms-client")
     monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_SECRET", "ms-secret")
-    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", "common")  # unpinned → provider() raises
+    # `organizations` is refused, so provider() raises.
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", "organizations")
     c = _client()
     r = c.get(
         "/oauth/oidc/start",
@@ -707,12 +709,11 @@ def _personal_token(**overrides) -> str:
     return jwt.encode(claims, _PRIV_PEM, algorithm="RS256", headers={"kid": "test"})
 
 
-def test_unpinned_tenants_hide_microsoft(monkeypatch):
+def test_organizations_tenant_hides_microsoft(monkeypatch):
     monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_ID", "ms-client")
     monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_SECRET", "ms-secret")
-    for tenant in ("common", "organizations"):
-        monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", tenant)
-        assert "microsoft" not in oidc.available_providers()
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", "organizations")
+    assert "microsoft" not in oidc.available_providers()
 
 
 def test_consumers_tenant_is_accepted_and_unpinned(consumers):
@@ -828,3 +829,250 @@ def test_admin_callback_refuses_once_the_provider_is_unpinned(env, monkeypatch):
     cb = c.get("/oauth/oidc/callback", params={"code": "x", "state": state}, follow_redirects=False)
     assert cb.status_code == 403
     assert "agami_admin_session" not in cb.cookies
+
+
+# --- Microsoft on `common`: personal accounts + work accounts from any tenant -----------------
+
+MS_OTHER_TENANT = "22222222-2222-2222-2222-222222222222"  # a second fake work/school tenant
+# `common`'s discovery document names a templated issuer; each token carries its own tenant's.
+COMMON_META = {
+    "authorization_endpoint": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+    "token_endpoint": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+    "jwks_uri": "https://login.microsoftonline.com/common/discovery/v2.0/keys",
+    "issuer": "https://login.microsoftonline.com/{tenantid}/v2.0",
+}
+
+
+def _issuer(tid: str) -> str:
+    return f"https://login.microsoftonline.com/{tid}/v2.0"
+
+
+def _work_token(tid: str | None = MS_WORK_TENANT, **overrides) -> str:
+    return _personal_token(**{"tid": tid, "iss": _issuer(tid), "sub": "ms-work-sub", **overrides})
+
+
+@pytest.fixture
+def common(env, monkeypatch):
+    """Microsoft configured for any account, with its discovery served in-test."""
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_ID", CLIENT_ID)
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_CLIENT_SECRET", "ms-secret")
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", "common")
+    monkeypatch.delenv("AGAMI_OIDC_MICROSOFT_ALLOWED_TENANTS", raising=False)
+    monkeypatch.setattr(oidc, "_discover", lambda p: COMMON_META)
+    return env
+
+
+def test_common_tenant_is_offered_unpinned_and_proving(common):
+    assert "microsoft" in oidc.available_providers()
+    p = oidc.provider("microsoft")
+    assert p.pinned is False and p.any_tenant is True and p.allowed_tenants is None
+    # Every address it admits is proven, so a caller may bind a stranger to it.
+    assert p.require_email_verified is True
+    assert "/common/v2.0/" in p.discovery_url
+
+
+def test_common_admits_a_personal_account(common):
+    identity = oidc.verify_id_token(
+        oidc.provider("microsoft"), _personal_token(), nonce="the-nonce"
+    )
+    assert identity.subject == "ms-personal-sub"
+
+
+@pytest.mark.parametrize("edov", [True, "true", "1"])
+def test_common_admits_a_work_account_whose_domain_its_tenant_verified(common, edov):
+    identity = oidc.verify_id_token(
+        oidc.provider("microsoft"), _work_token(xms_edov=edov), nonce="the-nonce"
+    )
+    assert identity.email == "you@example.com" and identity.subject == "ms-work-sub"
+
+
+@pytest.mark.parametrize(
+    "token, why",
+    [
+        (lambda: _work_token(), "domain is not verified"),  # no xms_edov at all
+        (lambda: _work_token(xms_edov=False), "domain is not verified"),
+        (lambda: _work_token(xms_edov="0"), "domain is not verified"),
+        (lambda: _work_token(xms_edov=1), "domain is not verified"),  # equals True, is not True
+        # A claimed email_verified does not stand in for the tenant's verification.
+        (lambda: _work_token(email_verified=True), "domain is not verified"),
+        # The issuer must be the token's own tenant: same keys sign for every tenant.
+        (lambda: _work_token(xms_edov=True, iss=_issuer(MS_OTHER_TENANT)), "issuer does not match"),
+        (lambda: _personal_token(iss=_issuer(MS_WORK_TENANT)), "issuer does not match"),
+        (lambda: _work_token(xms_edov=True, tid=None), "no usable tenant id"),
+        (
+            lambda: _personal_token(tid="not-a-tenant", iss=_issuer("not-a-tenant")),
+            "no usable tenant",
+        ),
+        (lambda: _work_token(xms_edov=True, email=None), "no email"),
+    ],
+)
+def test_common_refuses(common, token, why):
+    with pytest.raises(ValueError, match=why):
+        oidc.verify_id_token(oidc.provider("microsoft"), token(), nonce="the-nonce")
+
+
+def test_common_still_checks_signature_audience_and_nonce(common):
+    p = oidc.provider("microsoft")
+    with pytest.raises(jwt.InvalidAudienceError):
+        oidc.verify_id_token(p, _work_token(xms_edov=True, aud="someone-else"), nonce="the-nonce")
+    with pytest.raises(jwt.MissingRequiredClaimError):
+        oidc.verify_id_token(p, _work_token(xms_edov=True, iss=None), nonce="the-nonce")
+    with pytest.raises(ValueError, match="nonce"):
+        oidc.verify_id_token(p, _work_token(xms_edov=True), nonce="another-nonce")
+
+
+def test_allow_list_only_narrows_which_tenants_may_sign_in(common, monkeypatch):
+    monkeypatch.setenv(
+        "AGAMI_OIDC_MICROSOFT_ALLOWED_TENANTS", f" {MS_WORK_TENANT.upper()} , {MS_OTHER_TENANT},"
+    )
+    p = oidc.provider("microsoft")
+    assert p.allowed_tenants == frozenset({MS_WORK_TENANT, MS_OTHER_TENANT})
+    # The list narrows; it is not trust. Every admitted address is still proven.
+    assert p.require_email_verified is True and p.pinned is False
+    assert oidc.verify_id_token(p, _work_token(xms_edov=True), nonce="the-nonce")
+    assert oidc.verify_id_token(p, _work_token(MS_OTHER_TENANT, xms_edov=True), nonce="the-nonce")
+    # A listed tenant still needs xms_edov: otherwise either listed tenant's administrator could put
+    # the other's addresses on an account.
+    with pytest.raises(ValueError, match="domain is not verified"):
+        oidc.verify_id_token(p, _work_token(), nonce="the-nonce")
+    # A listed tenant's id with another tenant's issuer is refused, whatever the list says.
+    with pytest.raises(ValueError, match="issuer does not match"):
+        oidc.verify_id_token(
+            p, _work_token(xms_edov=True, iss=_issuer(MS_OTHER_TENANT)), nonce="the-nonce"
+        )
+    # Anyone else is refused, a verified domain included, and personal accounts unless listed.
+    with pytest.raises(ValueError, match="not in AGAMI_OIDC_MICROSOFT_ALLOWED_TENANTS"):
+        oidc.verify_id_token(
+            p, _work_token("33333333-3333-3333-3333-333333333333", xms_edov=True), nonce="the-nonce"
+        )
+    with pytest.raises(ValueError, match="not in AGAMI_OIDC_MICROSOFT_ALLOWED_TENANTS"):
+        oidc.verify_id_token(p, _personal_token(), nonce="the-nonce")
+
+
+def test_allow_list_admits_personal_accounts_when_consumers_is_listed(common, monkeypatch):
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_ALLOWED_TENANTS", f"Consumers,{MS_WORK_TENANT}")
+    p = oidc.provider("microsoft")
+    assert MS_PERSONAL_TENANT in p.allowed_tenants
+    identity = oidc.verify_id_token(p, _personal_token(), nonce="the-nonce")
+    assert identity.subject == "ms-personal-sub"
+
+
+@pytest.mark.parametrize(
+    "tenant, allowed",
+    [
+        ("common", "acme.onmicrosoft.com"),  # a domain, not a tenant id
+        ("common", "common"),
+        ("common", " , "),  # names nothing
+        (MS_TENANT, MS_WORK_TENANT),  # only meaningful with `common`
+        ("consumers", MS_WORK_TENANT),
+    ],
+)
+def test_a_bad_allow_list_hides_microsoft(common, monkeypatch, caplog, tenant, allowed):
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_TENANT", tenant)
+    monkeypatch.setenv("AGAMI_OIDC_MICROSOFT_ALLOWED_TENANTS", allowed)
+    with pytest.raises(ValueError):
+        oidc.provider("microsoft")
+    assert "microsoft" not in oidc.available_providers()
+    assert "sign-in provider microsoft is misconfigured and hidden" in caplog.text
+
+
+def test_microsoft_asks_which_account_and_google_does_not(common):
+    def prompt(key):
+        url = oidc.authorize_url(oidc.provider(key), state="s", nonce="n", redirect_uri=REDIRECT)
+        return parse_qs(urlparse(url).query).get("prompt")
+
+    assert prompt("microsoft") == ["select_account"]
+    assert prompt("google") is None
+
+
+def test_admin_microsoft_login_is_refused_on_common(common, monkeypatch):
+    _seed_admin(common, monkeypatch, provider="microsoft")
+    c = _client()
+    r = c.get("/admin/oidc/start", params={"provider": "microsoft"}, follow_redirects=False)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_request"
+
+
+def _connector_callback(c: TestClient, monkeypatch, make_token) -> "object":
+    r = c.get(
+        "/oauth/oidc/start",
+        params={
+            "provider": "microsoft",
+            "client_id": CLIENT_ID,
+            "redirect_uri": REDIRECT,
+            "code_challenge": CHALLENGE,
+            "state": "client-xyz",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 302
+    q = parse_qs(urlparse(r.headers["location"]).query)
+    state, nonce = q["state"][0], q["nonce"][0]
+    monkeypatch.setattr(oidc, "exchange_code", lambda p, *, code, redirect_uri: make_token(nonce))
+    return c.get(
+        "/oauth/oidc/callback", params={"code": "idp-code", "state": state}, follow_redirects=False
+    )
+
+
+def test_common_callback_refuses_an_unproven_work_account_logs_why_and_creates_no_user(
+    common, monkeypatch, caplog
+):
+    monkeypatch.setenv("AGAMI_PUBLIC_SIGNUP", "true")
+    cb = _connector_callback(
+        _client(),
+        monkeypatch,
+        lambda nonce: _work_token(nonce=nonce, email="stranger@example.com"),
+    )
+    assert cb.status_code == 403
+    s = Store.from_env()
+    assert user_store.get_user_by_email(s, "stranger@example.com") is None
+    s.close()
+    logged = [r.getMessage() for r in caplog.records if "oidc sign-in refused" in r.getMessage()]
+    assert logged == [
+        "oidc sign-in refused (microsoft): work account's email domain is not verified by its "
+        "tenant (xms_edov)"
+    ]
+    assert "stranger@example.com" not in logged[0]  # the reason names a check, never a claim
+
+
+def test_common_callback_signs_up_a_proven_work_account(common, monkeypatch):
+    monkeypatch.setenv("AGAMI_PUBLIC_SIGNUP", "true")
+    cb = _connector_callback(
+        _client(),
+        monkeypatch,
+        lambda nonce: _work_token(nonce=nonce, email="newbie@example.com", xms_edov=True),
+    )
+    assert cb.status_code == 302 and "code=" in cb.headers["location"]
+    s = Store.from_env()
+    row = user_store.get_user_by_email(s, "newbie@example.com")
+    s.close()
+    assert row["oidc_provider"] == "microsoft" and row["oidc_subject"] == "ms-work-sub"
+
+
+def test_callback_logs_only_the_class_of_an_exchange_failure(common, monkeypatch, caplog):
+    def boom(nonce):
+        raise httpx.HTTPStatusError(
+            "400 for https://login.example.com/token?secret=leak", request=None, response=None
+        )
+
+    cb = _connector_callback(_client(), monkeypatch, boom)
+    assert cb.status_code == 403
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "oidc sign-in refused (microsoft): HTTPStatusError" in text and "leak" not in text
+
+
+def test_callback_logs_only_the_class_of_a_signing_key_lookup_failure(common, monkeypatch, caplog):
+    # PyJWT's message here quotes the token's `kid`, which the sender chose.
+    class _NoKey:
+        def __init__(self, uri):
+            pass
+
+        def get_signing_key_from_jwt(self, token):
+            raise jwt.PyJWKClientError('Unable to find a signing key that matches: "attacker-text"')
+
+    monkeypatch.setattr(jwt, "PyJWKClient", _NoKey)
+    oidc._jwks_clients.clear()
+    cb = _connector_callback(_client(), monkeypatch, lambda nonce: _work_token(nonce=nonce))
+    assert cb.status_code == 403
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "oidc sign-in refused (microsoft): PyJWKClientError" in text
+    assert "attacker-text" not in text
