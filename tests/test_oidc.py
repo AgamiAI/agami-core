@@ -30,6 +30,7 @@ if str(PKG_SRC) not in sys.path:
 import httpx  # noqa: E402
 import jwt  # noqa: E402
 import mcp_http  # noqa: E402
+import oauth_server  # noqa: E402
 import oidc  # noqa: E402
 import user_store  # noqa: E402
 from cryptography.hazmat.primitives import serialization  # noqa: E402
@@ -79,6 +80,18 @@ def _id_token(**overrides) -> str:
         **overrides,
     }
     return jwt.encode(claims, _PRIV_PEM, algorithm="RS256", headers={"kid": "test"})
+
+
+def _assert_refused_to_client(cb) -> None:
+    """A refused connector sign-in goes back to the client that started it, as RFC 6749 returns an
+    authorization error: `access_denied` and the client's own state, never a code and never a bare
+    error page the browser cannot leave."""
+    assert cb.status_code == 302
+    location = cb.headers["location"]
+    assert location.startswith(REDIRECT + "?")
+    q = parse_qs(urlparse(location).query)
+    assert q["error"] == ["access_denied"] and "code" not in q
+    assert q["state"] == ["client-xyz"]
 
 
 class _FakeJWKClient:
@@ -236,7 +249,7 @@ def test_callback_rejects_unknown_email_onboarded_only(env, monkeypatch):
         params={"code": "idp-code", "state": state},
         follow_redirects=False,
     )
-    assert cb.status_code == 403  # not onboarded → rejected, never auto-created
+    _assert_refused_to_client(cb)
 
 
 def test_callback_rejects_tampered_state_or_missing_cookie(env, monkeypatch):
@@ -786,7 +799,7 @@ def test_consumers_callback_refuses_a_work_account_and_creates_no_user(consumers
         params={"code": "idp-code", "state": state},
         follow_redirects=False,
     )
-    assert cb.status_code == 403
+    _assert_refused_to_client(cb)
     s = Store.from_env()
     assert user_store.get_user_by_email(s, "stranger@example.com") is None
     s.close()
@@ -1022,7 +1035,7 @@ def test_common_callback_refuses_an_unproven_work_account_logs_why_and_creates_n
         monkeypatch,
         lambda nonce: _work_token(nonce=nonce, email="stranger@example.com"),
     )
-    assert cb.status_code == 403
+    _assert_refused_to_client(cb)
     s = Store.from_env()
     assert user_store.get_user_by_email(s, "stranger@example.com") is None
     s.close()
@@ -1055,7 +1068,10 @@ def test_callback_logs_only_the_class_of_an_exchange_failure(common, monkeypatch
         )
 
     cb = _connector_callback(_client(), monkeypatch, boom)
-    assert cb.status_code == 403
+    # An unreachable provider is not a refusal of the person: the client is told it was unavailable.
+    assert cb.status_code == 302
+    q = parse_qs(urlparse(cb.headers["location"]).query)
+    assert q["error"] == ["temporarily_unavailable"] and q["state"] == ["client-xyz"]
     text = " ".join(r.getMessage() for r in caplog.records)
     assert "oidc sign-in refused (microsoft): HTTPStatusError" in text and "leak" not in text
 
@@ -1072,7 +1088,31 @@ def test_callback_logs_only_the_class_of_a_signing_key_lookup_failure(common, mo
     monkeypatch.setattr(jwt, "PyJWKClient", _NoKey)
     oidc._jwks_clients.clear()
     cb = _connector_callback(_client(), monkeypatch, lambda nonce: _work_token(nonce=nonce))
-    assert cb.status_code == 403
+    _assert_refused_to_client(cb)
     text = " ".join(r.getMessage() for r in caplog.records)
     assert "oidc sign-in refused (microsoft): PyJWKClientError" in text
     assert "attacker-text" not in text
+
+
+def test_a_sign_in_declined_at_the_provider_goes_back_to_the_client(env):
+    # Clicking "Deny" at the provider, or being turned away there, returns with an error and no code.
+    c = _client()
+    state, _ = _start_and_capture(c)
+    cb = c.get(
+        "/oauth/oidc/callback",
+        params={"error": "access_denied", "state": state},
+        follow_redirects=False,
+    )
+    _assert_refused_to_client(cb)
+
+
+def test_a_refusal_is_never_sent_to_a_redirect_the_allow_list_dropped(env, monkeypatch):
+    # The refusal redirect is only for a redirect still allowed in this request; otherwise the bare
+    # error body, as before.
+    c = _client()
+    state, nonce = _start_and_capture(c)
+    monkeypatch.setattr(oauth_server, "_client_redirect_allowed", lambda *a, **k: False)
+    cb = c.get(
+        "/oauth/oidc/callback", params={"error": "access_denied", "state": state}, follow_redirects=False
+    )
+    assert cb.status_code == 400 and "location" not in cb.headers
