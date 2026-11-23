@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.28] — 2026-11-23
+
 ### Added
 
 - **Microsoft sign-in for any Microsoft account.** `AGAMI_OIDC_MICROSOFT_TENANT=common` admits
