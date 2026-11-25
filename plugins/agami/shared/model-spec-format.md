@@ -2,7 +2,7 @@
 
 A model spec is a person's own description of their semantic model, written in a spreadsheet: which
 subject areas there are, which area owns each table, how the tables join, the metrics, the columns
-that must not be shown row by row, and the rules every answer follows. agami-connect builds the model
+that hold personal data, and the rules every answer follows. agami-connect builds the model
 **exactly** as the workbook says, in one validated step (`sm apply-spec`).
 
 It exists for warehouses whose structure cannot be read off the catalog: views with no declared
@@ -80,7 +80,9 @@ Columns sheet instead. A plain aggregate here is flagged on the dry run, not ref
 
 ### Sensitive columns (optional)
 
-`Table`, `Column` — values never returned row by row (counting, filtering and grouping still work).
+`Table`, `Column` — flagged as personal data. Answers prefer counting, filtering and grouping on them,
+but a flag does not stop a query returning their values; the answer's receipt says when one did. To
+keep a column out of every query, hide it.
 
 ### Rules (optional)
 

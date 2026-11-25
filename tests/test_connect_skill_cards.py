@@ -1139,7 +1139,8 @@ def test_password_page_sends_the_person_back_to_the_card():
 
 def test_4a_keep_option_says_what_stays():
     s = _phase_4()
-    assert "but a raw value is never shown. Suspected ones stay ordinary columns." in s
+    assert ("and nothing stops a query returning their values; only hiding keeps them out. "
+            "Suspected ones stay ordinary columns.") in s
 
 
 def test_4a_skips_the_personal_data_question_when_the_warehouse_enforces_it():

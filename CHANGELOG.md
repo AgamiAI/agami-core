@@ -29,6 +29,15 @@ below corresponds to one such version.
   datasource and another one, read from `organization.yaml`. They are shown but not changed from the
   page.
 
+### Fixed
+
+- **Personal-data counts no longer claim more than is known.** `/agami-model` said "<n> columns look
+  like personal data", adding columns flagged as personal data to ones only suspected from their
+  name or a sampled value. It now says the two apart, and leaves out either when it is 0. The skills,
+  the model explorer's PII tab, the model spec format and the README also stop saying a flag hides a
+  column's values: it steers answers toward counts and filters, and only hiding a column keeps its
+  values out of queries.
+
 ## [0.9.30] — 2026-11-25
 
 ### Security
