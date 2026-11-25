@@ -182,3 +182,36 @@ def test_rule_6a_back_to_the_cards_reads_the_helper_before_stopping_it() -> None
     for skill in sorted(SKILLS_DIR.glob("*/SKILL.md")):
         text = skill.read_text(encoding="utf-8")
         assert "brings you back on its own" not in text, skill.parent.name
+
+
+_PRINT_THE_LINK = "**Print the link in your reply, with when it expires, before the card**"
+
+
+def test_rule_6a_requires_the_link_and_its_expiry_in_the_reply() -> None:
+    """A live run served the model explorer and never printed its URL: the person had to dig it out of
+    the background task's output. The link and its expiry go in the reply, before the card."""
+    doc = (PLUGIN / "shared" / "question-cards.md").read_text(encoding="utf-8")
+    six = doc[doc.index("## 6."):doc.index("### 6a.")]
+    assert "print the URL in your reply as a Markdown\nlink" in six
+    six_a = " ".join(doc[doc.index("### 6a."):doc.index("## 7.")].split())
+    step_4 = six_a[six_a.index("4. **Post the link**"):six_a.index("5. **Read the helper's final line.**")]
+    for phrase in ("**This is required, every time:**", "the reply that asks the card prints the first line's `url`, exactly, as a Markdown link",
+                   "plus `expires_in` seconds", "never in a log, a file or a shell command", "The link works until <time>"):
+        assert phrase in step_4, phrase
+    assert step_4.index("Markdown link") < step_4.index("Then one question")
+
+
+def test_every_saving_page_points_at_the_print_the_link_rule() -> None:
+    """Each place a skill serves a page that saves its decisions repeats the requirement by pointer, so
+    none of them leaves the link in the background task's output."""
+    found = 0
+    for skill in _skills():
+        text = skill.read_text(encoding="utf-8")
+        starts = [m.start() for m in re.finditer(r"serve_page\.py [^\n]*\n?[^\n]*--decisions", text)]
+        for i, start in enumerate(starts):
+            end = starts[i + 1] if i + 1 < len(starts) else len(text)
+            window = text[start:min(end, start + 2500)]
+            assert _PRINT_THE_LINK in window and "rule 6a step 4" in window, (skill.parent.name, start)
+            assert "The link lasts 30 minutes" not in window, (skill.parent.name, start)
+            found += 1
+    assert found >= 5  # agami-model's explorer and agami-connect's four saving pages

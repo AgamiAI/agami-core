@@ -160,7 +160,8 @@ bash "<plugin_root>/scripts/py" serve_page.py <file.html> --minutes 30
 # run_in_background; its first line is {"url": "http://localhost:<port>/<name>"}, and it exits when the time is up
 ```
 
-Read that first line from the background task's output and give the person the URL.
+Read that first line from the background task's output and print the URL in your reply as a Markdown
+link: the person can't see the task's output.
 
 ### 6a. A page that saves its decisions
 
@@ -188,9 +189,13 @@ Read that first line from the background task's output and give the person the U
    is `{"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 1800}`, usually within a second. No
    line within about 15 seconds, or the task exited: the helper couldn't start (a refused port, say);
    say so in one line with its last stderr line, and carry on with the cards.
-4. **Post the link**, then a card so it isn't missed: *"[Review on a page](<url>). Mark your decisions
-   there, press Save decisions, then come back here and press I've saved it. The link lasts 30
-   minutes."* Then one question (header `Page`), *"Save your decisions on the page, then come back
+4. **Post the link**, then a card so it isn't missed. **This is required, every time:** the reply that
+   asks the card prints the first line's `url`, exactly, as a Markdown link, and the time it expires
+   (now, from `date`, plus `expires_in` seconds). The person can't see the background task's output,
+   so a link left there is a page they can't open. The URL carries the page's access token: show it
+   in the chat and nowhere else, never in a log, a file or a shell command. *"[Review on a
+   page](<url>). Mark your decisions there, press Save decisions, then come back here and press I've
+   saved it. The link works until <time> (30 minutes)."* Then one question (header `Page`), *"Save your decisions on the page, then come back
    here."*: **I've saved it** (or the skill's wording for its page; the saved page tells the person
    to press it) / **Back to the cards**. Assume an open card is not interrupted when the helper
    exits; if the exit does bring you back first, go to step 5 and don't ask the card again.

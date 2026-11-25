@@ -29,6 +29,15 @@ below corresponds to one such version.
   datasource and another one, read from `organization.yaml`. They are shown but not changed from the
   page.
 
+### Fixed
+
+- **A page that saves its decisions always gets its link in the chat.** The model explorer was
+  served in the background and the reply never printed its URL, so the person had to find it in the
+  task's output. Question-cards rule 6a now requires the reply to print the URL as a link, with the
+  time it expires, before the card that waits for the save, and to keep it out of logs, files and
+  shell commands. `/agami-model`'s full view and `/agami-connect`'s table picker, open questions page,
+  full view and examples page each point at that rule.
+
 ## [0.9.30] — 2026-11-25
 
 ### Security
