@@ -784,7 +784,8 @@ _DANGEROUS_FN_RE = re.compile(
     r"dbms_(?:lock|pipe|scheduler|job|aq|xmlgen|xmlquery|xmlstore|xmlsave|sql|xslprocessor)\s*\.\s*\w+|"
     r"urifactory\s*\.\s*\w+|"
     r"utl_(?:http|smtp|tcp|file|inaddr)\s*\.\s*\w+|"
-    r"(?:http|db|xdb)?uritype\w*|"
+    # Constructor or static member: `DBURITYPE.createURI('…')` builds the same object.
+    r"(?:http|db|xdb)?uritype\w*(?:\s*\.\s*\w+)?|"
     # --- SQLite ------------------------------------------------------------------------
     # Loading a shared library from a SELECT is code execution in the database process.
     # SQLite only: DuckDB has no such scalar function — it loads extensions with the

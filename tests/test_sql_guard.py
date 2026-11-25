@@ -456,6 +456,9 @@ REJECT_NESTED_QUERY_FUNCTIONS = [
     "SELECT DBURITYPE('/DEMO/CUSTOMERS').getclob() AS d FROM dual",
     "SELECT XDBURITYPE('/demo/x.xml').getclob() AS d FROM dual",
     "SELECT SYS.URIFACTORY.GETURI('/oradb/DEMO/CUSTOMERS').getclob() AS d FROM dual",
+    "SELECT SYS.DBURITYPE.createURI('/DEMO/CUSTOMERS').getclob() AS d FROM dual",
+    "SELECT XDBURITYPE . createURI('/demo/x.xml').getclob() AS d FROM dual",
+    "SELECT HTTPURITYPE.createURI('http://example.com/').getclob() AS d FROM dual",
     "SELECT DBMS_XMLQUERY.GETXML('SELECT id FROM demo.customers') AS d FROM dual",
     "SELECT DBMS_SQL.OPEN_CURSOR() AS c FROM dual",
 ]
