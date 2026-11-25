@@ -636,8 +636,10 @@ _DANGEROUS_FN_RE = re.compile(
     # Time wasters / DoS
     r"pg_sleep|pg_sleep_for|pg_sleep_until|"
     # Server-side file I/O
+    # `pg_ls_\w+` as a family: the named five left out `pg_ls_archive_statusdir`,
+    # `pg_ls_logicalsnapdir`, `pg_ls_logicalmapdir` and `pg_ls_replslotdir`.
     r"pg_read_file|pg_read_binary_file|pg_read_server_files|pg_write_server_files|"
-    r"pg_ls_dir|pg_stat_file|pg_ls_logdir|pg_ls_waldir|pg_ls_tmpdir|"
+    r"pg_ls_\w+|pg_stat_file|"
     # Large objects — full set including legacy `loread`/`lowrite` and the
     # open/seek/tell/close API that lets an attacker chain `lo_open` -> `loread`
     # to read arbitrary LO content without using `lo_export`.
@@ -672,7 +674,9 @@ _DANGEROUS_FN_RE = re.compile(
     # `pg_replication_origin_\w+` is a prefix for the same reason as `SYSTEM$…`: it takes the
     # read-only members (`_oid`, `_progress`, `_session_progress`) with the mutating ones, and
     # replication administration is not a query over the tables the model declares.
-    r"pg_logical_emit_message|pg_logical_slot_get_\w+|pg_replication_origin_\w+|"
+    # `pg_logical_slot_\w+` rather than `_get_\w+`: the `_peek_` members do not advance the slot,
+    # but they return the decoded row changes, which is table data read without naming the table.
+    r"pg_logical_emit_message|pg_logical_slot_\w+|pg_replication_origin_\w+|"
     # Notification — `pg_notify` is the function spelling of the denied `NOTIFY` keyword,
     # and the keyword deny cannot see it: `\bNOTIFY\b` does not fire inside `pg_notify`
     # because `_` is a word character. A SELECT that wakes a LISTENer is a side effect.
@@ -683,9 +687,28 @@ _DANGEROUS_FN_RE = re.compile(
     # rather than the four names that were here: the family is 11 functions once the
     # `try_` and `_shared` variants are counted, and `pg_try_advisory_lock(1)` passed.
     r"pg_(?:try_)?advisory_\w+|"
-    # Nested-SQL execution via XML/JSON conversion — these execute the SQL passed
-    # as a string argument server-side, bypassing the outer gate.
-    r"query_to_xml|query_to_xmlschema|query_to_json|cursor_to_xml|"
+    # Functions that run a nested query, or read a whole table / schema / database, named by a
+    # STRING argument. `_neutralize` blanks literals, so neither the scope gates nor anything else
+    # downstream ever sees the relation or the query inside — `table_to_xml('s.t', …)` returns every
+    # column of `s.t`, declared or not. The table-function forms (`FROM query(…)`, `FROM
+    # crosstab(…)`) are also refused by the model pass as unscopable; a scalar call is not, and the
+    # model pass can be switched off per deployment while this gate cannot.
+    #
+    # Matched as FAMILIES, not names. Every entry is anchored on `\s*\(`, so an entry matches its
+    # exact name only: `query_to_xml` never covered `query_to_xml_and_xmlschema(`, which passed.
+    # `<kind>_to_\w+` takes the whole SQL/XML export family (table_, query_, cursor_, schema_,
+    # database_ × xml / xmlschema / xml_and_xmlschema) plus any spelling a later release adds.
+    r"(?:query|table|cursor|schema|database)_to_\w+|"
+    # Full-text: `ts_stat(sqlquery)` runs its argument; `ts_rewrite(query, select)` runs its second.
+    # The all-tsquery form of `ts_rewrite` is refused with it — the name cannot tell them apart.
+    r"ts_stat|ts_rewrite|"
+    # tablefunc: `crosstab(source_sql …)` / `connectby(relname …)` read by string.
+    r"crosstab\w*|connectby|"
+    # Raw heap pages (pageinspect) and WAL block images (pg_walinspect) are row data by another road.
+    r"get_raw_page|pg_get_wal_\w+|"
+    # DuckDB: `query(sql)` / `query_table(name)` run or read by string, and
+    # `json_execute_serialized_sql` executes a serialized statement.
+    r"query|query_table|json_execute_serialized_sql|"
     # --- MySQL / MariaDB ---------------------------------------------------------------
     # `SLEEP`/`BENCHMARK` burn a worker; the lock family survives the connection's return
     # to the pool exactly as the Postgres advisory locks do; `LOAD_FILE` is the MySQL
@@ -749,9 +772,12 @@ _DANGEROUS_FN_RE = re.compile(
     # about a package costs six tokens. `OPENXML` above is NOT this case and is left out — its
     # single entry point is unreachable by construction (the handle needs `EXEC
     # sp_xml_preparedocument`), which no Oracle release can change.
-    r"dbms_(?:lock|pipe|scheduler|job|aq|xmlgen|xslprocessor)\s*\.\s*\w+|"
+    # `DBMS_XMLQUERY.GETXML(sql)` is the older `DBMS_XMLGEN`; `DBMS_SQL` runs dynamic SQL;
+    # `DBMS_XMLSTORE` / `DBMS_XMLSAVE` write. `DBURITYPE('/SCHEMA/TABLE')` reads a whole table by
+    # path, so the URI types are denied as a family beside `HTTPURITYPE`.
+    r"dbms_(?:lock|pipe|scheduler|job|aq|xmlgen|xmlquery|xmlstore|xmlsave|sql|xslprocessor)\s*\.\s*\w+|"
     r"utl_(?:http|smtp|tcp|file|inaddr)\s*\.\s*\w+|"
-    r"httpuritype|"
+    r"(?:http|db|xdb)?uritype\w*|"
     # --- SQLite ------------------------------------------------------------------------
     # Loading a shared library from a SELECT is code execution in the database process.
     # SQLite only: DuckDB has no such scalar function — it loads extensions with the
