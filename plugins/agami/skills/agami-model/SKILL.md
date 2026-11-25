@@ -229,7 +229,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "$out" \
   --decisions "<artifacts_dir>/local/tmp/agami-page-$ts.json" --minutes 30
 ```
 
-Run `serve_page.py` with `run_in_background` and wait for its first line as rule 6a says. `initial_tab` and `section` are the deep link from the card it was picked on: `review` and the item's kind (`metrics`, `entities`, `joins`) from an item card, `review` alone from the Sign-off card (or when `$ARGUMENTS` was `review`/`preseed`/`rule1`), `pii` from the personal-data question; from the overview card leave both empty, and the renderer's `auto` default opens on **Review** when anything needs sign-off and on **Tables** when the model is clean.
+Run `serve_page.py` with `run_in_background` and wait for its first line as rule 6a says. `initial_tab` and `section` are the deep link from the card it was picked on: `review` and the item's kind (`metrics`, `entities`, `joins`) from an item card, `review` alone from the Sign-off card (or when `$ARGUMENTS` was `review`/`preseed`/`rule1`), `pii` from the personal-data question; from the overview card leave both empty, and the renderer's `auto` default opens on **Review** when anything needs sign-off and on **Datasource** when the model is clean.
 
 Post the link and the `Page` card (rule 6a step 4):
 

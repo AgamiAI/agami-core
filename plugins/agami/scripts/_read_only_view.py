@@ -59,6 +59,10 @@ CHANGE_CONTROLS = (
     ".bulk-reject",
     ".add-metric-open",
     ".add-metric-go",
+    # the spreadsheet tables: the row ticks, "Approve selected / Reject selected", the Actions column
+    ".row-select",
+    ".select-bar",
+    ".col-actions",
     ".rt-toolbar",
     ".sql-editor",
     # golden datasets: tag, match, question, remove and withdraw controls, and the queue's Undo
@@ -108,7 +112,8 @@ SAVE_LABEL = "Save decisions"
 # shows must stay what it sent. Every control that changes a decision, plus every form field but
 # search, which only filters. The queue's tab is left out: it is a tab, so it only navigates.
 SAVE_LOCKED = tuple(s for s in CHANGE_CONTROLS if s != ".tab-queued") + _FROZEN
-SAVE_LOCKED_FIELDS = "input:not([type=search]), select, textarea, [contenteditable]"
+# The model explorer's Area select only filters, like search.
+SAVE_LOCKED_FIELDS = "input:not([type=search]), select:not(#area-select), textarea, [contenteditable]"
 
 _SAVING_STYLE = (
     '<style id="agami-saves">\n'

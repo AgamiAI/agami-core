@@ -564,11 +564,11 @@ def test_a_dropped_column_or_table_leaves_the_review_pile(shop, tmp_path, monkey
         assert sorted(json.loads(proc.stdout.strip().splitlines()[-1])) == [
             "date_dim.calendar_date", "date_dim.date_key", "date_dim.fiscal_year"]
 
-    # with those answered, nothing is left to review: the page opens on Tables, not Review
+    # with those answered, nothing is left to review: the page opens on Datasource, not Review
     _answer(shop["root"], [("reject", "date_dim", c, v, None) for c, v in
                            (("date_key", "-99999"), ("calendar_date", "2099-12-31"), ("fiscal_year", "2099"))])
     out = tmp_path / "page"
     monkeypatch.setattr(sys, "argv", ["r", "--profile", "shop", "--artifacts-dir", str(shop["art"]),
                                       "--out", str(out / "x.html"), "--manifest-out", str(out / "m.json")])
     assert R.main() == 0
-    assert json.loads((out / "m.json").read_text())["initial_tab"] == "tables"
+    assert json.loads((out / "m.json").read_text())["initial_tab"] == "datasource"
