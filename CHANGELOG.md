@@ -51,6 +51,10 @@ below corresponds to one such version.
   has a minimum width, the table scrolls sideways instead of shrinking, and the Actions column stays
   pinned at the right edge.
 
+- **The approval date in the explorer's Status column is never cut off.** It read
+  "you@example.com · 12 Nov 20…" in a wide window. Who and when now wrap to a second line inside
+  the cell, the date always shows in full, and "✓ Approved" stays on one line.
+
 ## [0.9.30] — 2026-11-25
 
 ### Security

@@ -666,8 +666,10 @@
       border: 1px solid var(--info-border); border-radius: 4px; padding: 0 5px; margin-right: 5px; }
     .st-ok { color: var(--ok-fg); font-weight: 600; font-size: 12px; white-space: nowrap; }
     .st-auto { color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
+    /* Who and when may wrap to a second line, but the date never splits or gets cut off. */
     .st-who { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      white-space: normal; overflow-wrap: anywhere; }
+    .st-who .st-date { white-space: nowrap; }
     table.grid td.col-status { white-space: nowrap; }
     /* Actions stay in view at the right edge while the table scrolls sideways. */
     table.grid th.col-actions, table.grid td.col-actions { position: sticky; right: 0; z-index: 1;
@@ -1416,8 +1418,13 @@
         const role = it.signed_off_role && !auto ? ' (' + it.signed_off_role + ')' : '';
         d.appendChild(el('span', { class: auto ? 'st-auto' : 'st-ok', text: auto ? 'Approved automatically' : '✓ Approved',
           title: auto ? 'agami signed this off itself: the database declares it.' : 'Signed off' + (it.signed_off_by ? ' by ' + it.signed_off_by + role : '') }));
-        const who = auto ? (it.signed_off_date || '') : [it.signed_off_by, it.signed_off_date].filter(Boolean).join(' · ');
-        if (who) d.appendChild(el('span', { class: 'st-who', text: who, title: who + role }));
+        const by = auto ? '' : (it.signed_off_by || ''), when = it.signed_off_date || '';
+        if (by || when) {
+          const who = el('span', { class: 'st-who', title: [by, when].filter(Boolean).join(' · ') + role });
+          if (by) who.appendChild(document.createTextNode(by + (when ? ' · ' : '')));
+          if (when) who.appendChild(el('span', { class: 'st-date', text: when }));
+          d.appendChild(who);
+        }
       } else {
         const b = stateBadge(it.review_state || 'unreviewed', false);
         if (b) d.appendChild(b);
