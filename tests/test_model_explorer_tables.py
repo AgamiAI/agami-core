@@ -765,3 +765,23 @@ def test_narrow_layout_rules_scroll_rather_than_squeeze():
         "'why', label: \"Why it's here\", min: 240",
     ):
         assert col in css
+
+
+@needs_node
+def test_the_approval_date_is_kept_whole_and_the_line_may_wrap(model):
+    out = _run_page(
+        model,
+        GRID
+        + """
+      activeTab = 'metrics'; renderAll();
+      const who = rowOf('sales.signed_orders').walk([]).find(n => n.attrs.class === 'st-who');
+      const date = who.walk([]).find(n => n.attrs.class === 'st-date');
+      console.log(JSON.stringify({ who: who.textContent, date: date.textContent }));""",
+    )
+    assert out == {"who": "you@example.com · 1 Jan 2026", "date": "1 Jan 2026"}
+    from test_render_model_explorer import TEMPLATE
+
+    css = TEMPLATE.read_text(encoding="utf-8")
+    who = css.split(".st-who {", 1)[1].split("}", 1)[0]
+    assert "white-space: normal" in who and "ellipsis" not in who
+    assert "white-space: nowrap" in css.split(".st-who .st-date {", 1)[1].split("}", 1)[0]
