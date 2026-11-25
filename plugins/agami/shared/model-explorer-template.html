@@ -1309,9 +1309,9 @@
       } else {
         if (effReviewState(item) === 'approved') {
           if (!inRow) {
-          const who = item.signed_off_by ? ' · ' + item.signed_off_by : '';
-          a.appendChild(el('span', { class: 'mini-chip', style: 'align-self:center;color:var(--ok-fg);',
-            text: '✓ approved' + who }));
+            const who = item.signed_off_by ? ' · ' + item.signed_off_by : '';
+            a.appendChild(el('span', { class: 'mini-chip', style: 'align-self:center;color:var(--ok-fg);',
+              text: '✓ approved' + who }));
           }
         } else {
           a.appendChild(approveBtn(kind, item));
@@ -1414,11 +1414,31 @@
     // What a tick can act on: anything still in the model. "Approve selected" approves the ones a
     // row's Approve would; "Reject selected" rejects the ones a row's Reject would.
     function canSelect(it) { return !READ_ONLY && it._kind && !effExcluded(it); }
+    // One ticked row queues exactly what its own button does (toggleApprove / toggleOp), never a
+    // toggle-off. Several at once are a bulk decision and carry what the other bulk buttons do: an
+    // approval says `bulk` (#651), and a reject asks once for the reason each op records (#531).
     function bulkSelected(op) {
-      gridShown.filter(it => selected.has(it.qname)).forEach(it => {
-        if (op === 'approve' ? !isApprovable(it) : !canSelect(it)) return;
-        // the same op the row's own button queues (toggleApprove / toggleOp), never a toggle-off
-        ops[it.qname] = { op, kind: it._kind, area: it.area, name: relName(it) };
+      const targets = gridShown.filter(it => selected.has(it.qname))
+        .filter(it => op === 'approve' ? isApprovable(it) : canSelect(it));
+      if (!targets.length) return;
+      const many = targets.length > 1;
+      let reason = '';
+      if (op === 'exclude' && many) {
+        const noun = kindNoun(targets, targets.length);
+        if (!window.confirm(`Reject ${targets.length} ${noun}?`)) return;
+        let ask = `Why are you rejecting these ${targets.length} ${noun}? The reason is recorded on each one.`;
+        while (!reason) {
+          const got = window.prompt(ask, '');
+          if (got === null) return;
+          reason = got.trim();
+          ask = `A reason is required to reject ${targets.length} ${noun}.`;
+        }
+      }
+      targets.forEach(it => {
+        const o = { op, kind: it._kind, area: it.area, name: relName(it) };
+        if (many && op === 'approve') o.bulk = true;
+        if (reason) o.reason = reason;
+        ops[it.qname] = o;
       });
       selected.clear();
       renderAll();
@@ -1445,15 +1465,18 @@
     //         selectable, card(it) }. Sorting a column shows the rows flat; with no sort, the groups.
     function renderGrid(root, opts) {
       const selectable = !!opts.selectable && !READ_ONLY;
-      if (selectable) gridShown = opts.items.slice();
+      // What is drawn: a folded group's rows are not, so neither a tick nor a bulk button reaches them.
+      const flat = sortItems(opts.id, opts.items, opts.cols);
+      const drawn = flat || (opts.groups ? opts.groups.filter(g => !g.closed).flatMap(g => g.items) : opts.items);
+      if (selectable) gridShown = drawn.slice();
       const ncols = opts.cols.length + 1;
       const wrap = el('div', { class: 'grid-wrap' });
       const table = el('table', { class: 'grid', 'data-grid': opts.id });
       const thead = el('thead');
       const hr = el('tr');
       const lead = el('th', { style: 'width:' + (selectable ? 66 : 42) + 'px;' });
-      if (selectable) {
-        const pickable = opts.items.filter(canSelect);
+      if (selectable && opts.selectAll !== false) {
+        const pickable = drawn.filter(canSelect);
         const all = pickable.length > 0 && pickable.every(it => selected.has(it.qname));
         lead.appendChild(el('input', { type: 'checkbox', class: 'row-select', 'aria-label': 'Select every row shown',
           checked: all ? 'checked' : false, onclick: () => {
@@ -1500,7 +1523,6 @@
           tbody.appendChild(dr);
         }
       };
-      const flat = sortItems(opts.id, opts.items, opts.cols);
       if (flat) flat.forEach(emit);
       else if (opts.groups) opts.groups.forEach(g => {
         const gr = el('tr', { class: 'group-row' });
@@ -1530,7 +1552,7 @@
       const col = r[side + '_column'];
       return sch + r[side + '_table'] + (col ? '.' + col : '');
     }
-    function joinLabel(r) { return r.from_column ? joinEnd(r, 'from') + ' → ' + joinEnd(r, 'to') : joinEnd(r, 'from') + ' → ' + joinEnd(r, 'to') + (r.on ? ' ON ' + r.on : ''); }
+    function joinLabel(r) { return joinEnd(r, 'from') + ' → ' + joinEnd(r, 'to') + (!r.from_column && r.on ? ' ON ' + r.on : ''); }
     function joinCols() {
       return [
         { key: 'from', label: 'From', width: 220, sort: r => joinEnd(r, 'from'), cell: r => {
@@ -2264,6 +2286,7 @@
       return [
         { key: 'name', label: 'Metric', width: 210, sort: m => m.name, cell: m => {
           const d = el('div'); d.appendChild(el('span', { class: 'cell-name' }, highlight(m.name, searchQ)));
+          if (m.confidence) { d.appendChild(document.createTextNode(' ')); d.appendChild(confCell(m)); }
           if ((m.other_names || []).length) d.appendChild(el('span', { class: 'cell-sub', text: 'also: ' + m.other_names.join(', ') }));
           return d; } },
         { key: 'area', label: 'Area', width: 130, sort: m => m.area, cell: m => m.area || '—' },
@@ -2962,10 +2985,12 @@
       const tabled = shown.filter(kg => !kg.special);
       tabled.forEach(kg => sec.appendChild(kindSubhead(kg.label, kg.items, g.bulk)));
       const rows = tabled.flatMap(kg => kg.items);
-      if (rows.length) renderGrid(sec, { id: 'review', cols: reviewCols(), items: rows, groups: null, selectable: true,
-                                         card: it => reviewCard(it, true) });
+      // Ticks only on the piles that offer bulk decisions (not Approved / Rejected), and "select every
+      // row" only while one kind is shown: approving metrics must never approve the joins too.
+      if (rows.length) renderGrid(sec, { id: 'review', cols: reviewCols(), items: rows, groups: null, selectable: g.bulk,
+                                         selectAll: tabled.length === 1, card: it => reviewCard(it, true) });
       else gridShown = [];
-      if (kindRow && rows.length && !READ_ONLY) kindRow.appendChild(selectBar());
+      if (kindRow && rows.length && g.bulk && !READ_ONLY) kindRow.appendChild(selectBar());
       shown.filter(kg => kg.special).forEach(kg => {
         if (kg.special === 'placeholders') {
           sec.appendChild(kindSubhead('Placeholder values: what does each one mean?', kg.items, false));
