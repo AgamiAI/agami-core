@@ -29,6 +29,21 @@ below corresponds to one such version.
   datasource and another one, read from `organization.yaml`. They are shown but not changed from the
   page.
 
+## [0.9.30] — 2026-11-25
+
+### Security
+
+- **Functions that run a nested query or dump a table are refused.** The read-only gate denied
+  `query_to_xml` and a few siblings, but not the rest of the family: `table_to_xml`, `schema_to_xml`,
+  `database_to_xml`, the `_xmlschema` and `_and_xmlschema` forms, `ts_stat`, `ts_rewrite`,
+  `crosstab`, `connectby`, `xpath_table` and pgRouting's `pgr_*`. Each of these names its table or query inside a string, which no scope
+  check can see, so a call in the select list could return columns the model leaves out. These
+  function families are now denied by prefix rather than one name at a time, because each entry
+  matched only its exact name. The same pass covers DuckDB `query()`, `query_table()` and
+  `json_execute_serialized_sql`, Oracle `DBURITYPE` / `XDBURITYPE` / `URIFACTORY`, `DBMS_XMLQUERY` and `DBMS_SQL`,
+  Postgres `get_raw_page` and the B-tree page readers, `pg_get_wal_*` and peeked logical slots, and every `pg_ls_*`
+  directory listing.
+
 ## [0.9.29] — 2026-11-23
 
 ### Fixed
