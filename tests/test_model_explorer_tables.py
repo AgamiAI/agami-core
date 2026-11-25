@@ -582,7 +582,17 @@ def test_the_cross_datasource_tab_shows_the_links_and_changes_nothing(model):
     assert out["heads"][1:] == ["From", "To", "Cardinality", "Description", "Confidence", "Status"]
     assert out["count"] == "2" and len(out["rows"]) == 2
     assert any(r.startswith("▸DEMOdemo_keys.id") and "CRMcrm_keys.key_id" in r for r in out["rows"])
-    assert out["ticks"] == 0 and set(out["buttons"]) <= {"▸", "more"}
+    # only the ▸ and "more", which open a card, and the sort headings: nothing that changes the link
+    assert out["ticks"] == 0 and set(out["buttons"]) <= {
+        "▸",
+        "more",
+        "From",
+        "To",
+        "Cardinality",
+        "Description",
+        "Confidence",
+        "Status",
+    }
     assert "rows are never joined across the two databases" in out["text"]
 
 
@@ -610,6 +620,58 @@ def test_the_header_counts_the_same_joins_as_the_joins_tab(model):
       console.log(JSON.stringify({ meta: document.getElementById('totals-meta').textContent, tab: tabCount('joins') }));""",
     )
     assert "2 joins" in out["meta"] and out["tab"] == 2
+
+
+@needs_node
+def test_a_metric_and_an_entity_with_one_name_are_ticked_apart(model):
+    ent = model / "subject_areas" / "sales" / "entities"
+    ent.mkdir()
+    (ent / "order_rows.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "order_rows",
+                "maps_to": [{"table": "orders", "column": "id", "primary": True}],
+                "confidence": "proposed",
+                "review_state": "unreviewed",
+            }
+        )
+    )
+    out = _run_page(
+        model,
+        GRID
+        + """
+      activeTab = 'review'; reviewSubTab = 'eyes'; reviewSubTabChosen = true; renderAll();
+      const metric = rows().find(r => r.attrs['data-qname'] === 'sales.order_rows' && r.children[1].textContent === 'Metric');
+      metric.walk([]).find(n => n.attrs.class === 'row-select').click();
+      const ticked = rows().filter(r => r.walk([]).some(n => n.attrs.class === 'row-select' && n.attrs.checked))
+                           .map(r => r.children[1].textContent + ' ' + r.attrs['data-qname']);
+      walkAll('tab-content').filter(n => n.tagName === 'BUTTON').find(b => b.textContent.startsWith('Approve selected')).click();
+      console.log(JSON.stringify({ ticked, ops }));""",
+    )
+    assert out["ticked"] == ["Metric sales.order_rows"]
+    assert out["ops"] == {
+        "sales.order_rows": {
+            "op": "approve",
+            "kind": "metric",
+            "area": "sales",
+            "name": "order_rows",
+        }
+    }
+
+
+@needs_node
+def test_sorting_is_a_button_and_the_heading_says_which_way(model):
+    out = _run_page(
+        model,
+        GRID
+        + """
+      activeTab = 'metrics'; renderAll();
+      const th = () => grid().walk([]).filter(n => n.tagName === 'TH').find(n => n.textContent.startsWith('Metric'));
+      const before = th().attrs['aria-sort'];
+      th().children.find(n => n.tagName === 'BUTTON').click();
+      console.log(JSON.stringify({ before, after: th().attrs['aria-sort'], label: th().textContent }));""",
+    )
+    assert out == {"before": "none", "after": "ascending", "label": "Metric ▲"}
 
 
 @needs_node
