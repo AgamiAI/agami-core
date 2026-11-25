@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.30] — 2026-11-25
+
 ### Security
 
 - **Functions that run a nested query or dump a table are refused.** The read-only gate denied
