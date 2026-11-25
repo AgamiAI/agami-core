@@ -413,6 +413,100 @@ def test_rejects_dangerous_functions(sql: str) -> None:
     assert check_read_only(sql) is not None, f"Dangerous function not blocked: {sql!r}"
 
 
+# Functions that run a nested query, or read a whole relation, named by a string. The literal is
+# blanked before any gate looks, so the relation and the query inside never reach the scope checks:
+# each of these passed `check_read_only` and the model pass on `origin/main` as a scalar call.
+REJECT_NESTED_QUERY_FUNCTIONS = [
+    # Postgres SQL/XML export — the whole family, not only the names that were listed.
+    "SELECT table_to_xml('demo.customers', true, false, '') AS d",
+    "SELECT table_to_xmlschema('demo.customers', true, false, '') AS d",
+    "SELECT table_to_xml_and_xmlschema('demo.customers', true, false, '') AS d",
+    "SELECT query_to_xml_and_xmlschema('SELECT id FROM demo.customers', true, false, '') AS d",
+    "SELECT cursor_to_xmlschema('c', true, false, '') AS d",
+    "SELECT schema_to_xml('demo', true, false, '') AS d",
+    "SELECT schema_to_xmlschema('demo', true, false, '') AS d",
+    "SELECT schema_to_xml_and_xmlschema('demo', true, false, '') AS d",
+    "SELECT database_to_xml(true, false, '') AS d",
+    "SELECT database_to_xmlschema(true, false, '') AS d",
+    "SELECT database_to_xml_and_xmlschema(true, false, '') AS d",
+    'SELECT pg_catalog."table_to_xml"(\'demo.customers\', true, false, \'\') AS d',
+    # Postgres full-text and tablefunc.
+    "SELECT ts_stat('SELECT to_tsvector(''simple'', name) FROM demo.customers') AS s",
+    "SELECT ts_rewrite('a & b'::tsquery, 'SELECT t, s FROM demo.aliases') AS r",
+    "SELECT id FROM demo.customers WHERE EXISTS (SELECT 1 FROM ts_stat('SELECT v FROM demo.docs'))",
+    "SELECT crosstab('SELECT a, b, c FROM demo.customers') AS x",
+    "SELECT crosstab3('SELECT a, b, c FROM demo.customers') AS x",
+    "SELECT connectby('demo.customers', 'id', 'parent_id', '1', 0) AS x",
+    # Row data by another road: raw heap pages, WAL block images, a peeked logical slot.
+    "SELECT xpath_table('id', 'doc', 'demo.docs', '/a', 'true') AS x",
+    "SELECT pgr_dijkstra('SELECT id, source, target, cost FROM demo.edges', 1, 2) AS r",
+    "SELECT get_raw_page('demo.customers', 0) AS p",
+    "SELECT bt_page_items('demo.customers_pkey', 1) AS b",
+    "SELECT bt_multi_page_stats('demo.customers_pkey', 1, 2) AS b",
+    "SELECT pg_get_wal_block_info('0/0', '0/FFFFFFFF') AS b",
+    "SELECT pg_logical_slot_peek_changes('s', NULL, NULL) AS c",
+    # The directory listings the named five left out.
+    "SELECT pg_ls_replslotdir('s') AS f",
+    "SELECT pg_ls_archive_statusdir() AS f",
+    # DuckDB.
+    "SELECT id FROM query('SELECT id FROM demo.customers')",
+    "SELECT id FROM query_table('demo.customers')",
+    "SELECT id FROM json_execute_serialized_sql('{}')",
+    # Oracle.
+    "SELECT DBURITYPE('/DEMO/CUSTOMERS').getclob() AS d FROM dual",
+    "SELECT XDBURITYPE('/demo/x.xml').getclob() AS d FROM dual",
+    "SELECT SYS.URIFACTORY.GETURI('/oradb/DEMO/CUSTOMERS').getclob() AS d FROM dual",
+    "SELECT SYS.DBURITYPE.createURI('/DEMO/CUSTOMERS').getclob() AS d FROM dual",
+    "SELECT XDBURITYPE . createURI('/demo/x.xml').getclob() AS d FROM dual",
+    "SELECT HTTPURITYPE.createURI('http://example.com/').getclob() AS d FROM dual",
+    "SELECT DBMS_XMLQUERY.GETXML('SELECT id FROM demo.customers') AS d FROM dual",
+    "SELECT DBMS_SQL.OPEN_CURSOR() AS c FROM dual",
+]
+
+
+@pytest.mark.parametrize("sql", REJECT_NESTED_QUERY_FUNCTIONS)
+def test_rejects_functions_that_run_a_nested_query_or_dump_a_table(sql: str) -> None:
+    refusal = check_read_only(sql)
+    assert refusal is not None, f"Nested-query function not blocked: {sql!r}"
+    assert refusal.remediation == _REMEDIATION["dangerous_function"], refusal
+
+
+@pytest.mark.parametrize(
+    "sql,name",
+    [
+        ("SELECT query_to_xml_and_xmlschema('SELECT 1', true, false, '') AS d", "query_to_xml_and_xmlschema"),
+        ("SELECT table_to_xml_and_xmlschema('demo.customers', true, false, '') AS d", "table_to_xml_and_xmlschema"),
+        ("SELECT pg_logical_slot_peek_binary_changes('s', NULL, NULL) AS c", "pg_logical_slot_peek_binary_changes"),
+    ],
+)
+def test_a_longer_name_in_a_denied_family_is_refused_by_its_own_name(sql: str, name: str) -> None:
+    """Every entry is anchored on `\\s*\\(`, so a name entry matches that exact name and no longer one.
+
+    `query_to_xml` was listed and `query_to_xml_and_xmlschema` passed. The families are prefixes now,
+    and the refusal names the whole token the caller wrote, not a shorter entry it happens to start
+    with.
+    """
+    refusal = check_read_only(sql)
+    assert refusal is not None, f"longer family member not blocked: {sql!r}"
+    assert name in refusal.detail, refusal.detail
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # Columns and aliases that share a family's prefix or name, with no call.
+        "SELECT query, query_text FROM demo.search_log",
+        "SELECT table_to_xml_count, crosstab_label FROM demo.reports",
+        "SELECT q.query AS query_id FROM demo.search_log q",
+        # A name that only CONTAINS a family word is not a call to it.
+        "SELECT xmlquery('/a' PASSING doc) AS x FROM demo.docs",
+        "SELECT subquery_total(id) AS t FROM demo.customers",
+    ],
+)
+def test_nested_query_families_do_not_refuse_their_neighbours(sql: str) -> None:
+    assert check_read_only(sql) is None, f"over-refused: {sql!r}"
+
+
 # The same class as `REJECT_DANGEROUS_FUNCTIONS` above, on the engines that list did not speak.
 # Kept as its own corpus because the reason each one is here is the engine, not the verb: the list
 # above was written against Postgres server-side primitives, and `execute_sql` dispatches to eleven
@@ -496,7 +590,7 @@ def test_rejects_dialect_side_effect_functions(sql: str) -> None:
 # The cost of the bare-word entries, pinned as a refusal rather than argued in a comment.
 #
 # `\bWORD\s*\(` matches the two SQL constructs with that shape — a function call, and the column
-# list of a CTE or derived table — and cannot tell them apart. These four are legitimate analytics
+# list of a CTE or derived table — and cannot tell them apart. These are legitimate analytics
 # SQL that `origin/main` accepted and this gate now refuses, naming a function the statement does
 # not contain. They are here, not in the false-positive corpus, because refusing them is the
 # CHOSEN behaviour: a lookaround narrow enough to admit them would let a real call through in some
@@ -510,6 +604,9 @@ REJECT_CTE_NAME_COLLISION = [
     "WITH sleep (patient_id, hours) AS (SELECT patient_id, hours FROM sleep_log) SELECT AVG(hours) FROM sleep",
     "WITH reflect (id, score) AS (SELECT id, score FROM surveys) SELECT id FROM reflect",
     "SELECT a.region FROM actuals a JOIN (SELECT region FROM t) AS benchmark (region) ON a.region = benchmark.region",
+    # DuckDB's `query(sql)` made `query` a bare-word entry too, with the same cost.
+    "WITH query (id) AS (SELECT id FROM t) SELECT id FROM query",
+    "SELECT doc.query('/a') AS a FROM demo.docs",
 ]
 
 
