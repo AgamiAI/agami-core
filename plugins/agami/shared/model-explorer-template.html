@@ -580,9 +580,9 @@
 
     /* Confidence chips (used in the legend + on cards) */
     .conf-chip { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; cursor: help; }
-    .conf-proposed { background: var(--warn-bg); color: var(--warn-fg); }
-    .conf-inferred { background: var(--code-bg); color: var(--muted); border: 1px solid var(--border); }
-    .conf-confirmed { background: var(--ok-bg); color: var(--ok-fg); }
+    /* Confidence is how agami came by an item, not a decision: every level is the same neutral grey,
+       because green on this page means only that a person approved it. */
+    .conf-proposed, .conf-inferred, .conf-confirmed { background: var(--code-bg); color: var(--muted); border: 1px solid var(--border); }
 
     /* Modal */
     .modal {
@@ -1383,10 +1383,16 @@
         if (more && more.classList.contains('more-link') && c.scrollHeight > c.clientHeight + 1) more.classList.add('shown');
       });
     }
-    function confCell(it) {
-      if (!it.confidence) return el('span', { class: 'cell-empty', text: '—' });
+    function confChip(it) {
       return el('span', { class: 'conf-chip conf-' + it.confidence + ' tip', text: it.confidence,
         'data-tip': CONF_MEANING[it.confidence] || ('confidence: ' + it.confidence) });
+    }
+    // In a table row, confidence shows only while an item waits for a decision: once a person has
+    // approved it, the approval is what the row says (the open card still shows how agami came by it).
+    function awaitsDecision(it) { return !it.excluded && ['unreviewed', 'stale'].includes(it.review_state || 'unreviewed'); }
+    function confCell(it) {
+      if (!it.confidence || !awaitsDecision(it)) return null;
+      return confChip(it);
     }
     // The approval tag: "✓ Approved" with who and when; a sign-off agami made itself (a declared key)
     // reads "Approved automatically"; anything else keeps its state badge. Queued actions and edits
@@ -1577,7 +1583,7 @@
           return d; } },
         { key: 'card', label: 'Cardinality', width: 108, sort: r => r.cardinality || '', cell: r => (r.cardinality || '—').replace(/_/g, ' ') },
         { key: 'desc', label: 'Description', sort: r => r.description || '', cell: r => clipCell(r.description, r) },
-        { key: 'conf', label: 'Confidence', width: 104, sort: r => CONF_ORDER[r.confidence] ?? 9, cell: confCell },
+        { key: 'conf', label: 'Confidence', width: 104, sort: r => awaitsDecision(r) ? (CONF_ORDER[r.confidence] ?? 9) : 9, cell: confCell },
         { key: 'status', label: 'Status', width: 170, sort: statusSort, cell: statusCell },
         actionsCol(() => 'relationship'),
       ];
@@ -2297,7 +2303,8 @@
       return [
         { key: 'name', label: 'Metric', width: 210, sort: m => m.name, cell: m => {
           const d = el('div'); d.appendChild(el('span', { class: 'cell-name' }, highlight(m.name, searchQ)));
-          if (m.confidence) { d.appendChild(document.createTextNode(' ')); d.appendChild(confCell(m)); }
+          const chip = confCell(m);
+          if (chip) { d.appendChild(document.createTextNode(' ')); d.appendChild(chip); }
           if ((m.other_names || []).length) d.appendChild(el('span', { class: 'cell-sub', text: 'also: ' + m.other_names.join(', ') }));
           return d; } },
         { key: 'area', label: 'Area', width: 130, sort: m => m.area, cell: m => m.area || '—' },
@@ -2432,7 +2439,7 @@
       const nameEl = el('div', { class: 'table-name' });
       nameEl.appendChild(highlight(x.from_datasource + ': ' + xdsEnd(x, 'from').text + ' → ' + x.to_datasource + ': ' + xdsEnd(x, 'to').text, searchQ));
       header.appendChild(nameEl);
-      header.appendChild(confCell(x));
+      if (x.confidence) header.appendChild(confChip(x));
       const badge = stateBadge(x.review_state, x.excluded);
       if (badge) header.appendChild(badge);
       card.appendChild(header);
@@ -2472,7 +2479,7 @@
         { key: 'to', label: 'To', width: 240, sort: x => x.to_datasource + xdsEnd(x, 'to').text, cell: x => xdsEndCell(x, 'to') },
         { key: 'card', label: 'Cardinality', width: 108, sort: x => x.cardinality || '', cell: x => (x.cardinality || '—').replace(/_/g, ' ') },
         { key: 'desc', label: 'Description', sort: x => x.description || '', cell: x => clipCell(x.description, x) },
-        { key: 'conf', label: 'Confidence', width: 104, sort: x => CONF_ORDER[x.confidence] ?? 9, cell: confCell },
+        { key: 'conf', label: 'Confidence', width: 104, sort: x => awaitsDecision(x) ? (CONF_ORDER[x.confidence] ?? 9) : 9, cell: confCell },
         { key: 'status', label: 'Status', width: 180, sort: statusSort, cell: statusCell },
       ];
       const sec = el('div', { class: 'schema-section' });
@@ -2873,7 +2880,7 @@
           return d; } },
         { key: 'area', label: 'Area', width: 130, sort: it => it.area || '', cell: it => it.area || '—' },
         { key: 'why', label: "Why it's here", sort: reviewWhy, cell: it => clipCell(reviewWhy(it), it) },
-        { key: 'conf', label: 'Confidence', width: 104, sort: it => CONF_ORDER[it.confidence] ?? 9, cell: confCell },
+        { key: 'conf', label: 'Confidence', width: 104, sort: it => awaitsDecision(it) ? (CONF_ORDER[it.confidence] ?? 9) : 9, cell: confCell },
         { key: 'status', label: 'Status', width: 150, sort: statusSort, cell: statusCell },
         actionsCol(it => it._kind),
       ];

@@ -675,6 +675,38 @@ def test_sorting_is_a_button_and_the_heading_says_which_way(model):
 
 
 @needs_node
+def test_confidence_shows_only_on_rows_still_waiting_and_is_never_green(model):
+    out = _run_page(
+        model,
+        GRID
+        + """
+      const chips = r => r.walk([]).filter(n => (n.attrs.class || '').startsWith('conf-chip')).map(n => n.attrs.class);
+      activeTab = 'metrics'; renderAll();
+      const waiting = chips(rowOf('sales.order_rows')), approved = chips(rowOf('sales.signed_orders'));
+      rowOf('sales.signed_orders').walk([]).find(n => (n.attrs.class || '').startsWith('row-exp')).click();
+      const card = grid().walk([]).find(n => n.tagName === 'TR' && n.attrs.class === 'detail-row');
+      activeTab = 'joins'; renderAll();
+      console.log(JSON.stringify({ waiting, approved, card: chips(card), join: chips(rows()[0]) }));""",
+    )
+    assert out["waiting"] == ["conf-chip conf-proposed tip"]
+    assert out["approved"] == [] and out["join"] == []  # approved: the status says it all
+    assert out["card"] == [
+        "conf-chip conf-proposed tip"
+    ]  # the open card still says how agami came by it
+
+
+def test_no_confidence_chip_borrows_the_approved_green():
+    from test_render_model_explorer import TEMPLATE
+
+    css = TEMPLATE.read_text(encoding="utf-8")
+    rule = next(line for line in css.splitlines() if ".conf-confirmed" in line and "{" in line)
+    assert (
+        ".conf-proposed" in rule and ".conf-inferred" in rule
+    )  # one neutral style for every level
+    assert "--ok-" not in rule and "--warn-" not in rule
+
+
+@needs_node
 def test_a_read_only_page_offers_no_ticks(model):
     out = _run_page(
         model,
