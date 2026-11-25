@@ -438,7 +438,11 @@ REJECT_NESTED_QUERY_FUNCTIONS = [
     "SELECT crosstab3('SELECT a, b, c FROM demo.customers') AS x",
     "SELECT connectby('demo.customers', 'id', 'parent_id', '1', 0) AS x",
     # Row data by another road: raw heap pages, WAL block images, a peeked logical slot.
+    "SELECT xpath_table('id', 'doc', 'demo.docs', '/a', 'true') AS x",
+    "SELECT pgr_dijkstra('SELECT id, source, target, cost FROM demo.edges', 1, 2) AS r",
     "SELECT get_raw_page('demo.customers', 0) AS p",
+    "SELECT bt_page_items('demo.customers_pkey', 1) AS b",
+    "SELECT bt_multi_page_stats('demo.customers_pkey', 1, 2) AS b",
     "SELECT pg_get_wal_block_info('0/0', '0/FFFFFFFF') AS b",
     "SELECT pg_logical_slot_peek_changes('s', NULL, NULL) AS c",
     # The directory listings the named five left out.
@@ -451,6 +455,7 @@ REJECT_NESTED_QUERY_FUNCTIONS = [
     # Oracle.
     "SELECT DBURITYPE('/DEMO/CUSTOMERS').getclob() AS d FROM dual",
     "SELECT XDBURITYPE('/demo/x.xml').getclob() AS d FROM dual",
+    "SELECT SYS.URIFACTORY.GETURI('/oradb/DEMO/CUSTOMERS').getclob() AS d FROM dual",
     "SELECT DBMS_XMLQUERY.GETXML('SELECT id FROM demo.customers') AS d FROM dual",
     "SELECT DBMS_SQL.OPEN_CURSOR() AS c FROM dual",
 ]
@@ -598,6 +603,7 @@ REJECT_CTE_NAME_COLLISION = [
     "SELECT a.region FROM actuals a JOIN (SELECT region FROM t) AS benchmark (region) ON a.region = benchmark.region",
     # DuckDB's `query(sql)` made `query` a bare-word entry too, with the same cost.
     "WITH query (id) AS (SELECT id FROM t) SELECT id FROM query",
+    "SELECT doc.query('/a') AS a FROM demo.docs",
 ]
 
 

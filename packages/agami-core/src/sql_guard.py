@@ -702,10 +702,15 @@ _DANGEROUS_FN_RE = re.compile(
     # Full-text: `ts_stat(sqlquery)` runs its argument; `ts_rewrite(query, select)` runs its second.
     # The all-tsquery form of `ts_rewrite` is refused with it — the name cannot tell them apart.
     r"ts_stat|ts_rewrite|"
-    # tablefunc: `crosstab(source_sql …)` / `connectby(relname …)` read by string.
-    r"crosstab\w*|connectby|"
-    # Raw heap pages (pageinspect) and WAL block images (pg_walinspect) are row data by another road.
-    r"get_raw_page|pg_get_wal_\w+|"
+    # tablefunc: `crosstab(source_sql …)` / `connectby(relname …)` read by string. xml2's
+    # `xpath_table(…, relname, …)` and pgRouting's `pgr_*(edges_sql …)` likewise, and a `pgr_` call
+    # is legal in the select list.
+    r"crosstab\w*|connectby|xpath_table|pgr_\w+|"
+    # Raw heap pages, B-tree pages by index name (pageinspect) and WAL block images (pg_walinspect)
+    # are row data by another road.
+    r"get_raw_page|bt_(?:multi_)?page_\w+|bt_metap|pg_get_wal_\w+|"
+    # SQL Server's XML `.query('…')` method on a column is refused too, by the bare `query` entry
+    # below — a chosen over-refusal of the same kind as a CTE named `query (…)`.
     # DuckDB: `query(sql)` / `query_table(name)` run or read by string, and
     # `json_execute_serialized_sql` executes a serialized statement.
     r"query|query_table|json_execute_serialized_sql|"
@@ -774,8 +779,10 @@ _DANGEROUS_FN_RE = re.compile(
     # sp_xml_preparedocument`), which no Oracle release can change.
     # `DBMS_XMLQUERY.GETXML(sql)` is the older `DBMS_XMLGEN`; `DBMS_SQL` runs dynamic SQL;
     # `DBMS_XMLSTORE` / `DBMS_XMLSAVE` write. `DBURITYPE('/SCHEMA/TABLE')` reads a whole table by
-    # path, so the URI types are denied as a family beside `HTTPURITYPE`.
+    # path, so the URI types are denied as a family beside `HTTPURITYPE`, and so is `URIFACTORY`,
+    # which builds one from a string without the type's name appearing.
     r"dbms_(?:lock|pipe|scheduler|job|aq|xmlgen|xmlquery|xmlstore|xmlsave|sql|xslprocessor)\s*\.\s*\w+|"
+    r"urifactory\s*\.\s*\w+|"
     r"utl_(?:http|smtp|tcp|file|inaddr)\s*\.\s*\w+|"
     r"(?:http|db|xdb)?uritype\w*|"
     # --- SQLite ------------------------------------------------------------------------
