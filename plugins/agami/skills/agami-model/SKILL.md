@@ -231,12 +231,12 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "$out" \
 
 Run `serve_page.py` with `run_in_background` and wait for its first line as rule 6a says. `initial_tab` and `section` are the deep link from the card it was picked on: `review` and the item's kind (`metrics`, `entities`, `joins`) from an item card, `review` alone from the Sign-off card (or when `$ARGUMENTS` was `review`/`preseed`/`rule1`), `pii` from the personal-data question; from the overview card leave both empty, and the renderer's `auto` default opens on **Review** when anything needs sign-off and on **Datasource** when the model is clean.
 
-Post the link and the `Page` card (rule 6a step 4):
+**Print the link in your reply, with when it expires, before the card** ([rule 6a step 4](../../shared/question-cards.md#6a-a-page-that-saves-its-decisions)), then the `Page` card:
 
 ```
 [Review on a page](http://127.0.0.1:<port>/<token>/). Approve, reject, hide or edit there, press
 Save decisions, then come back here and press I've saved it. Approvals are signed as
-<reviewer_email>. The link lasts 30 minutes.
+<reviewer_email>. The link works until <time> (30 minutes).
 ```
 
 ### 5b — Apply what the page saved
