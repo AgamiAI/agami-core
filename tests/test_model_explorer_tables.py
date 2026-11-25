@@ -722,3 +722,46 @@ def test_a_read_only_page_offers_no_ticks(model):
 def test_read_only_hides_the_table_change_controls():
     for control in (".row-select", ".select-bar", ".col-actions", ".card-actions"):
         assert control in CHANGE_CONTROLS
+
+
+# --- a narrow window (an app's built-in browser is about 900-1,100px wide) --------------------------
+
+
+@needs_node
+@pytest.mark.parametrize("tab", ["metrics", "joins", "review", "cross_datasource"])
+def test_every_column_has_a_floor_and_the_table_is_never_narrower_than_their_sum(model, tab):
+    out = _run_page(
+        model,
+        GRID
+        + f"""
+      activeTab = '{tab}'; reviewSubTab = 'eyes'; reviewSubTabChosen = true; renderAll();
+      const cols = {{ metrics: metricCols, joins: joinCols, review: reviewCols }}['{tab}'];
+      const t = grid();
+      console.log(JSON.stringify({{ style: t.attrs.style, wrap: t.parentNode.attrs.class,
+        floors: cols ? cols().map(c => c.width || c.min || 0) : null }}));""",
+    )
+    assert out["wrap"] == "grid-wrap"  # the box that scrolls sideways
+    floor = int(out["style"].split("min-width:")[1].split("px")[0])
+    if out["floors"] is not None:
+        assert all(f >= 64 for f in out["floors"])  # nothing left to squeeze to nothing
+        assert floor == 66 + sum(out["floors"])
+    assert floor >= 1100
+
+
+def test_narrow_layout_rules_scroll_rather_than_squeeze():
+    from test_render_model_explorer import TEMPLATE
+
+    css = TEMPLATE.read_text(encoding="utf-8")
+    rule = lambda sel: css.split(sel, 1)[1].split("}", 1)[0]  # noqa: E731
+    assert "overflow-x: auto" in rule(".grid-wrap {")
+    assert "white-space: nowrap" in rule(".more-link {")
+    assert "white-space: nowrap" in rule("table.grid td.col-status {")
+    assert "position: sticky" in rule("table.grid th.col-actions, table.grid td.col-actions {")
+    assert "flex-wrap: nowrap" in rule("table.grid td.col-actions .card-actions {")
+    # the text columns take the spare room but never fall below their floor
+    for col in (
+        "'def', label: 'Definition', min: 220",
+        "'calc', label: 'Calculation', min: 220",
+        "'why', label: \"Why it's here\", min: 240",
+    ):
+        assert col in css

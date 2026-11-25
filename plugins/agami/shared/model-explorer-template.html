@@ -618,7 +618,9 @@
        opens under its row. Long text clamps to two lines; "more" shows only where text was cut. */
     .grid-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px;
       background: var(--bg-elev); margin: 0 0 14px; }
-    table.grid { border-collapse: collapse; width: 100%; min-width: 1060px; font-size: 13px; table-layout: fixed; }
+    /* Fixed layout with a floor per column: renderGrid sets the table's min-width to the sum of the
+       columns, so a narrow window scrolls the table sideways rather than squeezing the text away. */
+    table.grid { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13px; table-layout: fixed; }
     table.grid th {
       text-align: left; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
       color: var(--muted); background: var(--bg-elev); padding: 9px 10px; border-bottom: 1px solid var(--border);
@@ -655,7 +657,7 @@
     .cell-sub { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
     .cell-empty { color: var(--muted); }
     .more-link { display: none; font: inherit; font-size: 12px; color: var(--accent); background: none;
-      border: none; padding: 0; cursor: pointer; }
+      border: none; padding: 0; cursor: pointer; white-space: nowrap; }
     .more-link.shown { display: inline; }
     .kind-tag { display: inline-block; font-size: 11.5px; font-weight: 600; padding: 1px 7px; border-radius: 4px;
       background: var(--code-bg); color: var(--fg); }
@@ -664,7 +666,16 @@
       border: 1px solid var(--info-border); border-radius: 4px; padding: 0 5px; margin-right: 5px; }
     .st-ok { color: var(--ok-fg); font-weight: 600; font-size: 12px; white-space: nowrap; }
     .st-auto { color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
-    .st-who { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px; overflow-wrap: anywhere; }
+    .st-who { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    table.grid td.col-status { white-space: nowrap; }
+    /* Actions stay in view at the right edge while the table scrolls sideways. */
+    table.grid th.col-actions, table.grid td.col-actions { position: sticky; right: 0; z-index: 1;
+      box-shadow: inset 1px 0 0 var(--border); }
+    table.grid th.col-actions { background: var(--bg-elev); }
+    table.grid tr.row:hover td.col-actions { background: var(--bg) linear-gradient(var(--row-zebra), var(--row-zebra)); }
+    table.grid td.col-actions .card-actions { flex-wrap: nowrap; white-space: nowrap; }
+    table.grid td.col-actions .moot-note { white-space: normal; }
     .st-extra { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
     /* Area filter + "Approve selected / Reject selected", in the filter row */
     .area-filter { display: inline-flex; gap: 6px; align-items: center; margin-left: 14px; }
@@ -1484,7 +1495,11 @@
       if (selectable) gridShown = drawn.slice();
       const ncols = opts.cols.length + 1;
       const wrap = el('div', { class: 'grid-wrap' });
-      const table = el('table', { class: 'grid', 'data-grid': opts.id });
+      // Every column has a floor (`width`, or `min` for a column that takes the spare room), and the
+      // table is never narrower than their sum. A hidden Actions column (read-only) takes no room.
+      const shownCols = opts.cols.filter(c => !(READ_ONLY && c.cls === 'col-actions'));
+      const floor = (selectable ? 66 : 42) + shownCols.reduce((n, c) => n + (c.width || c.min || 160), 0);
+      const table = el('table', { class: 'grid', 'data-grid': opts.id, style: 'min-width:' + floor + 'px;' });
       const thead = el('thead');
       const hr = el('tr');
       const lead = el('th', { style: 'width:' + (selectable ? 66 : 42) + 'px;' });
@@ -1582,9 +1597,9 @@
           if (r.on) d.appendChild(el('span', { class: 'cell-sub cell-clip', text: 'ON ' + r.on, title: r.on }));
           return d; } },
         { key: 'card', label: 'Cardinality', width: 108, sort: r => r.cardinality || '', cell: r => (r.cardinality || '—').replace(/_/g, ' ') },
-        { key: 'desc', label: 'Description', sort: r => r.description || '', cell: r => clipCell(r.description, r) },
+        { key: 'desc', label: 'Description', min: 240, sort: r => r.description || '', cell: r => clipCell(r.description, r) },
         { key: 'conf', label: 'Confidence', width: 104, sort: r => awaitsDecision(r) ? (CONF_ORDER[r.confidence] ?? 9) : 9, cell: confCell },
-        { key: 'status', label: 'Status', width: 170, sort: statusSort, cell: statusCell },
+        { key: 'status', label: 'Status', width: 190, cls: 'col-status', sort: statusSort, cell: statusCell },
         actionsCol(() => 'relationship'),
       ];
     }
@@ -2309,9 +2324,9 @@
           return d; } },
         { key: 'area', label: 'Area', width: 130, sort: m => m.area, cell: m => m.area || '—' },
         { key: 'unit', label: 'Unit', width: 64, sort: m => m.unit || '', cell: m => m.unit || '—' },
-        { key: 'def', label: 'Definition', sort: m => m.description || '', cell: m => clipCell(m.description, m) },
-        { key: 'calc', label: 'Calculation', sort: m => m.calculation || '', cell: m => clipCell(m.calculation, m) },
-        { key: 'status', label: 'Status', width: 170, sort: statusSort, cell: statusCell },
+        { key: 'def', label: 'Definition', min: 220, sort: m => m.description || '', cell: m => clipCell(m.description, m) },
+        { key: 'calc', label: 'Calculation', min: 220, sort: m => m.calculation || '', cell: m => clipCell(m.calculation, m) },
+        { key: 'status', label: 'Status', width: 190, cls: 'col-status', sort: statusSort, cell: statusCell },
         actionsCol(() => 'metric'),
       ];
     }
@@ -2478,9 +2493,9 @@
         { key: 'from', label: 'From', width: 260, sort: x => x.from_datasource + xdsEnd(x, 'from').text, cell: x => xdsEndCell(x, 'from') },
         { key: 'to', label: 'To', width: 240, sort: x => x.to_datasource + xdsEnd(x, 'to').text, cell: x => xdsEndCell(x, 'to') },
         { key: 'card', label: 'Cardinality', width: 108, sort: x => x.cardinality || '', cell: x => (x.cardinality || '—').replace(/_/g, ' ') },
-        { key: 'desc', label: 'Description', sort: x => x.description || '', cell: x => clipCell(x.description, x) },
+        { key: 'desc', label: 'Description', min: 240, sort: x => x.description || '', cell: x => clipCell(x.description, x) },
         { key: 'conf', label: 'Confidence', width: 104, sort: x => awaitsDecision(x) ? (CONF_ORDER[x.confidence] ?? 9) : 9, cell: confCell },
-        { key: 'status', label: 'Status', width: 180, sort: statusSort, cell: statusCell },
+        { key: 'status', label: 'Status', width: 190, cls: 'col-status', sort: statusSort, cell: statusCell },
       ];
       const sec = el('div', { class: 'schema-section' });
       renderGrid(sec, { id: 'cross_datasource', cols, items: matched, groups: null, selectable: false, card: renderXdsCard });
@@ -2879,9 +2894,9 @@
           }
           return d; } },
         { key: 'area', label: 'Area', width: 130, sort: it => it.area || '', cell: it => it.area || '—' },
-        { key: 'why', label: "Why it's here", sort: reviewWhy, cell: it => clipCell(reviewWhy(it), it) },
+        { key: 'why', label: "Why it's here", min: 240, sort: reviewWhy, cell: it => clipCell(reviewWhy(it), it) },
         { key: 'conf', label: 'Confidence', width: 104, sort: it => awaitsDecision(it) ? (CONF_ORDER[it.confidence] ?? 9) : 9, cell: confCell },
-        { key: 'status', label: 'Status', width: 150, sort: statusSort, cell: statusCell },
+        { key: 'status', label: 'Status', width: 170, cls: 'col-status', sort: statusSort, cell: statusCell },
         actionsCol(it => it._kind),
       ];
     }

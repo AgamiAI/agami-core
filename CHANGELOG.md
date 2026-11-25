@@ -38,6 +38,12 @@ below corresponds to one such version.
   shell commands. `/agami-model`'s full view and `/agami-connect`'s table picker, open questions page,
   full view and examples page each point at that rule.
 
+- **The model explorer's tables keep their text in a narrow window.** In a browser about 900 to
+  1,100 pixels wide, the Review table squeezed "Why it's here" to nothing and its "more" link wrapped
+  one letter to a line, and Metrics, Joins and Cross datasource could do the same. Every column now
+  has a minimum width, the table scrolls sideways instead of shrinking, and the Actions column stays
+  pinned at the right edge.
+
 ## [0.9.30] — 2026-11-25
 
 ### Security
