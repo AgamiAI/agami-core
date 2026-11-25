@@ -599,6 +599,20 @@ def test_the_approval_strip_says_how_much_is_approved_and_who_last_approved(mode
 
 
 @needs_node
+def test_the_header_counts_the_same_joins_as_the_joins_tab(model):
+    # A join between two subject areas is on the Joins tab and in the strip, so the header counts it too.
+    out = _run_page(
+        model,
+        """
+      const extra = { ...manifest.relationships[0], qname: 'sales~other.x', cross_area: true };
+      manifest.cross_relationships.push(extra); manifest.totals.cross_relationships = 1;
+      renderMeta(); renderAll();
+      console.log(JSON.stringify({ meta: document.getElementById('totals-meta').textContent, tab: tabCount('joins') }));""",
+    )
+    assert "2 joins" in out["meta"] and out["tab"] == 2
+
+
+@needs_node
 def test_a_read_only_page_offers_no_ticks(model):
     out = _run_page(
         model,

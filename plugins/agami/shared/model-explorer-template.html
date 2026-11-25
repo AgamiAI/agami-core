@@ -3603,7 +3603,9 @@
       // the manifest's `schemas` key holds subject areas, not database schemas
       const parts = [plural(t.schemas || 0, 'subject area'), plural(t.tables || 0, 'table'), plural(t.fields || 0, 'field')];
       if (t.metrics) parts.push(plural(t.metrics, 'metric'));
-      if (t.relationships) parts.push(plural(t.relationships, 'join'));
+      // the same set the Joins tab and the approval strip count: joins inside an area and between two
+      const joins = (t.relationships || 0) + (t.cross_relationships || 0);
+      if (joins) parts.push(plural(joins, 'join'));
       if (t.entities) parts.push(plural(t.entities, 'entity').replace('entitys', 'entities'));
       document.getElementById('totals-meta').textContent = parts.join(' · ');
       const badge = document.getElementById('model-badge');
