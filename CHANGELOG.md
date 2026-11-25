@@ -12,6 +12,23 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **The model explorer shows metrics, joins and the review queue as tables.** Metrics, Joins and
+  Review list one row per item, with sortable columns, two-line text and a ▸ that opens the item's
+  full card under its row. A new Area filter sits beside the Status filter. Rows can be ticked, and
+  "Approve selected" and "Reject selected" queue the same changes as each row's own buttons. Every
+  metric and join says who approved it and when, or that agami approved it itself. A strip under the
+  header counts what is approved. The tabs now start with Review, and the page opens on Datasource
+  when nothing is waiting for review (it used to open on Tables). The Review count is red while
+  anything waits. A read-only page still hides every control that changes something.
+
+### Added
+
+- **A Cross datasource tab in the model explorer.** It lists the organization's joins between this
+  datasource and another one, read from `organization.yaml`. They are shown but not changed from the
+  page.
+
 ## [0.9.29] — 2026-11-23
 
 ### Fixed

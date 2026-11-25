@@ -37,8 +37,17 @@
                           "cardinality", "description", "review_state", "excluded", "area" } ],
       (a stale metric / entity / join also carries "changes_since_approval":
          { "recorded", "changes": [ { "field", "before", "after", "by", "at", "text" } ], "summary" })
-      "examples":     [ { "n", "qname", "question", "sql", "tables", "source", "status", "area" } ]
+      "examples":     [ { "n", "qname", "question", "sql", "tables", "source", "status", "area" } ],
+      "cross_datasource_relationships": [ { "qname", "name", "from_datasource", "from_dataset", "from_columns",
+                          "to_datasource", "to_dataset", "to_columns", "cardinality", "description",
+                          "executable", "review_state", "confidence", "excluded", ...sign-off } ],
+                        (organization.yaml's joins that touch this datasource; shown, never changed here)
+      "approvals":    { "metrics": {"approved", "total"}, "joins": {...}, "cross_datasource": {...},
+                        "last": { "by", "date" } }
     }
+    Every metric, entity and join (and cross-datasource join) carries its sign-off:
+      "signed_off_by", "signed_off_role" ("system" = agami approved it itself), "signed_off_at" (as
+      stored), "signed_off_date" ("12 Nov 2026", or "" when missing or not a date).
     A table:
       { "name", "qname", "description", "row_count", "review_state", "excluded",
         "grain":[], "unique_keys":[[]], "caveats":[], "default_filters":[], "area", "schema",
@@ -61,7 +70,7 @@
       color: var(--fg);
       line-height: 1.5;
     }
-    .wrap { max-width: 1100px; margin: 0 auto; }
+    .wrap { max-width: 1380px; margin: 0 auto; }
 
     header.dashboard-header {
       display: flex; align-items: center; justify-content: space-between;
@@ -605,6 +614,76 @@
     }
     .modal-card .modal-actions button.primary { background: var(--accent); color: white; border-color: var(--accent); }
     .modal-card .modal-actions .modal-status { margin-left: auto; font-size: 12px; color: var(--muted); }
+    /* Spreadsheet tables (Metrics, Joins, Cross datasource, Review): one row per item, the full card
+       opens under its row. Long text clamps to two lines; "more" shows only where text was cut. */
+    .grid-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px;
+      background: var(--bg-elev); margin: 0 0 14px; }
+    table.grid { border-collapse: collapse; width: 100%; min-width: 1060px; font-size: 13px; table-layout: fixed; }
+    table.grid th {
+      text-align: left; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--muted); background: var(--bg-elev); padding: 9px 10px; border-bottom: 1px solid var(--border);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    table.grid th.sortable { cursor: pointer; user-select: none; }
+    table.grid th.sortable:hover, table.grid th.sorted { color: var(--fg); }
+    table.grid td { padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top;
+      word-break: break-word; background: var(--bg); }
+    table.grid tr.row:hover td { background: var(--row-zebra); }
+    table.grid tr.row.open td, table.grid tr.detail-row > td { background: var(--info-bg); }
+    table.grid tr.row.excluded td { opacity: 0.6; }
+    table.grid tr.row.queued-exclude td { background: var(--bad-bg); }
+    table.grid tr.row.queued-include td { background: var(--ok-bg); }
+    table.grid tr.row.queued-approve td:first-child { box-shadow: inset 3px 0 0 var(--ok-fg); }
+    table.grid tr.group-row > td { background: var(--bg-elev); padding: 2px 10px; }
+    table.grid tr.group-row .kind-subhead { margin: 6px 0 4px; border-bottom: none; padding-bottom: 0; }
+    table.grid tr.detail-row > td { padding: 4px 14px 14px 44px; }
+    table.grid tr.detail-row .table-card { margin: 0; }
+    table.grid .card-actions { padding: 0; gap: 6px; }
+    table.grid .card-actions button { padding: 4px 9px; }
+    table.grid .card-actions .moot-note { font-size: 11.5px; }
+    .row-exp { font: inherit; font-size: 14px; line-height: 1; width: 24px; height: 24px; padding: 0; margin-right: 6px;
+      border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--muted);
+      cursor: pointer; vertical-align: middle; }
+    .row-exp:hover, .row-exp.open { color: var(--accent); border-color: var(--accent); }
+    .row-select { vertical-align: middle; cursor: pointer; margin: 0; }
+    .cell-clip { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .cell-code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; font-weight: 500; }
+    .cell-name { font-weight: 600; }
+    .cell-sub { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .cell-empty { color: var(--muted); }
+    .more-link { display: none; font: inherit; font-size: 12px; color: var(--accent); background: none;
+      border: none; padding: 0; cursor: pointer; }
+    .more-link.shown { display: inline; }
+    .kind-tag { display: inline-block; font-size: 11.5px; font-weight: 600; padding: 1px 7px; border-radius: 4px;
+      background: var(--code-bg); color: var(--fg); }
+    .ds-tag { display: inline-block; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; color: var(--accent); background: var(--info-bg);
+      border: 1px solid var(--info-border); border-radius: 4px; padding: 0 5px; margin-right: 5px; }
+    .st-ok { color: var(--ok-fg); font-weight: 600; font-size: 12px; white-space: nowrap; }
+    .st-auto { color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
+    .st-who { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px; overflow-wrap: anywhere; }
+    .st-extra { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+    /* Area filter + "Approve selected / Reject selected", in the filter row */
+    .area-filter { display: inline-flex; gap: 6px; align-items: center; margin-left: 14px; }
+    .area-filter select { font: inherit; font-size: 12px; padding: 4px 8px; border-radius: 999px;
+      border: 1px solid var(--border); background: var(--bg-elev); color: var(--fg); cursor: pointer; }
+    .area-filter select.active { border-color: var(--accent); color: var(--accent); }
+    .select-bar { display: inline-flex; gap: 8px; align-items: center; margin-left: auto; font-size: 13px; color: var(--muted); }
+    .select-bar button { font: inherit; font-size: 12px; font-weight: 500; padding: 4px 10px; border-radius: 6px;
+      cursor: pointer; background: var(--bg); border: 1px solid var(--border); color: var(--fg); }
+    .select-bar button.sel-approve { border-color: var(--ok-fg); color: var(--ok-fg); }
+    .select-bar button.sel-reject { border-color: var(--bad-border); color: var(--bad-fg); }
+    .select-bar button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .kind-bar-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: -8px 0 12px; }
+    .kind-bar-row .subtab-bar.kind-bar { margin: 0; }
+    /* Review's count: red while anything waits, grey at 0 — even on the active tab */
+    .tab-bar button .tab-count.alert, .tab-bar button.active .tab-count.alert { background: #dc2626; color: #fff; }
+    /* Approval strip under the header */
+    .approval-strip { display: flex; gap: 6px 14px; flex-wrap: wrap; align-items: center;
+      font-size: 13px; color: var(--muted); margin: -8px 0 14px; }
+    .approval-strip .ap-part { color: var(--fg); }
+    .approval-strip .ap-part .ap-tick { color: var(--ok-fg); font-weight: 700; }
+    .approval-strip .ap-sep { color: var(--muted); }
   </style>
 </head>
 <body>
@@ -624,6 +703,7 @@
       <span>· <span id="totals-meta"></span></span>
       <span class="model-badge" id="model-badge">✓ Model valid</span>
     </div>
+    <div class="approval-strip" id="approval-strip"></div>
 
     <div class="toolbar">
       <div class="search-row">
@@ -640,6 +720,8 @@
         <button type="button" data-filter="active">Active</button>
         <button type="button" data-filter="excluded">Excluded</button>
         <button type="button" data-filter="unreviewed">Unreviewed</button>
+        <span class="area-filter" id="area-filter"><span class="filter-label">Area</span><select id="area-select" aria-label="Area"></select></span>
+        <span class="select-bar" id="select-bar"></span>
       </div>
     </div>
 
@@ -720,7 +802,7 @@
     let addMetricOpen = false;
     let addExampleOpen = false;
     let searchQ = '';
-    let activeTab = (manifest.initial_tab || 'tables');  // validated against TABS once it's defined below
+    let activeTab = (manifest.initial_tab || 'datasource');  // validated against TABS once it's defined below
     let activeFilter = 'all';
     let reviewSubTab = 'eyes';   // Review tab sub-view: eyes | looks | approved | rejected
     let reviewSubTabChosen = false;   // set once the person picks a sub-tab; until then it follows the items
@@ -772,20 +854,32 @@
       proposed:  'Proposed: an AI suggestion (like a metric definition) that no one has confirmed yet. Read it carefully before you trust it.',
     };
 
+    // Review leads: it is where decisions wait. Queued stays last — it is the outbox, not a part of the model.
     const TABS = [
-      { id: 'datasource', label: 'Datasource' },
       { id: 'review',       label: 'Review' },
+      { id: 'datasource',   label: 'Datasource' },
       { id: 'tables',       label: 'Tables' },
       { id: 'pii',          label: 'PII' },
       { id: 'metrics',      label: 'Metrics' },
       { id: 'entities',     label: 'Entities' },
       { id: 'joins',        label: 'Joins' },
+      { id: 'cross_datasource', label: 'Cross datasource' },
       { id: 'examples',     label: 'Examples' },
       { id: 'queued',       label: 'Queued' },
     ];
-    if (!TABS.some(t => t.id === activeTab)) activeTab = 'tables';  // ignore a retired initial tab (e.g. 'areas')
+    if (!TABS.some(t => t.id === activeTab)) activeTab = 'datasource';  // ignore a retired initial tab (e.g. 'areas')
     // Tabs that show entity cards filterable by status (search + All/Active/Excluded/Unreviewed)
-    const FILTERABLE_TABS = new Set(['tables', 'metrics', 'entities', 'joins', 'examples']);
+    const FILTERABLE_TABS = new Set(['tables', 'metrics', 'entities', 'joins', 'cross_datasource', 'examples']);
+    // Tabs whose rows can be narrowed to one subject area (the Area select beside Status)
+    const AREA_TABS = new Set(['metrics', 'joins']);
+    const XDS = manifest.cross_datasource_relationships || [];
+
+    // ---- Spreadsheet-table state (Metrics, Joins, Cross datasource, Review) ----
+    const rowOpen = new Set();   // qnames whose full card is open under the row
+    const selected = new Set();  // qnames ticked for "Approve selected" / "Reject selected"
+    const gridSort = {};         // grid id -> {col, dir}; none = the tab's own grouping
+    let areaFilter = 'all';
+    let gridShown = [];          // the items the last-drawn selectable grid holds (what select-all and the bulk buttons act on)
 
     // ---- DOM helper ----
     function el(tag, attrs = {}, ...children) {
@@ -1202,7 +1296,8 @@
     }
     // Unified action row for metric / entity / join cards: Approve · Reject · Edit,
     // adapting to the item's effective review state.
-    function flatCardActions(kind, item) {
+    // `inRow`: the Actions cell of a table row, where the Status cell beside it already says who approved.
+    function flatCardActions(kind, item, inRow) {
       const a = el('div', { class: 'card-actions' });
       const moot = mootReason(item);
       if (effExcluded(item)) {
@@ -1213,9 +1308,11 @@
         a.appendChild(excludeToggleBtn(kind, item));    // can still Reject it outright
       } else {
         if (effReviewState(item) === 'approved') {
+          if (!inRow) {
           const who = item.signed_off_by ? ' · ' + item.signed_off_by : '';
           a.appendChild(el('span', { class: 'mini-chip', style: 'align-self:center;color:var(--ok-fg);',
             text: '✓ approved' + who }));
+          }
         } else {
           a.appendChild(approveBtn(kind, item));
         }
@@ -1223,6 +1320,234 @@
       }
       a.appendChild(editToggleBtn(item));
       return a;
+    }
+
+
+    // =====================================================================
+    // Spreadsheet tables — Metrics, Joins, Cross datasource and Review show one row per item.
+    // The ▸ (or "more" on cut-off text) opens the item's full card under its row, so nothing a
+    // card shows is lost; the row's Actions cell holds the same Approve / Reject / Edit buttons.
+    // =====================================================================
+    function rowIsOpen(q) {
+      return rowOpen.has(q) || editOpen.has(q) || (inlineEditKey !== null && inlineEditKey.startsWith(q + '|'));
+    }
+    function toggleRow(q) {
+      if (rowIsOpen(q)) {
+        rowOpen.delete(q); editOpen.delete(q);
+        if (inlineEditKey !== null && inlineEditKey.startsWith(q + '|')) inlineEditKey = null;
+      } else rowOpen.add(q);
+      renderBody();
+    }
+    function cycleSort(gid, key) {
+      const s = gridSort[gid];
+      if (!s || s.col !== key) gridSort[gid] = { col: key, dir: 'asc' };
+      else if (s.dir === 'asc') s.dir = 'desc';
+      else delete gridSort[gid];   // a third click goes back to the tab's own order
+      renderBody();
+    }
+    function sortItems(gid, items, cols) {
+      const s = gridSort[gid];
+      const col = s && cols.find(c => c.key === s.col);
+      if (!col || !col.sort) return null;
+      const val = it => { const v = col.sort(it); return v == null ? '' : v; };
+      return items.slice().sort((a, b) => {
+        const va = val(a), vb = val(b);
+        const r = (typeof va === 'number' && typeof vb === 'number') ? va - vb
+          : String(va).localeCompare(String(vb), undefined, { numeric: true, sensitivity: 'base' });
+        return s.dir === 'desc' ? -r : r;
+      });
+    }
+    // Text clamped to two lines, with a "more" that opens the row's card (shown only once the text
+    // is found to be cut, after layout — see markClipped).
+    function clipCell(text, qname, cls) {
+      const wrap = el('div');
+      if (!(text || '').trim()) { wrap.appendChild(el('span', { class: 'cell-empty', text: '—' })); return wrap; }
+      const c = el('div', { class: 'cell-clip' + (cls ? ' ' + cls : '') });
+      c.appendChild(highlight(text, searchQ));
+      wrap.appendChild(c);
+      if (!rowIsOpen(qname)) wrap.appendChild(el('button', { type: 'button', class: 'more-link',
+        onclick: (ev) => { ev.stopPropagation(); rowOpen.add(qname); renderBody(); } }, 'more'));
+      return wrap;
+    }
+    function markClipped() {
+      if (typeof document.querySelectorAll !== 'function') return;
+      document.querySelectorAll('#tab-content .cell-clip').forEach(c => {
+        const more = c.nextElementSibling;
+        if (more && more.classList.contains('more-link') && c.scrollHeight > c.clientHeight + 1) more.classList.add('shown');
+      });
+    }
+    function confCell(it) {
+      if (!it.confidence) return el('span', { class: 'cell-empty', text: '—' });
+      return el('span', { class: 'conf-chip conf-' + it.confidence + ' tip', text: it.confidence,
+        'data-tip': CONF_MEANING[it.confidence] || ('confidence: ' + it.confidence) });
+    }
+    // The approval tag: "✓ Approved" with who and when; a sign-off agami made itself (a declared key)
+    // reads "Approved automatically"; anything else keeps its state badge. Queued actions and edits
+    // waiting to be sent show under it, so the row says what will change.
+    function statusCell(it) {
+      const d = el('div');
+      if (it.excluded) d.appendChild(stateBadge('rejected', true));
+      else if (it.review_state === 'approved') {
+        const auto = it.signed_off_role === 'system';
+        const role = it.signed_off_role && !auto ? ' (' + it.signed_off_role + ')' : '';
+        d.appendChild(el('span', { class: auto ? 'st-auto' : 'st-ok', text: auto ? 'Approved automatically' : '✓ Approved',
+          title: auto ? 'agami signed this off itself: the database declares it.' : 'Signed off' + (it.signed_off_by ? ' by ' + it.signed_off_by + role : '') }));
+        const who = auto ? (it.signed_off_date || '') : [it.signed_off_by, it.signed_off_date].filter(Boolean).join(' · ');
+        if (who) d.appendChild(el('span', { class: 'st-who', text: who, title: who + role }));
+      } else {
+        const b = stateBadge(it.review_state || 'unreviewed', false);
+        if (b) d.appendChild(b);
+      }
+      const extra = el('div', { class: 'st-extra' });
+      if (it.rule !== undefined && mootReason(it)) extra.appendChild(el('span', { class: 'table-state-badge moot-badge', text: 'unused', title: "Won't be used — " + mootReason(it) }));
+      if (it.rule === 1 && ['unreviewed', 'stale'].includes(effReviewState(it)) && !mootReason(it)) extra.appendChild(el('span', { class: 'table-state-badge', style: 'background:var(--info-bg);color:var(--accent);border-color:var(--info-border);', text: 'needs sign-off' }));
+      const q = queuedAction(it.qname);
+      if (q) extra.appendChild(el('span', { class: 'mini-chip', text: { approve: '✓ approve queued', exclude: '✗ reject queued', include: '↻ include queued' }[q] || q + ' queued' }));
+      if (edits[it.qname]) extra.appendChild(el('span', { class: 'mini-chip', text: '✎ edited' }));
+      if (extra.children.length) d.appendChild(extra);
+      return d;
+    }
+    function rowStateClass(it) {
+      const q = queuedAction(it.qname);
+      return (effExcluded(it) ? ' excluded' : '') + (q ? ' queued-' + q : '');
+    }
+    // What a tick can act on: anything still in the model. "Approve selected" approves the ones a
+    // row's Approve would; "Reject selected" rejects the ones a row's Reject would.
+    function canSelect(it) { return !READ_ONLY && it._kind && !effExcluded(it); }
+    function bulkSelected(op) {
+      gridShown.filter(it => selected.has(it.qname)).forEach(it => {
+        if (op === 'approve' ? !isApprovable(it) : !canSelect(it)) return;
+        // the same op the row's own button queues (toggleApprove / toggleOp), never a toggle-off
+        ops[it.qname] = { op, kind: it._kind, area: it.area, name: relName(it) };
+      });
+      selected.clear();
+      renderAll();
+    }
+    function selectBar() {
+      const picked = gridShown.filter(it => selected.has(it.qname));
+      const nAp = picked.filter(isApprovable).length, nRj = picked.filter(canSelect).length;
+      const bar = el('span', { class: 'select-bar' });
+      bar.appendChild(el('span', { text: picked.length + ' selected' }));
+      bar.appendChild(el('button', { type: 'button', class: 'sel-approve', disabled: nAp ? false : 'disabled',
+        onclick: () => bulkSelected('approve') }, 'Approve selected' + (nAp ? ' (' + nAp + ')' : '')));
+      bar.appendChild(el('button', { type: 'button', class: 'sel-reject', disabled: nRj ? false : 'disabled',
+        onclick: () => bulkSelected('exclude') }, 'Reject selected' + (nRj ? ' (' + nRj + ')' : '')));
+      return bar;
+    }
+    // The toolbar slot beside the Status filter holds the select bar on Metrics and Joins.
+    function placeSelectBar(show) {
+      const slot = document.getElementById('select-bar');
+      if (!slot) return;
+      slot.innerHTML = '';
+      if (show && !READ_ONLY) slot.appendChild(selectBar());
+    }
+    // opts: { id, cols:[{key,label,width,sort,cell}], items, groups:[{head, items, closed}] | null,
+    //         selectable, card(it) }. Sorting a column shows the rows flat; with no sort, the groups.
+    function renderGrid(root, opts) {
+      const selectable = !!opts.selectable && !READ_ONLY;
+      if (selectable) gridShown = opts.items.slice();
+      const ncols = opts.cols.length + 1;
+      const wrap = el('div', { class: 'grid-wrap' });
+      const table = el('table', { class: 'grid', 'data-grid': opts.id });
+      const thead = el('thead');
+      const hr = el('tr');
+      const lead = el('th', { style: 'width:' + (selectable ? 66 : 42) + 'px;' });
+      if (selectable) {
+        const pickable = opts.items.filter(canSelect);
+        const all = pickable.length > 0 && pickable.every(it => selected.has(it.qname));
+        lead.appendChild(el('input', { type: 'checkbox', class: 'row-select', 'aria-label': 'Select every row shown',
+          checked: all ? 'checked' : false, onclick: () => {
+            if (all) pickable.forEach(it => selected.delete(it.qname)); else pickable.forEach(it => selected.add(it.qname));
+            renderBody(); } }));
+      }
+      hr.appendChild(lead);
+      const s = gridSort[opts.id];
+      opts.cols.forEach(c => {
+        const sorted = s && s.col === c.key;
+        const th = el('th', { class: (c.sort ? 'sortable' : '') + (sorted ? ' sorted' : '') + (c.cls ? ' ' + c.cls : ''),
+          style: c.width ? 'width:' + c.width + 'px;' : false, title: c.sort ? 'Sort by ' + c.label.toLowerCase() : false,
+          onclick: c.sort ? () => cycleSort(opts.id, c.key) : false }, c.label + (sorted ? (s.dir === 'asc' ? ' ▲' : ' ▼') : ''));
+        hr.appendChild(th);
+      });
+      thead.appendChild(hr);
+      table.appendChild(thead);
+      const tbody = el('tbody');
+      const emit = it => {
+        const open = rowIsOpen(it.qname);
+        const tr = el('tr', { class: 'row' + rowStateClass(it) + (open ? ' open' : ''), 'data-qname': it.qname });
+        const td0 = el('td');
+        td0.appendChild(el('button', { type: 'button', class: 'row-exp' + (open ? ' open' : ''),
+          'aria-label': open ? 'Close the full card' : 'Open the full card', 'aria-expanded': open ? 'true' : 'false',
+          onclick: (ev) => { ev.stopPropagation(); toggleRow(it.qname); } }, open ? '▾' : '▸'));
+        if (selectable && canSelect(it)) {
+          td0.appendChild(el('input', { type: 'checkbox', class: 'row-select', 'aria-label': 'Select this row',
+            checked: selected.has(it.qname) ? 'checked' : false,
+            onclick: () => { if (selected.has(it.qname)) selected.delete(it.qname); else selected.add(it.qname); renderBody(); } }));
+        }
+        tr.appendChild(td0);
+        opts.cols.forEach(c => {
+          const td = el('td', { class: c.cls || false });
+          const v = c.cell(it);
+          if (v !== null && v !== undefined) td.appendChild(typeof v === 'string' ? document.createTextNode(v) : v);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+        if (open) {
+          const dr = el('tr', { class: 'detail-row' });
+          const td = el('td', { colspan: String(ncols) });
+          td.appendChild(opts.card(it));
+          dr.appendChild(td);
+          tbody.appendChild(dr);
+        }
+      };
+      const flat = sortItems(opts.id, opts.items, opts.cols);
+      if (flat) flat.forEach(emit);
+      else if (opts.groups) opts.groups.forEach(g => {
+        const gr = el('tr', { class: 'group-row' });
+        const td = el('td', { colspan: String(ncols) });
+        td.appendChild(g.head);
+        gr.appendChild(td);
+        tbody.appendChild(gr);
+        if (!g.closed) g.items.forEach(emit);
+      });
+      else opts.items.forEach(emit);
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      root.appendChild(wrap);
+    }
+    function passesArea(it) {
+      return areaFilter === 'all' || it.area === areaFilter || it.to_subject_area === areaFilter;
+    }
+    // Column sets, shared by the tab and by Review where they overlap.
+    const STATUS_ORDER = { unreviewed: 0, stale: 1, approved: 2, rejected: 3 };
+    function statusSort(it) { return (it.excluded ? 3 : (STATUS_ORDER[it.review_state] ?? 0)) * 1e13 - (Date.parse(it.signed_off_at || '') || 0) / 1e3; }
+    const CONF_ORDER = { proposed: 0, inferred: 1, confirmed: 2 };
+    function actionsCol(kindOf) {
+      return { key: 'actions', label: 'Actions', width: 214, cls: 'col-actions', cell: it => flatCardActions(kindOf(it), it, true) };
+    }
+    function joinEnd(r, side) {
+      const sch = r.cross_schema && r[side + '_schema'] ? r[side + '_schema'] + '.' : '';
+      const col = r[side + '_column'];
+      return sch + r[side + '_table'] + (col ? '.' + col : '');
+    }
+    function joinLabel(r) { return r.from_column ? joinEnd(r, 'from') + ' → ' + joinEnd(r, 'to') : joinEnd(r, 'from') + ' → ' + joinEnd(r, 'to') + (r.on ? ' ON ' + r.on : ''); }
+    function joinCols() {
+      return [
+        { key: 'from', label: 'From', width: 220, sort: r => joinEnd(r, 'from'), cell: r => {
+          const d = el('div', { class: 'cell-code' }); d.appendChild(highlight(joinEnd(r, 'from'), searchQ));
+          if (r.cross_schema) d.appendChild(el('span', { class: 'cell-sub' }, el('span', { class: 'table-state-badge xschema-badge', text: 'cross-schema',
+            title: 'Joins across schemas: ' + (r.from_schema || '?') + ' → ' + (r.to_schema || '?') + ' — confirm this link belongs in your model' })));
+          return d; } },
+        { key: 'to', label: 'To', width: 220, sort: r => joinEnd(r, 'to'), cell: r => {
+          const d = el('div', { class: 'cell-code' }); d.appendChild(highlight(joinEnd(r, 'to'), searchQ));
+          if (r.on) d.appendChild(el('span', { class: 'cell-sub cell-clip', text: 'ON ' + r.on, title: r.on }));
+          return d; } },
+        { key: 'card', label: 'Cardinality', width: 108, sort: r => r.cardinality || '', cell: r => (r.cardinality || '—').replace(/_/g, ' ') },
+        { key: 'desc', label: 'Description', sort: r => r.description || '', cell: r => clipCell(r.description, r.qname) },
+        { key: 'conf', label: 'Confidence', width: 104, sort: r => CONF_ORDER[r.confidence] ?? 9, cell: confCell },
+        { key: 'status', label: 'Status', width: 170, sort: statusSort, cell: statusCell },
+        actionsCol(() => 'relationship'),
+      ];
     }
 
     // =====================================================================
@@ -1775,18 +2100,25 @@
     }
 
     // A stale item was approved, then edited: show what changed since that approval (#537).
-    function sinceApprovalBlock(item, body) {
+    // The card and the Review table's "Why it's here" say it the same way.
+    function sinceApproval(item) {
       const since = item.changes_since_approval;
-      if (item.review_state !== 'stale' || !since) return;
+      if (item.review_state !== 'stale' || !since) return null;
       const who = item.signed_off_by ? ' (approved by ' + item.signed_off_by + ')' : '';
-      body.appendChild(labelLine('Changed since it was approved' + who));
       const lines = since.recorded && (since.changes || []).length
         ? since.changes.map(c => c.text + (c.by ? ' — ' + c.by : '') + (c.at ? ', ' + c.at : ''))
         : [since.summary || 'changes not recorded'];
-      lines.forEach(t => body.appendChild(descBlock(t)));
+      return { head: 'Changed since it was approved' + who, lines };
+    }
+    function sinceApprovalBlock(item, body) {
+      const s = sinceApproval(item);
+      if (!s) return;
+      body.appendChild(labelLine(s.head));
+      s.lines.forEach(t => body.appendChild(descBlock(t)));
     }
 
-    function renderMetricCard(m) {
+    // `inGrid`: drawn under its table row, whose Actions cell carries Approve / Reject / Edit.
+    function renderMetricCard(m, inGrid) {
       const eff = effExcluded(m);
       const card = el('div', { class: 'table-card' + (eff ? ' excluded' : '') + (queuedAction(m.qname) ? ' queued-' + queuedAction(m.qname) : '') });
       card.appendChild(flatCardHeader(m.name, m, eff));
@@ -1815,7 +2147,7 @@
       if ((m.source_tables || []).length) { body.appendChild(labelLine('Source tables')); body.appendChild(descBlock(m.source_tables.join(', '))); }
       if ((m.other_names || []).length) { body.appendChild(labelLine('Also called')); body.appendChild(descBlock(m.other_names.join(', '))); }
       if ((m.caveats || []).length) body.appendChild(el('div', { class: 'field-hint', text: '⚠ ' + m.caveats.join(' · ') }));
-      body.appendChild(flatCardActions('metric', m));
+      if (!inGrid) body.appendChild(flatCardActions('metric', m));
       if (editOpen.has(m.qname)) body.appendChild(renderEditForm(m, 'metric', [
         { field: 'unit', label: 'Unit', current: m.unit, rows: 1,
           hint: 'What the result is measured in, so answers format nicely — a currency like USD/INR, or "percent" / "days". For a SUM/AVG, agami inherits the source column’s unit automatically; set it here only if it’s missing or wrong. Leave blank for a plain count.' },
@@ -1829,7 +2161,7 @@
       return card;
     }
 
-    function renderEntityCard(e) {
+    function renderEntityCard(e, inGrid) {
       const eff = effExcluded(e);
       const card = el('div', { class: 'table-card' + (eff ? ' excluded' : '') + (queuedAction(e.qname) ? ' queued-' + queuedAction(e.qname) : '') });
       card.appendChild(flatCardHeader(e.name + (e.plural ? ' / ' + e.plural : ''), e, eff));
@@ -1841,7 +2173,7 @@
       body.appendChild(labelLine('Description (click to edit)'));
       body.appendChild(inlineBlock({ qname: e.qname, area: e.area, name: e.name, kind: 'entity',
         field: 'description', original: e.description, placeholder: '(click to add a description)' }));
-      body.appendChild(flatCardActions('entity', e));
+      if (!inGrid) body.appendChild(flatCardActions('entity', e));
       if (editOpen.has(e.qname)) body.appendChild(renderEditForm(e, 'entity', [
         { field: 'maps_to', label: 'Maps to', type: 'maps', current: e.maps_to, rows: 3 },
         { field: 'other_names', label: 'Also called', type: 'list', current: e.other_names, rows: 2 },
@@ -1853,7 +2185,7 @@
       return card;
     }
 
-    function renderRelCard(r) {
+    function renderRelCard(r, inGrid) {
       const eff = effExcluded(r);
       const card = el('div', { class: 'table-card' + (eff ? ' excluded' : '') + (queuedAction(r.qname) ? ' queued-' + queuedAction(r.qname) : '') });
       // Schema-qualify each side when the join crosses schemas, so the label itself shows it.
@@ -1868,7 +2200,7 @@
       body.appendChild(labelLine('Description (click to edit)'));
       body.appendChild(inlineBlock({ qname: r.qname, area: r.area, name: relName(r), kind: 'relationship',
         field: 'description', original: r.description, placeholder: '(click to add a description)' }));
-      body.appendChild(flatCardActions('relationship', r));
+      if (!inGrid) body.appendChild(flatCardActions('relationship', r));
       if (editOpen.has(r.qname)) body.appendChild(renderEditForm(r, 'relationship', [
         { field: 'relationship', label: 'Cardinality', type: 'select', options: ['many_to_one', 'one_to_many', 'one_to_one'], current: r.cardinality },
         { field: 'from_column', label: 'From column', current: r.from_column, rows: 1 },
@@ -1921,21 +2253,35 @@
       root.appendChild(sec);
     }
 
-    // Metrics grouped by source table, COLLAPSED by default — so 200 proposed measures read as
-    // "incident · 9 [✓ Approve 9]", not a flat wall. Expand a group to scrutinize; bulk-approve a
-    // whole table's measures at once; or approve every proposed metric in one click. This is the
-    // "comprehensive but not overwhelming" review for the suggest-metrics output.
-    let metricGroupsOpen = new Set();
+    // Metrics as a table, grouped under their source table with each group's own "✓ Approve N /
+    // ✕ Reject N", plus approve-all / reject-all over everything shown. A group row folds its metrics
+    // away; sorting a column lists them flat. Search, the Status and Area filters narrow the rows.
+    const metricGroupsClosed = new Set();
     // Group a metric under its table: prefer the explicit `primary_table` anchor, fall back to
     // the first source table (legacy models carry no anchor).
     function metricGroupKey(m) { return (m.area || '?') + '.' + (m.primary_table || (m.source_tables || [])[0] || '?'); }
+    function metricCols() {
+      return [
+        { key: 'name', label: 'Metric', width: 210, sort: m => m.name, cell: m => {
+          const d = el('div'); d.appendChild(el('span', { class: 'cell-name' }, highlight(m.name, searchQ)));
+          if ((m.other_names || []).length) d.appendChild(el('span', { class: 'cell-sub', text: 'also: ' + m.other_names.join(', ') }));
+          return d; } },
+        { key: 'area', label: 'Area', width: 130, sort: m => m.area, cell: m => m.area || '—' },
+        { key: 'unit', label: 'Unit', width: 64, sort: m => m.unit || '', cell: m => m.unit || '—' },
+        { key: 'def', label: 'Definition', sort: m => m.description || '', cell: m => clipCell(m.description, m.qname) },
+        { key: 'calc', label: 'Calculation', sort: m => m.calculation || '', cell: m => clipCell(m.calculation, m.qname) },
+        { key: 'status', label: 'Status', width: 170, sort: statusSort, cell: statusCell },
+        actionsCol(() => 'metric'),
+      ];
+    }
     function renderMetricsGrouped(root) {
       // `_kind` as reviewAll stamps it, so a bulk op from this tab names its kind.
       const all = (manifest.metrics || []).filter(m =>
         (!searchQ || `${m.name} ${m.calculation} ${m.description} ${(m.other_names || []).join(' ')} ${m.area}`.toLowerCase().includes(searchQ))
-        && passesFilter(m, 'metric')).map(m => ({ ...m, _kind: 'metric' }));
+        && passesFilter(m, 'metric') && passesArea(m)).map(m => ({ ...m, _kind: 'metric' }));
       setSearchCounts(`${all.length} of ${(manifest.metrics || []).length} metric${(manifest.metrics || []).length === 1 ? '' : 's'} shown`);
       if (!all.length) {
+        gridShown = [];
         root.appendChild(el('div', { class: 'empty-state', text: (manifest.metrics || []).length ? 'No metrics match.' : 'No metrics defined yet.' }));
         return;
       }
@@ -1952,20 +2298,21 @@
           onclick: () => bulkReject(all) }, `✕ Reject all ${allRejectable.length} proposed`));
         sec.appendChild(bar);
       }
-      order.forEach(k => {
+      const groups = order.map(k => {
         const items = byKey[k];
-        const open = metricGroupsOpen.has(k) || !!searchQ;   // search expands everything
-        const head = kindSubhead(k, items, true);            // per-table bulk approve
+        const closed = metricGroupsClosed.has(k) && !searchQ;   // search opens everything
+        const head = kindSubhead(k, items, true);              // per-table bulk approve
         head.style.cursor = 'pointer';
-        head.insertBefore(el('span', { class: 'group-caret', text: open ? '▾ ' : '▸ ' }), head.firstChild);
+        head.insertBefore(el('span', { class: 'group-caret', text: closed ? '▸ ' : '▾ ' }), head.firstChild);
         head.addEventListener('click', (ev) => {
-          if (ev.target.closest('button')) return;           // approve click shouldn't toggle
-          if (metricGroupsOpen.has(k)) metricGroupsOpen.delete(k); else metricGroupsOpen.add(k);
+          if (ev.target.closest && ev.target.closest('button')) return;   // approve click shouldn't fold
+          if (metricGroupsClosed.has(k)) metricGroupsClosed.delete(k); else metricGroupsClosed.add(k);
           renderBody();
         });
-        sec.appendChild(head);
-        if (open) items.forEach(m => sec.appendChild(renderMetricCard(m)));
+        return { head, items, closed };
       });
+      renderGrid(sec, { id: 'metrics', cols: metricCols(), items: all, groups, selectable: true,
+                        card: m => renderMetricCard(m, true) });
       root.appendChild(sec);
     }
 
@@ -1995,7 +2342,8 @@
     function renderJoinsTab(root) {
       const all = [...(manifest.relationships || []), ...(manifest.cross_relationships || [])];
       const hay = r => `${relName(r)} ${r.cardinality} ${r.description} ${r.area || ''} ${r.from_schema || ''} ${r.to_schema || ''}`;
-      const matched = all.filter(it => (!searchQ || hay(it).toLowerCase().includes(searchQ)) && passesFilter(it, 'relationship'));
+      const matched = all.filter(it => (!searchQ || hay(it).toLowerCase().includes(searchQ)) && passesFilter(it, 'relationship') && passesArea(it))
+        .map(r => ({ ...r, _kind: 'relationship' }));
       const inSchema = matched.filter(r => !r.cross_schema);
       const crossSchema = matched.filter(r => r.cross_schema);
       // keep the pill selection valid for the current (search/status-filtered) set
@@ -2006,22 +2354,95 @@
       const shown = joinTypeFilter === 'in' ? inSchema : joinTypeFilter === 'cross' ? crossSchema : matched;
       setSearchCounts(`${shown.length} of ${all.length} join${all.length === 1 ? '' : 's'} shown`);
       if (!shown.length) {
+        gridShown = [];
         root.appendChild(el('div', { class: 'empty-state',
           text: all.length === 0 ? 'No joins defined yet.' : 'No joins match the current search / filter.' }));
         return;
       }
       const sec = el('div', { class: 'schema-section' });
-      // When showing "All" and both kinds exist, keep the labelled sections; a focused pill
-      // (In-schema / Cross-schema) renders a single flat list of just that kind.
-      if (joinTypeFilter === 'all' && crossSchema.length) {
-        [['In-schema joins', inSchema], ['Cross-schema joins', crossSchema]].forEach(([label, items]) => {
-          if (!items.length) return;
-          sec.appendChild(kindSubhead(label, items, false));
-          items.forEach(r => sec.appendChild(renderRelCard(r)));
-        });
-      } else {
-        shown.forEach(r => sec.appendChild(renderRelCard(r)));
+      // When showing "All" and both kinds exist, keep the labelled sections (as group rows); a focused
+      // pill (In-schema / Cross-schema) lists just that kind.
+      const groups = (joinTypeFilter === 'all' && crossSchema.length)
+        ? [['In-schema joins', inSchema], ['Cross-schema joins', crossSchema]].filter(([, items]) => items.length)
+            .map(([label, items]) => ({ head: kindSubhead(label, items, false), items }))
+        : null;
+      const items = groups ? groups.flatMap(g => g.items) : shown;
+      renderGrid(sec, { id: 'joins', cols: joinCols(), items, groups, selectable: true, card: r => renderRelCard(r, true) });
+      root.appendChild(sec);
+    }
+
+    // =====================================================================
+    // TAB: Cross datasource — the organization's joins between this datasource and another
+    // (organization.yaml). Shown, not changed here: they belong to the whole organization, and the
+    // page's changes are applied to this datasource's model only.
+    // =====================================================================
+    function xdsEnd(x, side) {
+      const ds = x[side + '_dataset'] || '';
+      const table = ds.includes('.') ? ds.slice(ds.lastIndexOf('.') + 1) : ds;
+      return { ds: x[side + '_datasource'] || '', text: table + '.' + (x[side + '_columns'] || []).join(', ') };
+    }
+    function xdsEndCell(x, side) {
+      const e = xdsEnd(x, side);
+      const d = el('div', { class: 'cell-code', title: x[side + '_datasource'] + ': ' + x[side + '_dataset'] + ' (' + (x[side + '_columns'] || []).join(', ') + ')' });
+      d.appendChild(el('span', { class: 'ds-tag', text: e.ds.toUpperCase() }));
+      d.appendChild(highlight(e.text, searchQ));
+      return d;
+    }
+    const EXECUTABLE_MEANING = {
+      split: 'Each datasource is asked its own question and the answers are combined; rows are never joined across the two databases.',
+      informational: 'Recorded so the link is known; the assistant does not use it to combine answers.',
+    };
+    function renderXdsCard(x) {
+      const card = el('div', { class: 'table-card' + (x.excluded ? ' excluded' : '') });
+      const header = el('div', { class: 'table-header static' });
+      const nameEl = el('div', { class: 'table-name' });
+      nameEl.appendChild(highlight(x.from_datasource + ': ' + xdsEnd(x, 'from').text + ' → ' + x.to_datasource + ': ' + xdsEnd(x, 'to').text, searchQ));
+      header.appendChild(nameEl);
+      header.appendChild(confCell(x));
+      const badge = stateBadge(x.review_state, x.excluded);
+      if (badge) header.appendChild(badge);
+      card.appendChild(header);
+      const body = el('div', { class: 'table-body' });
+      if (x.name) { body.appendChild(labelLine('Name')); body.appendChild(descBlock(x.name)); }
+      ['from', 'to'].forEach(side => {
+        body.appendChild(labelLine(side === 'from' ? 'From' : 'To'));
+        body.appendChild(descBlock(x[side + '_datasource'] + ' · ' + x[side + '_dataset'] + ' · ' + (x[side + '_columns'] || []).join(', ')));
+      });
+      if (x.cardinality) { body.appendChild(labelLine('Cardinality')); body.appendChild(descBlock(x.cardinality.replace(/_/g, ' '))); }
+      body.appendChild(labelLine('Description'));
+      body.appendChild(descBlock(x.description || '(no description)'));
+      body.appendChild(labelLine('How it is used'));
+      body.appendChild(descBlock(EXECUTABLE_MEANING[x.executable] || x.executable || ''));
+      if (x.review_state === 'approved' && (x.signed_off_by || x.signed_off_date)) {
+        body.appendChild(labelLine('Approved'));
+        body.appendChild(descBlock([x.signed_off_by, x.signed_off_role ? '(' + x.signed_off_role + ')' : '', x.signed_off_date].filter(Boolean).join(' ')));
       }
+      card.appendChild(body);
+      return card;
+    }
+    function renderCrossDatasourceTab(root) {
+      root.appendChild(el('p', { class: 'field-hint', style: 'padding:0 0 10px;font-style:normal;font-size:13px;color:var(--fg);max-width:90ch;',
+        text: 'Joins between ' + (manifest.profile || 'this datasource') + ' and another datasource in this organization. ' +
+              'The assistant asks each datasource its own question and combines the answers; rows are never joined across the two databases. ' +
+              'They belong to the whole organization, so they are shown here but not changed from this page.' }));
+      const hay = x => `${x.from_datasource} ${x.from_dataset} ${(x.from_columns || []).join(' ')} ${x.to_datasource} ${x.to_dataset} ${(x.to_columns || []).join(' ')} ${x.cardinality} ${x.description} ${x.name}`;
+      const matched = XDS.filter(x => (!searchQ || hay(x).toLowerCase().includes(searchQ)) && passesFilter(x, 'relationship'));
+      setSearchCounts(`${matched.length} of ${XDS.length} shown`);
+      if (!matched.length) {
+        root.appendChild(el('div', { class: 'empty-state',
+          text: XDS.length === 0 ? 'No joins to another datasource yet.' : 'No cross-datasource joins match the current search / filter.' }));
+        return;
+      }
+      const cols = [
+        { key: 'from', label: 'From', width: 260, sort: x => x.from_datasource + xdsEnd(x, 'from').text, cell: x => xdsEndCell(x, 'from') },
+        { key: 'to', label: 'To', width: 240, sort: x => x.to_datasource + xdsEnd(x, 'to').text, cell: x => xdsEndCell(x, 'to') },
+        { key: 'card', label: 'Cardinality', width: 108, sort: x => x.cardinality || '', cell: x => (x.cardinality || '—').replace(/_/g, ' ') },
+        { key: 'desc', label: 'Description', sort: x => x.description || '', cell: x => clipCell(x.description, x.qname) },
+        { key: 'conf', label: 'Confidence', width: 104, sort: x => CONF_ORDER[x.confidence] ?? 9, cell: confCell },
+        { key: 'status', label: 'Status', width: 180, sort: statusSort, cell: statusCell },
+      ];
+      const sec = el('div', { class: 'schema-section' });
+      renderGrid(sec, { id: 'cross_datasource', cols, items: matched, groups: null, selectable: false, card: renderXdsCard });
       root.appendChild(sec);
     }
 
@@ -2114,10 +2535,10 @@
     // =====================================================================
     // TAB: Review (the sign-off queue) — folds in the old /agami-review surface
     // =====================================================================
-    function reviewCard(it) {
-      return it._kind === 'metric' ? renderMetricCard(it)
-           : it._kind === 'entity' ? renderEntityCard(it)
-           : renderRelCard(it);
+    function reviewCard(it, inGrid) {
+      return it._kind === 'metric' ? renderMetricCard(it, inGrid)
+           : it._kind === 'entity' ? renderEntityCard(it, inGrid)
+           : renderRelCard(it, inGrid);
     }
     // Render a sub-tab's cards grouped with a sub-header each, instead of one long
     // undifferentiated list. Cross-schema joins get their own group (separate from regular
@@ -2396,6 +2817,33 @@
       card.appendChild(body);
       return card;
     }
+    const KIND_LABEL = { metric: 'Metric', entity: 'Entity', relationship: 'Join' };
+    // Why an item is on the Review tab: what changed since it was approved, else what it says it is.
+    function reviewWhy(it) {
+      const s = sinceApproval(it);
+      if (s) return s.head + ': ' + s.lines.join('; ');
+      return it.description || it.calculation || '';
+    }
+    function reviewCols() {
+      return [
+        { key: 'kind', label: 'Kind', width: 84, sort: it => KIND_LABEL[it._kind] || '', cell: it => el('span', { class: 'kind-tag', text: KIND_LABEL[it._kind] || it._kind }) },
+        { key: 'item', label: 'Item', width: 300, sort: it => it._kind === 'relationship' ? joinLabel(it) : it.name, cell: it => {
+          const d = el('div');
+          if (it._kind === 'relationship') {
+            d.appendChild(el('span', { class: 'cell-code' }, highlight(joinLabel(it), searchQ)));
+            if (it.cross_schema) d.appendChild(el('span', { class: 'cell-sub' }, el('span', { class: 'table-state-badge xschema-badge', text: 'cross-schema' })));
+          } else {
+            d.appendChild(el('span', { class: 'cell-name' }, highlight(it.name + (it.plural ? ' / ' + it.plural : ''), searchQ)));
+            if ((it.other_names || []).length) d.appendChild(el('span', { class: 'cell-sub', text: 'also: ' + it.other_names.join(', ') }));
+          }
+          return d; } },
+        { key: 'area', label: 'Area', width: 130, sort: it => it.area || '', cell: it => it.area || '—' },
+        { key: 'why', label: "Why it's here", sort: reviewWhy, cell: it => clipCell(reviewWhy(it), it.qname) },
+        { key: 'conf', label: 'Confidence', width: 104, sort: it => CONF_ORDER[it.confidence] ?? 9, cell: confCell },
+        { key: 'status', label: 'Status', width: 150, sort: statusSort, cell: statusCell },
+        actionsCol(it => it._kind),
+      ];
+    }
     function renderReviewTab(root) {
       root.appendChild(renderSignOffControl());
       root.appendChild(el('div', { class: 'info-banner', html:
@@ -2482,6 +2930,7 @@
       if (reviewKind !== 'all' && !kindGroups.some(kg => kg.key === reviewKind)) reviewKind = 'all';
       // Kind pills on EVERY sub-tab (Needs eyes / Looks right / Approved / Rejected) so each pile
       // breaks down by type. Single-kind piles show just the one labelled pill (no redundant "All").
+      let kindRow = null;
       if (kindGroups.length) {
         const kbar = el('div', { class: 'subtab-bar kind-bar' });
         const mkPill = (key, label, cnt, forceActive) => {
@@ -2493,7 +2942,9 @@
         if (kindGroups.length > 1) kbar.appendChild(mkPill('all', 'All', totalItems));
         kindGroups.forEach(kg => kbar.appendChild(
           mkPill(kg.key, kg.label, kg.items.length, kindGroups.length === 1 && reviewKind === 'all')));
-        root.appendChild(kbar);
+        kindRow = el('div', { class: 'kind-bar-row' });
+        kindRow.appendChild(kbar);
+        root.appendChild(kindRow);
       }
 
       const shown = reviewKind === 'all' ? kindGroups : kindGroups.filter(kg => kg.key === reviewKind);
@@ -2506,7 +2957,16 @@
       // so approving metrics can't silently approve the joins too (that was the footgun).
       if (g.hint) sec.appendChild(el('div', { class: 'field-hint', style: 'padding:0 0 8px;', text: g.hint }));
 
-      shown.forEach(kg => {
+      // Metrics, entities and joins share one table, told apart by its Kind column; each kind keeps
+      // its sub-header with its own "✓ Approve N / ✕ Reject N" above the table.
+      const tabled = shown.filter(kg => !kg.special);
+      tabled.forEach(kg => sec.appendChild(kindSubhead(kg.label, kg.items, g.bulk)));
+      const rows = tabled.flatMap(kg => kg.items);
+      if (rows.length) renderGrid(sec, { id: 'review', cols: reviewCols(), items: rows, groups: null, selectable: true,
+                                         card: it => reviewCard(it, true) });
+      else gridShown = [];
+      if (kindRow && rows.length && !READ_ONLY) kindRow.appendChild(selectBar());
+      shown.filter(kg => kg.special).forEach(kg => {
         if (kg.special === 'placeholders') {
           sec.appendChild(kindSubhead('Placeholder values: what does each one mean?', kg.items, false));
           sec.appendChild(el('div', { class: 'field-hint', style: 'padding:2px 0 8px;', text:
@@ -2541,9 +3001,6 @@
             '↻ Include all'));
           sec.appendChild(bulk);
           kg.items.forEach(uc => sec.appendChild(describeCard(uc)));
-        } else {
-          sec.appendChild(kindSubhead(kg.label, kg.items, g.bulk));
-          kg.items.forEach(it => sec.appendChild(reviewCard(it)));
         }
       });
 
@@ -3078,6 +3535,7 @@
         case 'metrics':  return (manifest.metrics || []).length + newMetrics.length;
         case 'entities': return (manifest.entities || []).length;
         case 'joins':    return (manifest.relationships || []).length + (manifest.cross_relationships || []).length;
+        case 'cross_datasource': return XDS.length;
         case 'examples': return (manifest.examples || []).length + newExamples.length;
         case 'queued':   return totalQueued();
         default:         return null;
@@ -3091,13 +3549,15 @@
         const b = el('button', {
           type: 'button',
           class: (t.id === activeTab ? 'active ' : '') + (t.id === 'queued' ? 'tab-queued' + (totalQueued() ? ' has-queued' : '') : ''),
-          onclick: () => { activeTab = t.id; document.getElementById('search').value = ''; searchQ = ''; renderAll(); },
+          onclick: () => { activeTab = t.id; document.getElementById('search').value = ''; searchQ = ''; selected.clear(); renderAll(); },
         }, t.label);
-        if (cnt !== null) b.appendChild(el('span', { class: 'tab-count', text: String(cnt) }));
+        // Review's count is red while anything waits on it, a grey 0 when nothing does.
+        if (cnt !== null) b.appendChild(el('span', { class: 'tab-count' + (t.id === 'review' && cnt > 0 ? ' alert' : ''), text: String(cnt) }));
         bar.appendChild(b);
       });
       // status filter only relevant on entity tabs
       document.getElementById('filter-chips').style.display = FILTERABLE_TABS.has(activeTab) ? 'flex' : 'none';
+      document.getElementById('area-filter').style.display = AREA_TABS.has(activeTab) && AREAS.length > 1 ? 'inline-flex' : 'none';
       // the In-schema/Cross-schema bar is Joins-tab only; renderJoinsTab decides whether to show it
       if (activeTab !== 'joins') document.getElementById('join-type-bar').style.display = 'none';
       // search placeholder per tab
@@ -3105,6 +3565,7 @@
                    areas: 'Search subject areas…',
                    tables: 'Search tables, fields, descriptions…',
                    metrics: 'Search metrics…', entities: 'Search entities…', joins: 'Search joins…',
+                   cross_datasource: 'Search cross datasource joins…',
                    examples: 'Search examples…', queued: '' }[activeTab] || 'Search…';
       const si = document.getElementById('search');
       si.placeholder = ph; si.style.display = (activeTab === 'queued') ? 'none' : '';
@@ -3121,7 +3582,30 @@
       if (t.entities) parts.push(plural(t.entities, 'entity').replace('entitys', 'entities'));
       document.getElementById('totals-meta').textContent = parts.join(' · ');
       const badge = document.getElementById('model-badge');
+      renderApprovalStrip();
       if (t.validated === false) { badge.textContent = '⚠ Model has errors'; badge.style.background = 'var(--bad-bg)'; badge.style.color = 'var(--bad-fg)'; badge.style.borderColor = 'var(--bad-border)'; }
+    }
+
+    // "✓ 22 of 22 metrics · ✓ 47 of 59 joins · ✓ 3 of 3 cross-datasource joins · last approval …":
+    // the model as saved (queued approvals count once they are applied). A kind the model has none of is left out.
+    function renderApprovalStrip() {
+      const strip = document.getElementById('approval-strip');
+      const a = manifest.approvals;
+      if (!strip || !a) return;
+      strip.innerHTML = '';
+      const parts = [];
+      [['metrics', 'metric', 'metrics'], ['joins', 'join', 'joins'], ['cross_datasource', 'cross-datasource join', 'cross-datasource joins']]
+        .forEach(([k, one, many]) => {
+          const c = a[k];
+          if (!c || !c.total) return;
+          const p = el('span', { class: 'ap-part' });
+          p.appendChild(el('span', { class: 'ap-tick', text: '✓ ' }));
+          p.appendChild(document.createTextNode(`${c.approved} of ${c.total} ${c.total === 1 ? one : many} approved`));
+          parts.push(p);
+        });
+      if (a.last && a.last.by) parts.push(el('span', { text: 'last approval ' + a.last.by + (a.last.date ? ', ' + a.last.date : '') }));
+      parts.forEach((p, i) => { if (i) strip.appendChild(el('span', { class: 'ap-sep', text: '·' })); strip.appendChild(p); });
+      strip.style.display = parts.length ? 'flex' : 'none';
     }
 
     // ---- Queued totals + footer ----
@@ -3312,6 +3796,17 @@
     }
 
     // ---- Wire up ----
+    (function wireAreaFilter() {
+      const sel = document.getElementById('area-select');
+      sel.appendChild(el('option', { value: 'all' }, 'All areas'));
+      AREAS.forEach(a => sel.appendChild(el('option', { value: a }, a)));
+      sel.value = areaFilter;
+      sel.addEventListener('change', () => {
+        areaFilter = sel.value; selected.clear();
+        sel.className = areaFilter === 'all' ? '' : 'active';
+        renderBody();
+      });
+    })();
     document.getElementById('search').addEventListener('input', (ev) => { searchQ = ev.target.value.trim().toLowerCase(); renderBody(); });
     document.querySelectorAll('#filter-chips button').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -3356,6 +3851,7 @@
     function renderBody() {
       const root = document.getElementById('tab-content');
       root.innerHTML = '';
+      gridShown = [];
       switch (activeTab) {
         case 'datasource': renderDatasourceTab(root); break;
         case 'review': renderReviewTab(root); break;
@@ -3393,8 +3889,12 @@
             x => `${x.question} ${x.sql} ${x.area}`,
             renderExampleCard, 'example');
           break;
+        case 'cross_datasource': renderCrossDatasourceTab(root); break;
         case 'queued': renderQueuedTab(root); break;
       }
+      // Metrics and Joins carry "Approve selected / Reject selected" in the filter row; Review in its kind row.
+      placeSelectBar(activeTab === 'metrics' || activeTab === 'joins');
+      markClipped();
     }
     function renderAll() {
       renderTabBar();

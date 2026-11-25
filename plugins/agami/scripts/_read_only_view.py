@@ -58,6 +58,10 @@ CHANGE_CONTROLS = (
     ".bulk-approve",
     ".bulk-reject",
     ".add-metric-open",
+    # the spreadsheet tables: the row ticks, "Approve selected / Reject selected", the Actions column
+    ".row-select",
+    ".select-bar",
+    ".col-actions",
     ".add-metric-go",
     ".rt-toolbar",
     ".sql-editor",

@@ -52,6 +52,111 @@ REVIEW_SECTIONS = {
 }
 
 
+def signoff_date(raw: Any) -> str:
+    """`signed_off_at` as the page shows it ("12 Nov 2026"), or "" when it is missing or not a date.
+    Sign-offs are stamped as ISO text, but a hand-edited YAML can hold anything; an unreadable
+    value shows no date rather than a wrong one or an error."""
+    if isinstance(raw, (datetime.datetime, datetime.date)):   # YAML can load an unquoted date as one
+        d = raw
+    else:
+        text = str(raw or "").strip()
+        if not text:
+            return ""
+        try:
+            d = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+    return f"{d.day} {d:%b %Y}"   # not %-d: glibc-only, Windows raises
+
+
+def _signoff(obj: Any) -> dict:
+    """Who signed an item off, in what role, and when: the Status column's approval tag."""
+    at = getattr(obj, "signed_off_at", None)
+    return {"signed_off_by": getattr(obj, "signed_off_by", None),
+            "signed_off_role": getattr(obj, "signed_off_role", None),
+            "signed_off_at": str(at) if at else None, "signed_off_date": signoff_date(at)}
+
+
+def cross_datasource_links(artifacts_dir: Path, datasource: str) -> list[dict]:
+    """The organization's cross-datasource joins that touch `datasource`, from organization.yaml
+    (the parent of the profile dir) through its own loader. Rows are never joined across two
+    databases: the assistant asks each one its own question and combines the answers. A deployment
+    without a record, or with one that does not load, has none to show rather than no page."""
+    if str(Path(__file__).resolve().parent) not in sys.path:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from semantic_model import org_record as _OR
+    try:
+        record = _OR.load_org_record(artifacts_dir)
+    except Exception as e:   # a broken organization.yaml must not take the explorer down with it
+        sys.stderr.write(f"agami: organization.yaml did not load, so no cross-datasource joins are shown ({e})\n")
+        return []
+    out: list[dict] = []
+    for b in (record.cross_datasource_relationships if record else []):
+        if datasource not in (b.from_datasource, b.to_datasource):
+            continue
+        out.append({
+            "qname": "org~" + "|".join([b.from_datasource, b.from_dataset, ",".join(b.from_columns),
+                                        b.to_datasource, b.to_dataset, ",".join(b.to_columns)]),
+            "name": b.name or "",
+            "from_datasource": b.from_datasource, "from_dataset": b.from_dataset,
+            "from_columns": list(b.from_columns),
+            "to_datasource": b.to_datasource, "to_dataset": b.to_dataset, "to_columns": list(b.to_columns),
+            "cardinality": b.relationship or "", "description": b.description, "executable": b.executable,
+            "review_state": b.review_state, "confidence": b.confidence,
+            "excluded": b.review_state == "rejected", **_signoff(b),
+        })
+    return out
+
+
+def approval_summary(manifest: dict) -> dict:
+    """The strip under the header: how many metrics, joins and cross-datasource joins are approved,
+    of those still in the model (a rejected one is out of it), and the last approval a person made."""
+    def tally(items: list[dict]) -> dict:
+        live = [x for x in items if not x.get("excluded")]
+        return {"approved": sum(1 for x in live if x.get("review_state") == "approved"), "total": len(live)}
+
+    every = (manifest["metrics"] + manifest["entities"] + manifest["relationships"]
+             + manifest["cross_relationships"] + manifest["cross_datasource_relationships"])
+    last: dict = {}
+    for x in every:
+        if x.get("review_state") != "approved" or x.get("signed_off_role") == "system":
+            continue
+        try:
+            at = datetime.datetime.fromisoformat(str(x.get("signed_off_at") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        at = at if at.tzinfo else at.replace(tzinfo=datetime.timezone.utc)   # a bare date compares too
+        if not last or at > last["_at"]:
+            last = {"_at": at, "by": x.get("signed_off_by") or "", "date": x.get("signed_off_date") or ""}
+    last.pop("_at", None)
+    return {"metrics": tally(manifest["metrics"]),
+            "joins": tally(manifest["relationships"] + manifest["cross_relationships"]),
+            "cross_datasource": tally(manifest["cross_datasource_relationships"]),
+            "last": last}
+
+
+def has_pending_review(manifest: dict) -> bool:
+    """Anything waiting on the Review tab: unreviewed or stale metrics, entities and joins (in an
+    area or between two), columns agami couldn't read, and placeholder values nobody has named."""
+    for arr in (manifest["metrics"], manifest["entities"], manifest["relationships"],
+                manifest["cross_relationships"]):
+        if any(x.get("review_state") in ("unreviewed", "stale") and not x.get("excluded") for x in arr):
+            return True
+    for sc in manifest["schemas"]:
+        for t in sc.get("tables", []):
+            if t.get("description_source") == "ai_unknown" and not t.get("excluded"):
+                return True
+            if any(f.get("description_source") == "ai_unknown" and not f.get("excluded")
+                   for f in t.get("fields", [])):
+                return True
+            if not t.get("excluded") and t.get("review_state") != "stale" and any(
+                    p.get("review_state") == "unreviewed"
+                    for f in t.get("fields", []) if not f.get("excluded") and f.get("review_state") != "stale"
+                    for p in f.get("placeholders", [])):
+                return True
+    return False
+
+
 def build_manifest(profile_dir: Path, profile: str) -> dict:
     """Build the explorer manifest from the semantic model. Subject areas map to
     the explorer's top-level groups ("schemas"), tables → tables, columns → fields.
@@ -163,7 +268,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "primary_table": e.resolved_primary_table,
                 "description": e.description, "review_state": e.review_state,
                 "confidence": e.confidence, "excluded": e.review_state == "rejected",
-                "signed_off_by": e.signed_off_by, "signed_off_role": e.signed_off_role,
+                **_signoff(e),
                 "rule": 2, "area": sa.name, **since_approval("entity", sa.name, e),
             })
 
@@ -177,7 +282,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "description": mm.description, "caveats": mm.caveats,
                 "review_state": mm.review_state, "confidence": mm.confidence,
                 "excluded": mm.review_state == "rejected",
-                "signed_off_by": mm.signed_off_by, "signed_off_role": mm.signed_off_role,
+                **_signoff(mm),
                 "rule": 1, "area": sa.name, **since_approval("metric", sa.name, mm),
             })
 
@@ -191,7 +296,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "cardinality": r.relationship, "description": r.description,
                 "review_state": r.review_state, "confidence": r.confidence,
                 "excluded": r.review_state == "rejected",
-                "signed_off_by": r.signed_off_by, "signed_off_role": r.signed_off_role,
+                **_signoff(r),
                 "rule": 2, "area": sa.name, **since_approval("relationship", sa.name, r),
             })
 
@@ -234,14 +339,17 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
             "cardinality": r.relationship, "description": r.description,
             "review_state": r.review_state, "confidence": r.confidence,
             "excluded": r.review_state == "rejected",
-            "signed_off_by": r.signed_off_by, "signed_off_role": r.signed_off_role,
+            **_signoff(r),
             # rendered as a reviewable join (Joins tab + Review queue), like intra-area joins;
             # `area` (the from-side) is what a curate op targets — the org-level fallback in
             # curate resolves it to cross_subject_area_relationships.
             "rule": 2, "cross_area": True, "area": fa, **since_approval("relationship", fa, r),
         })
 
-    return {
+    # organization-level joins between this datasource and another (organization.yaml, one level up)
+    xds_out = cross_datasource_links(profile_dir.parent, profile_dir.name)
+
+    manifest = {
         "profile": profile,
         "datasource_md": datasource_md,
         # model-derived domain summary (read-only in the UI; not part of the editable file)
@@ -257,14 +365,18 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
             "metrics": len(metrics_out), "entities": len(entities_out),
             "relationships": len(rels_out), "examples": len(examples_out), "named_filters": 0,
             "cross_relationships": len(cross_out),
+            "cross_datasource_relationships": len(xds_out),
             # the model was validated on write (the loader only succeeds on a valid tree),
             # so a successful render implies a structurally-valid model.
             "validated": True,
         },
         "schemas": out_schemas, "subject_areas": areas_out, "cross_relationships": cross_out,
+        "cross_datasource_relationships": xds_out,
         "metrics": metrics_out, "entities": entities_out,
         "relationships": rels_out, "examples": examples_out, "named_filters": [],
     }
+    manifest["approvals"] = approval_summary(manifest)
+    return manifest
 
 
 def render(*, title: str, profile: str, manifest: dict) -> str:
@@ -323,9 +435,9 @@ def main() -> int:
                    help="Optional: also dump the raw manifest JSON to this path")
     p.add_argument("--initial-tab", default="auto",
                    choices=["auto", "datasource", "tables", "pii", "metrics", "entities",
-                            "joins", "examples", "review", "queued"],
+                            "joins", "cross_datasource", "examples", "review", "queued"],
                    help="Tab the dashboard opens on. 'auto' (default) opens on Review when "
-                        "anything needs sign-off, else Tables; 'review' forces the sign-off queue; "
+                        "anything needs sign-off, else Datasource; 'review' forces the sign-off queue; "
                         "'pii' the personal-data columns.")
     p.add_argument("--section", choices=sorted(REVIEW_SECTIONS),
                    help="With --initial-tab review: open on this kind of item, so a review card "
@@ -359,23 +471,11 @@ def main() -> int:
         return 1
 
     manifest = build_manifest(profile_dir, args.profile)
-    # 'auto' default: lead with the sign-off queue when there's pending review work
-    # (unreviewed metrics/entities/joins, or columns agami couldn't read), else Tables.
+    # 'auto' default: lead with the sign-off queue when anything waits on it, else the Datasource tab,
+    # which says what the model is about before its parts.
     initial = args.initial_tab
     if initial == "auto":
-        pending = 0
-        for arr in (manifest["metrics"], manifest["entities"], manifest["relationships"]):
-            pending += sum(1 for x in arr
-                           if x.get("review_state") in ("unreviewed", "stale") and not x.get("excluded"))
-        for sc in manifest["schemas"]:
-            for t in sc.get("tables", []):
-                pending += sum(1 for f in t.get("fields", [])
-                               if f.get("description_source") == "ai_unknown" and not f.get("excluded"))
-                if not t.get("excluded") and t.get("review_state") != "stale":
-                    pending += sum(1 for f in t.get("fields", [])
-                                   if not f.get("excluded") and f.get("review_state") != "stale"
-                                   for p in f.get("placeholders", []) if p.get("review_state") == "unreviewed")
-        initial = "review" if pending > 0 else "tables"
+        initial = "review" if has_pending_review(manifest) else "datasource"
     manifest["initial_tab"] = initial
     if args.section:
         if initial != "review":
