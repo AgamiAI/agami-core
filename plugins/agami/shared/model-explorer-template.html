@@ -1673,7 +1673,7 @@
         wrap.appendChild(row);
         wrap.appendChild(renderEditForm(editItem, 'table', [
           { field: 'sensitive', label: 'Sensitive / PII', type: 'bool', current: field.sensitive,
-            hint: 'Mark Yes for personal or private data (name, email, phone, ID numbers). agami then never shows the raw values — it only counts or aggregates them.' },
+            hint: 'Mark Yes for personal or private data (name, email, phone, ID numbers). agami then prefers counting or aggregating them over showing raw values, but a flag does not block them; hide the column to keep it out of every query.' },
           { field: 'caveats', label: 'Caveats (things to watch out for)', type: 'list', current: field.caveats, rows: 2,
             hint: 'Notes about this column that agami should remember when it writes SQL — anything odd or easy to get wrong. One per line. For example: "Empty dates are saved as 1970-01-01, so skip those" · "This number can be negative for refunds".' },
           { field: 'unit', label: 'Unit', current: field.unit, rows: 1,
@@ -1919,8 +1919,8 @@
       const queued = !!(edits[field.qname] && edits[field.qname].fields && ('sensitive' in edits[field.qname].fields));
       return el('button', {
         type: 'button', class: 'btn-pii' + (eff ? ' on' : '') + (queued ? ' queued' : ''),
-        title: eff ? 'Marked sensitive / PII — agami never shows the raw values, only aggregates'
-                   : 'Mark this column as sensitive / PII so agami never shows its raw values',
+        title: eff ? 'Marked sensitive / PII — answers prefer counts and filters over its raw values; hide it to keep it out of queries'
+                   : 'Mark this column as sensitive / PII so answers prefer counts and filters over its raw values',
         onclick: (ev) => { ev.stopPropagation(); setSensitive(field, table, !eff); },
       }, eff ? '🔒 PII' : 'Mark PII');
     }
@@ -1988,8 +1988,8 @@
     }
     function renderPiiTab(root) {
       root.appendChild(el('div', { class: 'info-banner', html:
-        '<strong>PII review — one queue, nothing buried.</strong> Every column flagged sensitive, plus ones that <em>look</em> like PII but weren’t auto-flagged. ' +
-        'agami never shows a sensitive column’s raw values (only aggregates). Confirm the real ones; clear the false alarms. Toggles queue like any edit — submit with the footer.' }));
+        '<strong>PII review — one queue, nothing buried.</strong> Every column flagged sensitive, plus suspected ones: their names or sampled values suggest PII, but nothing flagged them. ' +
+        'A flag tells agami to prefer counts and filters over a column’s raw values; it does not block them. Hide a column to keep it out of every query. Confirm the real ones; clear the false alarms. Toggles queue like any edit — submit with the footer.' }));
       const q = searchQ;
       const match = r => !q || (r.f.name + ' ' + r.t.name).toLowerCase().includes(q);
       const { flagged, suspected } = piiRows();
@@ -2015,12 +2015,12 @@
       const sec = el('div', { class: 'schema-section' });
       if (piiSubTab !== 'suspected') {
         sec.appendChild(piiSubhead('Flagged as PII', fl.length,
-          'agami hides the raw values. Click 🔒 to clear any that aren’t actually sensitive — or search to narrow the list and clear them all at once.',
+          'Still queryable; answers prefer counts and filters over the raw values. Click 🔒 to clear any that aren’t actually sensitive — or search to narrow the list and clear them all at once.',
           { label: 'Clear all ' + fl.length + ' shown',
             title: 'Queue clearing the PII flag on every column listed here (search narrows it). Nothing applies until you submit.',
             run: () => {
-              // Clearing a privacy flag lets raw values be returned, so the count is confirmed first.
-              if (window.confirm('Clear the PII flag on ' + fl.length + ' column(s)? Their raw values will be returned in answers once you submit.')) setSensitiveMany(fl, false);
+              // Clearing a privacy flag drops the guidance to avoid raw values, so the count is confirmed first.
+              if (window.confirm('Clear the PII flag on ' + fl.length + ' column(s)? Answers will treat them as ordinary columns once you submit.')) setSensitiveMany(fl, false);
             } }));
         if (fl.length) {
           const hideAll = el('div', { class: 'card-actions', style: 'padding:0 0 8px;' });
@@ -2035,7 +2035,7 @@
       }
       if (piiSubTab !== 'flagged') {
         sec.appendChild(piiSubhead('Suspected — confirm or leave', su.length,
-          'These look like PII by name but weren’t auto-flagged (e.g. a name field in a non-PII table). Mark the real ones; leave the rest.',
+          'Their names or sampled values suggest PII, but they aren’t flagged (e.g. a name field in a non-PII table). Mark the real ones; leave the rest.',
           { label: 'Mark all ' + su.length + ' shown',
             title: 'Queue marking every column listed here as PII (search narrows it). Nothing applies until you submit.',
             run: () => setSensitiveMany(su, true) }));

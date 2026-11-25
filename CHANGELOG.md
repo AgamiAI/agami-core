@@ -31,6 +31,13 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Personal-data counts no longer claim more than is known.** `/agami-model` said "<n> columns look
+  like personal data", adding columns flagged as personal data to ones only suspected from their
+  name or a sampled value. It now says the two apart, and leaves out either when it is 0. The skills,
+  the model explorer's PII tab, the model spec format and the README also stop saying a flag hides a
+  column's values: it steers answers toward counts and filters, and only hiding a column keeps its
+  values out of queries.
+
 - **A page that saves its decisions always gets its link in the chat.** The model explorer was
   served in the background and the reply never printed its URL, so the person had to find it in the
   task's output. Question-cards rule 6a now requires the reply to print the URL as a link, with the

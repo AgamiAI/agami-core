@@ -272,7 +272,7 @@ You can query a database from Claude Code or a bare MCP server today — one pro
 | Fan trap / double-count | Silent wrong answer        | Caught before SQL runs                      |
 | Audit trail             | None                       | Full receipt: SQL, model snapshot, approver |
 | Schema drift            | Silent number change       | Stale flag on affected entries              |
-| Sensitive columns       | Prompt-dependent           | Flagged in model, enforced at runtime       |
+| Sensitive columns       | Prompt-dependent           | Flagged in model, reported on the receipt   |
 | Context persistence     | Re-explained every session | Built once, improves with corrections       |
 
 

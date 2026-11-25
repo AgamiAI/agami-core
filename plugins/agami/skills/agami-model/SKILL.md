@@ -71,13 +71,15 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"
 
 - `review-items` (the two calls together are the sign-off queue: `rule1` the metrics, `rule2` the joins and entities; both are the served model, so a definition that depends on a hidden table is left out, as in `sm overview`; never `--scope all` for sign-off, which keeps hidden entries and is for full-model curation) is a list of `{kind, area, name, title, tab, extra_lines, changes_since_approval?, …}`. What needs sign-off is every item whose `tab` is `review`; count them by `kind` (`metric`, `entity`, `relationship`), and count the ones carrying `changes_since_approval` (signed off before, changed since).
 - `model-tree` is `{datasource, subject_areas:[{area, description, tables:[{table, review_state, columns:[…]}]}]}`. Per subject area, count its tables, and the hidden ones (`review_state: rejected`) apart.
-- `sensitive` gives `count` (personal-data columns still queryable) and `suspected_count`.
+- `sensitive` gives `count` (columns flagged as personal data and still queryable) and, apart from it, `suspected_count` (columns whose name or sampled values suggest personal data, with no flag set). Never add the two.
 
 Where the host can draw a visual in the chat, draw the overview card first ([`shared/overview-card.md`](../../shared/overview-card.md): one tile per area from `sm overview`, a click carries on here). Then post the overview as the turn's last message, in this order:
 
 1. One sentence on sign-off, from the counts: *"4 metrics, 2 entities and 3 guessed joins need sign-off; 1 of them changed since it was approved."* or *"Nothing needs sign-off."*
 2. A table of the subject areas, `Subject area | Tables | Hidden`, largest first, at most 15 rows, then *"Showing 15 of <A> subject areas; <A−15> more."* when there are more.
-3. When `count` or `suspected_count` > 0, one line: *"<n> columns look like personal data and are still queryable."*
+3. When `count` or `suspected_count` > 0, one line about personal data, each count said apart and a clause left out when its count is 0:
+   - `count` > 0: *"<count> columns are flagged as personal data and are still queryable: they can be counted and filtered, and nothing stops a query returning their values."*
+   - `suspected_count` > 0: *"<suspected_count> more have names or sampled values that suggest personal data but aren't flagged; check them on the full view's PII tab."* When `count` is 0 it starts *"<suspected_count> columns have names …"* instead of *"more have"*.
 4. The reply line: *Reply "review" to sign off what's waiting, "hide" to keep tables or columns out of queries, "look up <name>", or "full view".* Leave "review" out when nothing needs sign-off.
 
 No card follows the overview: it ends the turn ([long-text.md](../../shared/long-text.md)). Handle the reply as the four choices below; words that mean one of them count as it.
@@ -139,16 +141,16 @@ After each card, apply its answers in one `sm curate` batch (approvals with `--s
 
 **When `sm sensitive` prints `personal_data: enforced_by_warehouse`, skip this question.** The organisation set that its warehouse controls who sees personal data (`sm set-personal-data`), so the build flagged nothing; say so in one line, *"Personal data: your warehouse controls who sees it, so this build flagged none of it."*, and ask nothing about it. When `sm sensitive`'s `count` is above 0 (flags kept from before the setting, on a reload), add it: *"<count> columns flagged before stay flagged; change them in /agami-model."*
 
-**Personal-data columns (when `sm sensitive` reports `count` or `suspected_count` > 0).** Run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"`: `{count, columns:[{area, table, column, label}], suspected, suspected_count}`. `columns` are flagged personal, `suspected` look personal but weren't flagged (a phone-like or birth-date-like sample, a name like `ip_address`). This question can share the sign-off card (two questions on one AskUserQuestion call). Show both in one table, `Table | Columns`, marking each suspected column "(suspected)", e.g. `customers | email, phone, ip_address (suspected)` (a table in the chat may show identifiers; the card names them in words); at most 15 rows and *"and N more"*. Then one multiSelect question (header `Personal`), **"Hide these from queries"**: *"These columns look like personal data. Which should queries never read?"*
+**Personal-data columns (when `sm sensitive` reports `count` or `suspected_count` > 0).** Run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"`: `{count, columns:[{area, table, column, label}], suspected, suspected_count}`. `columns` are flagged personal, `suspected` look personal but weren't flagged (a phone-like or birth-date-like sample, a name like `ip_address`). This question can share the sign-off card (two questions on one AskUserQuestion call). Show both in one table, `Table | Columns`, marking each suspected column "(suspected)", e.g. `customers | email, phone, ip_address (suspected)` (a table in the chat may show identifiers; the card names them in words); at most 15 rows and *"and N more"*. Then one multiSelect question (header `Personal`), **"Hide these from queries"**: *"These columns are flagged as personal data, or their names or sampled values suggest it. Which should queries never read?"*
 
 Flagged and suspected columns are picked the same way:
 
 - 3 columns or fewer in all: one option per column, named by its `label`, **Email on Customers**, or **IP address on Customers (suspected)**; the identifier (`customers.email`) goes in the option's description.
 - More: grouped by table, one option per table with its count, the table and columns in words, **Customers (3: Email, Phone, IP address (suspected))**; picking a table hides every listed column in it, suspected ones included. With more than 3 tables, the options are **All <n> listed columns**, the table with the most listed columns, and **Review on a page** (Phase 5 with `initial_tab=pii`: every listed column on one page, each hidden, kept or marked there, saved from the page).
-- Always last: **Keep them queryable**, its description saying what stays: *"Flagged ones can still be counted and filtered, but a raw value is never shown. Suspected ones stay ordinary columns."* (The old label, *Keep them all queryable*, read as "ordinary columns" while the flags stayed on.)
+- Always last: **Keep them queryable**, its description saying what stays: *"Flagged ones can still be counted and filtered, and nothing stops a query returning their values; only hiding keeps them out. Suspected ones stay ordinary columns."* (The old label, *Keep them all queryable*, read as "ordinary columns" while the flags stayed on.)
 - "Other" takes `table.column` names to hide, flagged, suspected or any other column in the model.
 
-Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them queryable** writes nothing; say in one line what that leaves (flagged columns queryable, raw values never shown). A name in "Other" that isn't a column in the model, or **Keep them queryable** or **Review on a page** picked together with anything else, is said back and the same card asked again; never guess which column was meant.
+Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them queryable** writes nothing; say in one line what that leaves (flagged columns still queryable, their values included). A name in "Other" that isn't a column in the model, or **Keep them queryable** or **Review on a page** picked together with anything else, is said back and the same card asked again; never guess which column was meant.
 
 When the queue is done (or skipped), recount with `sm review-items` (`--scope rule1` and `--scope rule2`) and go back to the overview card. **When agami-connect sent the person here** (its Phase 7 `Review what needs sign-off`), go back to agami-connect Phase 8 instead, the starter questions, so onboarding still ends on a first question.
 
@@ -397,7 +399,10 @@ agami: 3 metrics need sign-off.
        | sales        | 12     | 0      |
        | support      | 4      | 0      |
        Showing 2 of 2 subject areas.
-       5 columns look like personal data and are still queryable.
+       4 columns are flagged as personal data and are still queryable: they can
+       be counted and filtered, and nothing stops a query returning their values.
+       1 more has a name that suggests personal data but isn't flagged; check it
+       on the full view's PII tab.
 
 [card "Model": Review what needs sign-off (Recommended) / Hide tables or columns /
  Look up a table or metric / Show the full view]  → Hide tables or columns
