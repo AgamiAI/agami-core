@@ -283,6 +283,11 @@ class _Neutralized(NamedTuple):
     # them. Only the keyword deny's identifier test does (#492): wherever a backtick quotes at all,
     # what it quotes is a name, and where it doesn't the engine refuses the statement itself.
     backticked: tuple[tuple[int, int], ...] = ()
+    # Every string, dollar-quoted literal and quoted name, as `[start, end)` in `text`: a literal is
+    # the one space it was blanked to, and an empty name (`""`, a string on MySQL) an empty span.
+    # The keyword deny's operand-position test reads it, because a blanked literal looks like
+    # whitespace and `= 'x' EXECUTE sp` would otherwise read as `= EXECUTE sp`.
+    operands: tuple[tuple[int, int], ...] = ()
 
 
 def _neutralize(sql: str) -> _Neutralized:
@@ -340,6 +345,7 @@ def _neutralize(sql: str) -> _Neutralized:
     out: list[str] = []
     spans: list[tuple[int, int]] = []
     tick_spans: list[tuple[int, int]] = []
+    operand_spans: list[tuple[int, int]] = []
     width = 0  # running len("".join(out)), so a span can be recorded as it is emitted
 
     def emit(chunk: str) -> None:
@@ -433,6 +439,7 @@ def _neutralize(sql: str) -> _Neutralized:
                     _REMEDIATION["q_quote"],
                 )
             i, _, _ = _scan_quoted(sql, i)
+            operand_spans.append((width, width + 1))
             emit(" ")
         elif sql[i] in '"`':  # quoted identifier — keep content, drop quotes
             # Backtick is the identifier quote of MySQL, Databricks, BigQuery, SQLite and DuckDB,
@@ -487,6 +494,7 @@ def _neutralize(sql: str) -> _Neutralized:
                 spans.append((start, width))
             elif closed:
                 tick_spans.append((start, width))
+            operand_spans.append((start, width))
             nxt = sql[j] if j < n else ""
             if nxt.isalnum() or nxt == "_":
                 emit(" ")
@@ -509,6 +517,7 @@ def _neutralize(sql: str) -> _Neutralized:
             close = sql.find(m.group(0), m.end()) if m else -1
             if m and close != -1:
                 i = close + len(m.group(0))
+                operand_spans.append((width, width + 1))
                 emit(" ")
             else:
                 emit("$")
@@ -527,7 +536,12 @@ def _neutralize(sql: str) -> _Neutralized:
     def kept(found: list[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
         return tuple((s - lead, e - lead) for s, e in found if 0 <= s - lead < e - lead <= limit)
 
-    return _Neutralized(text, kept(spans), kept(tick_spans))
+    # Operand spans are CLAMPED instead: one that is missing lets a keyword through, so here the
+    # wider reading is the safe one.
+    operands = tuple(
+        (min(max(s - lead, 0), limit), min(max(e - lead, 0), limit)) for s, e in operand_spans
+    )
+    return _Neutralized(text, kept(spans), kept(tick_spans), operands)
 
 
 # Allowed opening keyword. `WITH` covers CTEs whose final clause is a SELECT.
@@ -567,28 +581,83 @@ _DENY_KEYWORD_RE = re.compile(
 #   - straight after `name.` with no space: a qualified column. The qualifier must START with a
 #     letter or `_`, so `1.` and `1e5.` (numeric literals, after which `INTO` is the keyword) do not
 #     count.
-#   - alone as a select-list item: after `SELECT` / `DISTINCT` / `,` and before `,` / an unquoted
-#     `FROM`. **Never `INTO`:** Postgres and Redshift accept an empty select list, so
-#     `SELECT INTO "from" FROM t` creates a table named `from`. A column named `into` is written
-#     `t.into` or quoted instead. No other denied keyword has a statement form in that position.
-# `WHERE notify = 1` and other positions still refuse — the narrow rule is the conservative one.
+#   - alone as a select-list item, or as a later item of any list: after `SELECT` / `DISTINCT` /
+#     `,` and before `.` / `,` / `)` / an unquoted `FROM` / `ASC` / `DESC` / the end. Both sides are
+#     checked here because a select list may also hold `notify ch1`, an alias without `AS` that
+#     reads as a keyword followed by its argument. **Never `INTO`:** Postgres and Redshift accept an
+#     empty select list, so `SELECT INTO "from" FROM t` creates a table named `from`. A column
+#     named `into` is written `t.into` or quoted instead. No other denied keyword has a statement
+#     form in that position.
+#   - straight after a token that only an operand or a name can follow: a comparison or arithmetic
+#     operator, or one of `_OPERAND_BEFORE_RE`'s keywords, so `WHERE notify = 1`, `ORDER BY lock`,
+#     `AS set` and `FROM listen` read as names. Again never `INTO`. This rule looks only BEFORE the
+#     word: a word in operand position cannot start a statement or a clause on any engine. That
+#     matters most on SQL Server, which runs `SELECT 1 EXECUTE sp` as two statements with no `;`
+#     between them; `EXECUTE` after `1` still refuses, and `= EXECUTE sp` is a syntax error that
+#     fails the whole batch before anything runs. `*` is left out (it is also the star, after which
+#     a name can start a statement on SQL Server), and so are `(` (a CTE body opens there), `)`,
+#     `THEN`, `ELSE` and `ON` (SQL Server's `IF … ELSE DELETE` and `SET … ON DELETE`).
+# In both of the last two, the token before (and for a list item the token after) must be real
+# SQL: not text from a quoted name `_neutralize` unwrapped (`"a =" EXECUTE sp`), not a string it
+# blanked to a space (`= 'x' EXECUTE sp`, which is a complete operand), and not the tail of a
+# longer name (`t.where`, `@where`, `x$and`). Other positions (a bare word right after `(`, or an
+# alias without `AS`) still refuse.
 _QUALIFIER_BEFORE_RE = re.compile(r"(?<![\w$])[A-Za-z_][\w$]*\.$")
-_SELECT_ITEM_BEFORE_RE = re.compile(r"(?:\bSELECT|\bDISTINCT|,)\s*$", re.IGNORECASE)
-_SELECT_ITEM_AFTER_RE = re.compile(r"\s*(?:,|FROM\b)", re.IGNORECASE)
+# ASCII only, so a non-ASCII space or letter never counts as the separator or the keyword.
+_SELECT_ITEM_BEFORE_RE = re.compile(
+    r"(?:(?<![^\s(),])(?:SELECT|DISTINCT)|,)$", re.IGNORECASE | re.ASCII
+)
+# A `.` straight after the word makes it the qualifier of a name (`notify.id`).
+_SELECT_ITEM_AFTER_RE = re.compile(
+    r"\.|\s*(?:,|\)|FROM\b|ASC\b|DESC\b|\Z)", re.IGNORECASE | re.ASCII
+)
+_OPERAND_BEFORE_RE = re.compile(
+    r"(?:(?<![^\s(),])(?:WHERE|AND|OR|NOT|HAVING|WHEN|BY|AS|FROM|JOIN)|[=<>+\-/%|])$",
+    re.IGNORECASE | re.ASCII,
+)
+_ASCII_SPACE = " \t\r\n\f\v"
 
 
-def _keyword_is_identifier(text: str, quoted: tuple[tuple[int, int], ...], start: int, end: int) -> bool:
+def _token_before(before: str, operands: tuple[tuple[int, int], ...]) -> str | None:
+    """`before` without its trailing whitespace, or None when that token is not real SQL.
+
+    No literal or quoted name may end the token or sit in the gap after it: `"WHERE"` and `"a ="`
+    are unwrapped to bare text and `'x'` is blanked to a space, and each is a complete operand.
+    """
+    head = before.rstrip(_ASCII_SPACE)
+    if not head or any(o_start < len(before) and o_end >= len(head) for o_start, o_end in operands):
+        return None
+    return head
+
+
+def _keyword_is_identifier(
+    text: str,
+    quoted: tuple[tuple[int, int], ...],
+    operands: tuple[tuple[int, int], ...],
+    start: int,
+    end: int,
+) -> bool:
     """Whether the deny match at `text[start:end]` stands where only an identifier can."""
     if any(q_start <= start and end <= q_end for q_start, q_end in quoted):
         return True
     before = text[:start]
     if _QUALIFIER_BEFORE_RE.search(before):
         return True
-    if text[start:end].upper() == "INTO" or not _SELECT_ITEM_BEFORE_RE.search(before):
+    head = _token_before(before, operands)
+    if text[start:end].upper() == "INTO" or head is None:
+        return False
+    if _OPERAND_BEFORE_RE.search(head):
+        return True
+    if not _SELECT_ITEM_BEFORE_RE.search(head):
         return False
     after = _SELECT_ITEM_AFTER_RE.match(text, end)
-    # The FROM must be the clause, not a quoted name `"from"` that `_neutralize` unwrapped.
-    return bool(after and not any(q_start < after.end() <= q_end for q_start, q_end in quoted))
+    if not after:
+        return False
+    # The token after must be the clause or punctuation, not a quoted name `_neutralize` unwrapped
+    # (`"from"`). Matched at the end, nothing may follow at all: the strip (and the caller's trim of
+    # a trailing `;`) removed a string blanked there, so its span lies past the end of `text`.
+    stop = after.end() if after.end() < len(text) else float("inf")
+    return not any(end <= o_start < stop for o_start, _ in operands)
 
 
 def _denied_keyword(sql: str, stripped: str) -> re.Match[str] | None:
@@ -598,13 +667,15 @@ def _denied_keyword(sql: str, stripped: str) -> re.Match[str] | None:
     the change stays inside the keyword deny. `stripped` is the neutralized text with at most one
     trailing `;` removed, so the spans (measured from its start) still line up.
     """
-    quoted: tuple[tuple[int, int], ...] | None = None  # scanned only when a keyword is present
+    neutral: _Neutralized | None = None  # scanned only when a keyword is present
     for match in _DENY_KEYWORD_RE.finditer(stripped):
-        if quoted is None:
+        if neutral is None:
             neutral = _neutralize(sql)
-            # In `` `a`INTO`b` `` the spans are `a` and `b`, so the INTO between them still refuses.
-            quoted = neutral.quoted + neutral.backticked
-        if not _keyword_is_identifier(stripped, quoted, match.start(), match.end()):
+        # In `` `a`INTO`b` `` the spans are `a` and `b`, so the INTO between them still refuses.
+        quoted = neutral.quoted + neutral.backticked
+        if not _keyword_is_identifier(
+            stripped, quoted, neutral.operands, match.start(), match.end()
+        ):
             return match
     return None
 

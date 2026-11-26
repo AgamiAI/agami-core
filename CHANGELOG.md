@@ -31,6 +31,15 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A bare column named like a refused keyword is read as a column in more places (#492).** A
+  column called `notify`, `lock`, `set`, `listen`, `copy` and the like was still refused in `WHERE`,
+  `ORDER BY`, `GROUP BY` or `HAVING`, as a table name or as an `AS` alias. It is now read as a name
+  wherever it follows a comparison or arithmetic operator, `WHERE`, `AND`, `OR`, `NOT`, `HAVING`,
+  `WHEN`, `BY`, `AS`, `FROM` or `JOIN`, and as a later item of a list (`ORDER BY id, lock`).
+  `INTO` is never read as a name unless it is quoted or qualified. A keyword after a complete
+  value (a name, a number, a string, `)`) is still refused, because SQL Server runs a statement
+  that follows one with no `;` in between.
+
 - **Personal-data counts no longer claim more than is known.** `/agami-model` said "<n> columns look
   like personal data", adding columns flagged as personal data to ones only suspected from their
   name or a sampled value. It now says the two apart, and leaves out either when it is 0. The skills,
