@@ -35,7 +35,15 @@ _REAUTH_TEXT = (
 
 
 class GoogleAuthError(Exception):
-    pass
+    """Mirrors google-auth's base: `retryable` is a keyword argument read back as a property."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args)
+        self._retryable = kwargs.get("retryable", False)
+
+    @property
+    def retryable(self) -> bool:
+        return self._retryable
 
 
 class RefreshError(GoogleAuthError):
@@ -130,9 +138,8 @@ def _run(monkeypatch, *, raise_on: str, error: BaseException):
     [
         RefreshError(_REAUTH_TEXT),
         RefreshError("('invalid_grant: Token has been expired or revoked.', demo-secret-detail)"),
-        DefaultCredentialsError("Could not automatically determine credentials. demo-secret-detail"),
     ],
-    ids=["reauth", "invalid_grant", "no_default_credentials"],
+    ids=["reauth", "invalid_grant"],
 )
 def test_a_credential_that_cannot_be_refreshed_is_auth(monkeypatch, warehouse, raise_on, error):
     env = _run(monkeypatch, raise_on=raise_on, error=error)
@@ -149,6 +156,54 @@ def test_the_executor_raises_the_auth_exit_code_for_a_refresh_failure(monkeypatc
     with pytest.raises(execute_sql.ExecutorError) as exc:
         execute_sql._run_bigquery({"project": "your-project"}, "SELECT 1")
     assert exc.value.code == execute_sql.FAILURE_KIND_TO_EXIT["auth"]
+
+
+def _refresh_error_from_transport() -> RefreshError:
+    # The shape google-auth's compute-engine credentials raise when the metadata server times out:
+    # the TransportError re-raised as a RefreshError, chained by `from`.
+    try:
+        try:
+            raise TransportError("Read timed out. (read timeout=120)")
+        except TransportError as caught:
+            raise RefreshError(caught) from caught
+    except RefreshError as chained:
+        return chained
+
+
+def test_a_refresh_failure_from_a_timed_out_metadata_server_is_not_auth(monkeypatch, warehouse):
+    """A transport failure dressed as a RefreshError is temporary; `auth` would say a retry cannot
+    help. It keeps the classification it had before credential failures were recognised."""
+    env = _run(monkeypatch, raise_on="query", error=_refresh_error_from_transport())
+    assert env.status == "failed"
+    assert env.failure.kind == "other"
+
+
+def test_a_retryable_refresh_failure_is_not_auth(monkeypatch, warehouse):
+    """The token endpoint answering 5xx / 429 / temporarily_unavailable is flagged retryable."""
+    env = _run(monkeypatch, raise_on="result",
+               error=RefreshError("temporarily_unavailable", retryable=True))
+    assert env.status == "failed"
+    assert env.failure.kind == "other"
+
+
+@pytest.mark.parametrize(
+    "error", [_refresh_error_from_transport(), RefreshError("server error", retryable=True)],
+    ids=["from_transport", "retryable"],
+)
+def test_the_executor_keeps_the_execution_code_for_a_temporary_refresh_failure(monkeypatch, error):
+    _install_google(monkeypatch, raise_on="query", error=error)
+    with pytest.raises(execute_sql.ExecutorError) as exc:
+        execute_sql._run_bigquery({"project": "your-project"}, "SELECT 1")
+    assert exc.value.code == 5
+
+
+def test_default_credentials_error_is_recognised_as_a_credential_failure(monkeypatch):
+    """Defensive only: google-auth raises this while `bigquery.Client()` resolves credentials,
+    whose own handler already reports `auth`, so it does not reach the execution path today."""
+    _install_google(monkeypatch, raise_on="query", error=Exception("unused"))
+    assert execute_sql._is_google_credential_failure(
+        DefaultCredentialsError("Could not automatically determine credentials.")
+    )
 
 
 @pytest.mark.parametrize(
