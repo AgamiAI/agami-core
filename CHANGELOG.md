@@ -31,6 +31,13 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A declared filter written with a bare column now reads as applied.** The receipt marked a
+  table's default filter `undetermined` when the statement wrote its column unqualified, as in
+  `SELECT COUNT(*) FROM orders WHERE status != 'cancelled'`, and `applied` only for
+  `orders.status`. When the query part holding the table reads nothing else, the bare column can
+  only be that table's, so it now counts as `applied`. Beside a join or a second table in the FROM,
+  a bare column still reads `undetermined`, since it could belong to either.
+
 - **Personal-data counts no longer claim more than is known.** `/agami-model` said "<n> columns look
   like personal data", adding columns flagged as personal data to ones only suspected from their
   name or a sampled value. It now says the two apart, and leaves out either when it is 0. The skills,
