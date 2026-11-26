@@ -1170,6 +1170,26 @@ def _run_snowflake(creds: dict[str, str], sql: str) -> ExecResult:
     return result
 
 
+def _is_google_credential_failure(exc: BaseException) -> bool:
+    """True when `exc` is google-auth saying the credential itself is unusable.
+
+    Application Default Credentials are refreshed lazily, so an expired or revoked one passes
+    `bigquery.Client(...)` and fails only inside `client.query()` / `job.result()` — on the
+    execution path, where it would otherwise be raised as an execution error and, matching no
+    rule, reported as `other`. Checked by type rather than by google's wording, and only these two
+    types: `TransportError` and the rest of `GoogleAuthError` are not a credential the operator
+    has to replace. Imported here, not at module load, so a deployment without BigQuery never
+    needs google-auth.
+    """
+    try:
+        from google.auth import exceptions as google_auth_exceptions  # type: ignore
+    except ImportError:
+        return False
+    return isinstance(
+        exc, (google_auth_exceptions.RefreshError, google_auth_exceptions.DefaultCredentialsError)
+    )
+
+
 def _run_bigquery(creds: dict[str, str], sql: str) -> ExecResult:
     """Tier-3 path for BigQuery using google-cloud-bigquery.
 
@@ -1274,6 +1294,8 @@ def _run_bigquery(creds: dict[str, str], sql: str) -> ExecResult:
         # what makes the rule checkable across all ten engines rather than nine.
         raise
     except Exception as e:
+        if _is_google_credential_failure(e):
+            raise ExecutorError(f"BigQuery credentials could not be refreshed: {e}", code=4)
         raise ExecutorError(f"BigQuery execution error: {e}", code=5)
 
     if not results.schema:

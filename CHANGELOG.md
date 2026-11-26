@@ -31,6 +31,12 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **An expired BigQuery credential is reported as `auth`.** With Application Default Credentials,
+  an expired or revoked login only fails once a statement runs, and `execute_sql` reported it as
+  `other`, "an unexpected error on the server". It now fails as `auth`, "The database rejected the
+  connection's credentials.", so the caller stops and the operator knows to sign in again
+  (`gcloud auth application-default login`). Other BigQuery errors are classified as before.
+
 - **Personal-data counts no longer claim more than is known.** `/agami-model` said "<n> columns look
   like personal data", adding columns flagged as personal data to ones only suspected from their
   name or a sampled value. It now says the two apart, and leaves out either when it is 0. The skills,
