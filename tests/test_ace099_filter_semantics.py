@@ -197,6 +197,47 @@ def test_the_case_of_an_unquoted_identifier_is_folded():
     assert _only("SELECT v.id FROM visits v WHERE V.STATUS != 'Test'", "visits")[1] == "applied"
 
 
+def test_an_unqualified_column_in_a_single_source_select_reads_applied():
+    """Hand-written single-table SQL rarely qualifies its columns, and with one source in the FROM
+    an unqualified column can only be that table's. Comparing against the bound `orders.is_deleted`
+    alone graded every such statement `undetermined` though it applied exactly the declared filter.
+    An alias changes nothing: the column is still the one source's."""
+    assert _only("SELECT COUNT(*) FROM orders WHERE is_deleted = false", "orders") == (
+        "orders.is_deleted = false", "applied",
+    )
+    assert _only("SELECT COUNT(*) FROM orders o WHERE is_deleted = false", "orders") == (
+        "o.is_deleted = false", "applied",
+    )
+    sql = "SELECT COUNT(*) FROM orders WHERE amount > 100 AND is_deleted = false"
+    assert _only(sql, "orders")[1] == "applied"
+    # A reference in a nested select is judged by ITS select's sources, not the outer one's.
+    nested = ("SELECT c.id FROM customers c JOIN payments p ON p.order_id = c.id "
+              "WHERE c.id IN (SELECT customer_id FROM orders WHERE is_deleted = false)")
+    assert _only(nested, "orders")[1] == "applied"
+
+
+def test_an_unqualified_column_beside_a_second_source_stays_undetermined():
+    """With two sources an unqualified column could be either one's, so the receipt cannot stand
+    behind `applied`. A join, a comma join and a derived table each count as the second source."""
+    joined = ("SELECT COUNT(*) FROM orders JOIN customers ON customers.id = orders.customer_id "
+              "WHERE is_deleted = false")
+    assert _only(joined, "orders")[1] == "undetermined"
+    comma = "SELECT COUNT(*) FROM orders, customers WHERE is_deleted = false"
+    assert _only(comma, "orders")[1] == "undetermined"
+    derived = ("SELECT COUNT(*) FROM orders JOIN (SELECT id FROM customers) c "
+               "ON c.id = orders.customer_id WHERE is_deleted = false")
+    assert _only(derived, "orders")[1] == "undetermined"
+
+
+def test_a_column_qualified_by_another_name_in_a_single_source_select_is_not_credited():
+    """Dropping the qualifier is done to the DECLARED side only. A written qualifier that names
+    something other than the reference — an outer query's alias, in a correlated subquery — is a
+    different column, and stripping it too would credit the filter on someone else's rows."""
+    sql = ("SELECT c.id FROM shipments c WHERE EXISTS "
+           "(SELECT 1 FROM orders WHERE c.is_deleted = false)")
+    assert _only(sql, "orders")[1] == "undetermined"
+
+
 # --- omitted ----------------------------------------------------------------
 
 

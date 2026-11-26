@@ -4520,7 +4520,8 @@ def assemble_receipt(
     an unchecked list read identically to a consumer: silence reads as clean.
 
     Deterministic, no LLM: tables come from the FROM/JOIN scope; a declared filter is "applied" when
-    the reference's own scope wrote that exact predicate, and the answer is per REFERENCE because a
+    the reference's own scope wrote that exact predicate (or, when that scope reads nothing else, the
+    predicate with its columns unqualified), and the answer is per REFERENCE because a
     filter satisfied inside a CTE body is not satisfied for the statement reading that CTE; a join
     is one `exp.Join` the statement wrote, carrying the predicate the parser read and the scope it
     was written in; a metric is "used" when its binding SQL
@@ -8639,6 +8640,33 @@ def _bound_declared_predicate(declared: str, ident: str,
     return bound, _parse_declared_predicate(bound, dialect)
 
 
+def _reads_only(sel: "exp.Select", node: "exp.Expression") -> bool:
+    """Whether `node` is the one and only source `sel` reads: no join, no comma-listed table, no
+    lateral beside it.
+
+    This is what lets an unqualified column be credited to a reference. With a single source an
+    unqualified column can only be that source's (a correlated reference to an outer query only
+    binds a name the inner source lacks, and the declared filter says this table has it); with two,
+    it could be either one's, and the receipt has no ground to say which.
+    """
+    if sel.args.get("laterals"):
+        return False
+    sources = _from_sources(sel)
+    return len(sources) == 1 and sources[0] is node
+
+
+def _unqualified(predicate: "exp.Expression") -> "exp.Expression":
+    """A COPY of `predicate` with every column's qualifier dropped, for comparison against a
+    statement that wrote the column bare. Only ever applied to the DECLARED side: a qualifier the
+    statement wrote may name an outer query's source, and stripping it would credit the filter on
+    another table's rows."""
+    bare = predicate.copy()
+    for col in _find_all(bare, exp.Column):
+        for part in ("table", "db", "catalog"):
+            col.set(part, None)
+    return bare
+
+
 def _declared_filter_status(
     declared: str,
     site: _RefSite,
@@ -8682,7 +8710,12 @@ def _declared_filter_status(
     # with a sibling scope's predicate is the exact error the per-reference answer exists to prevent.
     # An extra conjunct beside the declared one never weakens the answer: `WHERE is_deleted = false
     # AND amount > 100` still applied the declared filter, it just also applied something else.
-    if target in _folded_conjuncts(chain[0], memo):
+    # A select reading this reference and nothing else may also write the column bare, which is how
+    # hand-written single-table SQL usually reads; beside a second source a bare column could be
+    # either one's, so there only the qualified spelling counts.
+    conjuncts = _folded_conjuncts(chain[0], memo)
+    if target in conjuncts or (_reads_only(chain[0], site.node)
+                               and _unqualified(target) in conjuncts):
         entry["status"] = "applied"
         return entry
     # Not applied. `omitted` is the strong claim, so it is reserved for a statement whose predicates
