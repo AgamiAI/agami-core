@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import pickle
+import random
 import sys
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
@@ -1416,14 +1417,19 @@ def test_same_named_flags_selected_in_the_other_order_pair_by_name_when_unordere
 
 
 def _counting_compare_rows(monkeypatch):
-    """Count how many times stage one reads the rows to measure a pairing."""
-    real, pairings = c.compare_rows, []
+    """Count how many times stage one reads the rows to measure a pairing.
 
-    def counted(golden_rows, generated_rows, pairing, **kept):
+    The search measures with `_overlap`, which counts the rows two columns line up. A pairing that
+    already lines up every row the shorter result holds cannot be beaten, so a second read is work
+    with no answer in it.
+    """
+    real, pairings = c._overlap, []
+
+    def counted(golden_rows, generated_rows, pairing, *args, **kept):
         pairings.append(pairing)
-        return real(golden_rows, generated_rows, pairing, **kept)
+        return real(golden_rows, generated_rows, pairing, *args, **kept)
 
-    monkeypatch.setattr(c, "compare_rows", counted)
+    monkeypatch.setattr(c, "_overlap", counted)
     return pairings
 
 
@@ -1442,7 +1448,7 @@ def test_the_in_order_pairing_is_not_measured_when_the_names_already_line_up_eve
         _flags_selected_as(_REORDERED).rows,
         ordered=False,
     )
-    assert len(measured) == 1
+    assert len(measured) == 1   # the names' pairing, and nothing after it
     named = tuple((golden.columns[g], _REORDERED[p]) for g, p in sorted(pairing.pairing.items()))
     assert named == _FLAGS_BY_NAME
 
@@ -1453,7 +1459,7 @@ def test_the_in_order_pairing_is_still_measured_when_the_names_leave_a_row_out(m
     measured = _counting_compare_rows(monkeypatch)
     rows = [(1, 2), (2, 3), (3, 1)]
     pairing = c.pair_columns(["x", "y"], rows, ["y", "x"], rows, ordered=False)
-    assert len(measured) == 2
+    assert len(measured) > 1   # the names' pairing did not line every row up, so the rows decide
     assert pairing.pairing == {0: 0, 1: 1}
 
 
@@ -1520,6 +1526,336 @@ def test_flags_selected_in_the_other_order_score_through_the_answer_key_s_orderi
     assert c.compare_result_sets(golden, in_place, golden_sql=ordered_sql).accuracy == 1.0
     moved = _flags_selected_as(_REORDERED)
     assert c.compare_result_sets(golden, moved, golden_sql=ordered_sql).accuracy < 1.0
+
+
+# --- searching the assignments inside a class of equal columns --------------------------------------
+#
+# When neither the names nor the column order line the rows up, the comparator tries the ways to pair
+# a class of equal columns and keeps the one that lines up the most rows. Most cases run on two
+# fixtures, because rows line up differently in each: in the flag rows `region` names each row once,
+# and in the trio rows `tier` repeats, so no column names a row.
+
+_FLAG_TRIO = ["region", "is_active", "is_verified", "is_staff"]
+_TRIO = ["tier", "is_active", "is_verified", "is_staff"]
+# Three flags, each true on four rows of eight. Only the right assignment lines up all eight rows.
+_TRIO_ROWS = [
+    ("gold", True, True, False),
+    ("gold", True, False, False),
+    ("gold", False, False, True),
+    ("silver", True, False, True),
+    ("silver", False, True, False),
+    ("silver", False, True, True),
+    ("bronze", True, True, True),
+    ("bronze", False, False, False),
+]
+
+
+def _trio_selected_as(columns, labels):
+    """The trio rows as a statement selecting `columns` returns them under `labels`, rows reversed."""
+    picked = [_TRIO.index(name) for name in columns]
+    rows = [tuple(row[i] for i in picked) for row in reversed(_TRIO_ROWS)]
+    return c.ExecResult(columns=list(labels), rows=rows)
+
+
+def _both_row_kinds(columns, labels):
+    """The answer key and a statement selecting `columns` under `labels`, once for each fixture. The
+    first column is the one that names the rows, or does not."""
+    flag_labels = ["region", *labels[1:]] if labels[0] == "tier" else labels
+    return [
+        pytest.param(
+            _flags_selected_as(_FLAG_TRIO, shuffle=False),
+            _flags_selected_as(["region", *columns[1:]], labels=flag_labels),
+            id="a-column-names-each-row",
+        ),
+        pytest.param(
+            c.ExecResult(columns=_TRIO, rows=_TRIO_ROWS),
+            _trio_selected_as(["tier", *columns[1:]], labels),
+            id="no-column-names-a-row",
+        ),
+    ]
+
+
+def test_every_column_renamed_with_two_equal_count_flags_scores_a_full_match():
+    # Renamed, no column has a name to pair by, and in order each flag takes the other's partner.
+    golden = c.ExecResult(columns=_FLAG_COLUMNS, rows=_FLAG_ROWS)
+    generated = _flags_selected_as(_REORDERED, labels=["area", "flag_a", "flag_b"])
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert score.column_pairs == (
+        ("region", "area"), ("is_active", "flag_b"), ("is_verified", "flag_a")
+    )
+
+
+def test_every_column_renamed_scores_a_full_match_when_no_column_names_a_row():
+    golden = c.ExecResult(columns=_TRIO, rows=_TRIO_ROWS)
+    generated = _trio_selected_as(
+        ["is_staff", "tier", "is_verified", "is_active"], ["s", "t", "v", "a"]
+    )
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert dict(score.column_pairs) == {
+        "tier": "t", "is_active": "a", "is_verified": "v", "is_staff": "s"
+    }
+
+
+@pytest.mark.parametrize(
+    "golden, generated",
+    _both_row_kinds(["tier", "is_staff", "is_active", "is_verified"], _TRIO),
+)
+def test_labels_swapped_inside_a_class_of_three_flags_still_score_a_full_match(golden, generated):
+    # Each label sits on another flag's values, and the columns are selected in another order, so
+    # neither the names nor the order line the rows up.
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert dict(score.column_pairs[1:]) == {
+        "is_active": "is_verified", "is_verified": "is_staff", "is_staff": "is_active"
+    }
+
+
+@pytest.mark.parametrize(
+    "golden, generated",
+    _both_row_kinds(
+        ["tier", "is_verified", "is_staff", "is_active"], ["tier", "flag", "is_staff", "from_flag"]
+    ),
+)
+def test_a_repeated_label_with_one_aliased_inside_a_class_of_three_scores_a_full_match(
+    golden, generated
+):
+    golden = c.ExecResult(columns=[golden.columns[0], "flag", "flag", "is_staff"], rows=golden.rows)
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert score.column_pairs[1:] == (
+        ("flag", "from_flag"), ("flag", "flag"), ("is_staff", "is_staff")
+    )
+
+
+def test_a_tie_between_assignments_goes_to_the_one_pairing_more_names():
+    # `a` and `b` hold the same flag, so pairing them either way lines up every row. One way pairs
+    # `b` with its namesake, and that one is kept.
+    rows = [(True, True, False), (True, True, True), (False, False, True), (False, False, False)]
+    golden = c.ExecResult(columns=["a", "b", "c"], rows=rows)
+    generated = c.ExecResult(columns=["a", "b", "x"], rows=[row[::-1] for row in reversed(rows)])
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert score.column_pairs == (("a", "x"), ("b", "b"), ("c", "a"))
+
+
+def test_a_dropped_flag_is_reported_missing_rather_than_its_equal_count_twin():
+    # Two golden flags and one generated flag with the same counts: the generated flag pairs with the
+    # golden flag whose rows it lines up, so the report names the flag that is really missing.
+    golden = c.ExecResult(columns=_FLAG_COLUMNS, rows=_FLAG_ROWS)
+    generated = _flags_selected_as(["region", "is_verified"], labels=["region", "verified"])
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.unmatched_golden_columns == ("is_active",)
+    assert score.column_pairs == (("region", "region"), ("is_verified", "verified"))
+
+
+_SEVEN_FLAGS = [f"flag_{k}" for k in range(7)]
+# Seven flags, each true on four rows of eight and each on different rows, beside a row name.
+_SEVEN_ROWS = [(f"r{row}", *((row + k) % 8 < 4 for k in range(7))) for row in range(8)]
+
+
+def _seven_flags_renamed_and_rotated():
+    """The seven flags renamed, each selected in the next one's place."""
+    golden = c.ExecResult(columns=["name", *_SEVEN_FLAGS], rows=_SEVEN_ROWS)
+    rotated = [0, *range(2, 8), 1]
+    rows = [tuple(row[i] for i in rotated) for row in reversed(_SEVEN_ROWS)]
+    return golden, c.ExecResult(columns=["n", *(f"f{k}" for k in range(7))], rows=rows)
+
+
+def test_a_class_too_large_to_search_keeps_the_rule_s_pairing_and_completes():
+    # Seven equal columns can pair in 5,040 ways, past the cap, so the class keeps the in-order
+    # pairing. Every flag then takes the next one's partner and the score stays below 1.0: the limit.
+    golden, generated = _seven_flags_renamed_and_rotated()
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.status == "scored" and score.accuracy < 1.0
+    assert score.column_pairs == (("name", "n"), *((f"flag_{k}", f"f{k}") for k in range(7)))
+
+
+def test_the_same_class_lines_up_when_the_cap_allows_the_search(monkeypatch):
+    monkeypatch.setattr(c, "_ASSIGNMENT_CAP", 5040)
+    golden, generated = _seven_flags_renamed_and_rotated()
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+
+
+def _seven_flags_relabelled():
+    """The seven flags with their labels rotated: pairing by names misaligns every row, and the
+    plain in-order pairing lines them all up."""
+    golden = c.ExecResult(columns=["name", *_SEVEN_FLAGS], rows=_SEVEN_ROWS)
+    relabelled = ["name", *_SEVEN_FLAGS[1:], _SEVEN_FLAGS[0]]
+    return golden, c.ExecResult(columns=relabelled, rows=list(reversed(_SEVEN_ROWS)))
+
+
+def test_a_class_too_large_to_search_still_falls_back_from_names_to_column_order():
+    # Seven equal columns are past the assignment cap, so the class is not searched and the fallback
+    # is all that is left: the names pair `flag_0` with the column labelled `flag_0`, which holds
+    # `flag_6`'s values, and misalign every row. The plain in-order pairing lines them all up, so it
+    # replaces the names. Nothing else on this branch exercises that fallback, because a class the
+    # search takes reaches the same pairing on its own.
+    golden, generated = _seven_flags_relabelled()
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert score.column_pairs == (
+        ("name", "name"), *((f"flag_{k}", f"flag_{(k + 1) % 7}") for k in range(7))
+    )
+
+
+def _one_flag_against_many(width):
+    """One golden flag against `width` generated flags that hold the same values as a set, only one
+    of them on the same rows. Nothing but a search can tell which."""
+    rows = [(f"r{row}", row % 2 == 0) for row in range(8)]
+    golden = c.ExecResult(columns=["key", "is_active"], rows=rows)
+    # `c0` is true on the first four rows; only the last column is true on the golden column's rows.
+    generated_rows = [
+        (row[0], *[(position < 4) if k < width - 1 else row[1] for k in range(width)])
+        for position, row in enumerate(reversed(rows))
+    ]
+    columns = ["key", *(f"c{k}" for k in range(width))]
+    return golden, c.ExecResult(columns=columns, rows=generated_rows)
+
+
+def test_a_wide_shallow_class_is_searched_and_lines_the_rows_up():
+    # The assignment cap counts assignments, and 40 options at one slot is only 40 of them. So the
+    # class is searched, one column deep and forty wide, and the descent reads the result once per
+    # option to find the one that lines the rows up. That is what the search costs for a wide class,
+    # and it is bounded by the generated columns, since an option is one of them.
+    golden, generated = _one_flag_against_many(40)
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert score.column_pairs == (("key", "key"), ("is_active", "c39"))
+
+
+def _rotated_result(rows):
+    """A right answer of six columns holding one pool of values, every column renamed and selected
+    in the next one's place. Nothing outside the class holds the rows together, so every option at
+    the first slot lines up every row: the descent chooses on column order alone, which is wrong
+    here by construction, and only backtracking reaches the answer."""
+    numbers = random.Random(3)
+    columns = [numbers.sample(range(rows), rows) for _ in range(6)]
+    golden_rows = [tuple(column[row] for column in columns) for row in range(rows)]
+    rotated = [*range(1, 6), 0]
+    return (
+        c.ExecResult(columns=[f"p{k}" for k in range(6)], rows=golden_rows),
+        c.ExecResult(
+            columns=[f"q{k}" for k in range(6)],
+            rows=[tuple(row[k] for k in rotated) for row in reversed(golden_rows)],
+        ),
+    )
+
+
+@pytest.mark.parametrize("rows", [50, 500])
+def test_the_budget_lets_the_search_reach_a_right_answer_at_either_size(monkeypatch, rows):
+    # With no floor the budget is the rows alone, and a right answer is reached at both sizes.
+    monkeypatch.setattr(c, "_SEARCH_ROW_FLOOR", 0)
+    golden, generated = _rotated_result(rows)
+    assert c.compare_result_sets(golden, generated, match="values", ordered=False).accuracy == 1.0
+
+
+def test_a_budget_that_does_not_grow_with_the_rows_leaves_a_larger_result_short(monkeypatch):
+    # The bug this pins: the budget was a flat count, so it bought a hundred reads of a small result
+    # and a handful of a large one, and the search stopped before it could recover from a descent
+    # that went the wrong way. Here the flat budget is exactly what 50 rows earn. It is enough at 50
+    # rows and not at 500, which is why the budget counts reads of the result and not rows.
+    monkeypatch.setattr(c, "_SEARCH_ROW_FACTOR", 0)
+    monkeypatch.setattr(c, "_SEARCH_ROW_FLOOR", 100 * 50)
+    small = c.compare_result_sets(*_rotated_result(50), match="values", ordered=False)
+    large = c.compare_result_sets(*_rotated_result(500), match="values", ordered=False)
+    assert small.accuracy == 1.0
+    assert large.status == "scored" and large.accuracy < 1.0
+
+
+def _nothing_to_read(monkeypatch):
+    """Leave the search no rows to read once its first descent has ended."""
+    monkeypatch.setattr(c, "_SEARCH_ROW_FACTOR", 0)
+    monkeypatch.setattr(c, "_SEARCH_ROW_FLOOR", 0)
+
+
+@pytest.mark.parametrize(
+    "golden, generated",
+    _both_row_kinds(["tier", "is_staff", "is_active", "is_verified"], _TRIO),
+)
+def test_a_search_out_of_rows_to_read_still_finishes_its_first_descent(
+    monkeypatch, golden, generated
+):
+    # With nothing to spend, the search still pairs every column once, taking the branch that lines
+    # up the most rows each time, and here that is the right assignment. A large result used to run
+    # out of rows before it paired every column, so a right answer kept the rule's pairing and
+    # scored near 0.
+    _nothing_to_read(monkeypatch)
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert dict(score.column_pairs[1:]) == {
+        "is_active": "is_verified", "is_verified": "is_staff", "is_staff": "is_active"
+    }
+
+
+def test_a_search_out_of_rows_after_its_first_descent_keeps_the_best_it_has_found(monkeypatch):
+    # Every flag is True on one row and False on the other, so each first pairing lines up both
+    # rows, and the tie goes to column order. That branch pairs `is_active` with `f0` and lines up
+    # no row once every column is paired. With rows to read, the search goes on to the right
+    # assignment. With none, it stops there and keeps the rule's pairing, which completes.
+    golden = c.ExecResult(
+        columns=["tier", "is_active", "is_verified", "is_staff"],
+        rows=[("gold", False, True, True), ("gold", True, False, False)],
+    )
+    generated = c.ExecResult(
+        columns=["t", "f0", "f1", "f2"],
+        rows=[("gold", True, True, False), ("gold", False, False, True)],
+    )
+    assert c.compare_result_sets(golden, generated, match="values", ordered=False).accuracy == 1.0
+    _nothing_to_read(monkeypatch)
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.status == "scored" and score.accuracy < 1.0
+    assert score.column_pairs == (
+        ("tier", "t"), ("is_active", "f0"), ("is_verified", "f1"), ("is_staff", "f2")
+    )
+
+
+def test_a_repeated_row_lines_up_only_as_often_as_both_results_hold_it():
+    # No column names a row, and `gold` with True then False appears twice in the answer key. Either
+    # first pairing lines up all four rows, so the tie goes to column order and the wrong assignment
+    # completes first. Under it the generated rows hold that row once, and `gold` with False then True
+    # twice where the answer key holds it once. Counting each such row by the result that holds it
+    # more often would call all four rows lined up, and the right assignment would never be reached.
+    golden = c.ExecResult(
+        columns=["tier", "is_active", "is_verified"],
+        rows=[
+            ("gold", True, False),
+            ("gold", True, False),
+            ("gold", False, True),
+            ("silver", False, True),
+        ],
+    )
+    generated = c.ExecResult(
+        columns=["t", "f0", "f1"],
+        rows=[
+            ("silver", True, False),
+            ("gold", True, False),
+            ("gold", False, True),
+            ("gold", False, True),
+        ],
+    )
+    score = c.compare_result_sets(golden, generated, match="values", ordered=False)
+    assert score.accuracy == 1.0
+    assert score.column_pairs == (("tier", "t"), ("is_active", "f1"), ("is_verified", "f0"))
+
+
+def test_an_ordered_comparison_never_searches(monkeypatch):
+    # Equal vectors are equal row for row when the order counts, so any choice lines up the same
+    # rows. The pairing is by names first and then in order, exactly as before the search.
+    def no_search(*_args, **_kwargs):
+        raise AssertionError("an ordered comparison searched")
+
+    monkeypatch.setattr(c, "_line_up_equal_columns", no_search)
+    rows = [(True, True, False), (True, True, True), (False, False, True), (False, False, False)]
+    golden = c.ExecResult(columns=["a", "b", "c"], rows=rows)
+    # `b` and `x` hold the flag `a` and `b` share, and `a` holds `c`'s. `b` takes its namesake, then
+    # `a` takes the first equal column left, and `c` pairs with the column labelled `a`.
+    generated = c.ExecResult(columns=["b", "x", "a"], rows=rows)
+    score = c.compare_result_sets(golden, generated, match="values", ordered=True)
+    assert score.accuracy == 1.0
+    assert score.column_pairs == (("a", "x"), ("b", "b"), ("c", "a"))
 
 
 # --- a column that could agree with most columns by chance ------------------------------------------
