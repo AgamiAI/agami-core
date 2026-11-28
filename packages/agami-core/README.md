@@ -94,3 +94,5 @@ views), and every environment variable — lives in the docs rather than here:
 - **Homepage** — [agami.ai](https://agami.ai)
 - **License** — fair-code (source-available), the Agami Functional Use License. Self-hosting for your
   own organization is free; serving people outside it needs a commercial license.
+
+<!-- mcp-name: ai.agami/agami-core -->
